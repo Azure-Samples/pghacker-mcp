@@ -1,0 +1,22 @@
+{
+  "name": "pghacker-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A blank local browser application built on PilotSwarm.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "start": "node scripts/start.mjs",
+    "stop": "node scripts/stop.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "pilotswarm": "file:dist-tarballs/pilotswarm-0.8.2.tgz",
+    "pilotswarm-horizon-store": "file:dist-tarballs/pilotswarm-horizon-store-0.8.2.tgz",
+    "pilotswarm-sdk": "file:dist-tarballs/pilotswarm-sdk-0.8.2.tgz"
+  }
+}

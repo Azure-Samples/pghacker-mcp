@@ -1,0 +1,19 @@
+{
+  "name": "pghacker-mcp",
+  "version": "0.1.0",
+  "description": "Blank pghacker-mcp application.",
+  "portal": {
+    "branding": {
+      "title": "pghacker-mcp",
+      "pageTitle": "pghacker-mcp",
+      "splash": "pghacker-mcp"
+    },
+    "ui": {
+      "loadingMessage": "Starting pghacker-mcp",
+      "loadingCopy": "Connecting to the local runtime."
+    },
+    "auth": {
+      "provider": "none"
+    }
+  }
+}
