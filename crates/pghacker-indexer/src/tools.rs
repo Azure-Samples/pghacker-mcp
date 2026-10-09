@@ -32,8 +32,8 @@ const DESTRUCTIVE: Effect = Effect::Write {
 };
 
 pub const INSTRUCTIONS: &str = "pghacker-indexer: tools for crawler sessions that build the pghacker corpus. \
-Sources (add_source, list_sources, remove_source) choose mailing lists and PostgreSQL versions; workers then \
-retrieve, parse, embed and graph them; ingest_status shows progress. Extraction: next_extraction_batch leases \
+Sources (add_source, list_sources, remove_source) choose mailing lists, their months and whether to follow them, \
+and PostgreSQL versions; workers then retrieve, parse, embed and graph them; ingest_status shows progress. Extraction: next_extraction_batch leases \
 threads, read_messages pages through long ones, match_extracts compares your draft features and decisions with \
 existing ones, and submit_extracts saves a thread's features, decisions and positions with verbatim citations. \
 find_duplicates, mark_distinct, merge_authors, merge_extracts and undo_merge repair the corpus.";
@@ -41,9 +41,13 @@ find_duplicates, mark_distinct, merge_authors, merge_extracts and undo_merge rep
 pub static TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "add_source",
-        description: "Adds a source and queues its retrieval: a mailing list (kind mailing_list, name pgsql-hackers) \
-            or a PostgreSQL version's code (kind postgres_version, name 19; branch, sha and paths default to the \
-            configured test slice). Idempotent. Wave 1 retrieves only the configured test slices.",
+        description: "Adds a source and queues its retrieval; idempotent. A mailing list (kind mailing_list, name \
+            such as pgsql-hackers): chosen months, a range (from, to), or, with neither and no seed_threads, the \
+            WHOLE archive (decades of mail, and extraction of every thread: confirm that scope with the user \
+            first); seed_threads add whole threads; follow retrieves the current month again every hour. A \
+            PostgreSQL version's code (kind postgres_version, name 19 or master): a branch or tag (default \
+            REL_<n>_STABLE, or master), its current commit or a given sha, the whole tree or chosen paths. \
+            list_sources says what this deployment allows: the configured test slices only, or any source.",
         effect: WRITE,
         schema: schema::<AddSourceArgs>,
     },
@@ -55,7 +59,8 @@ pub static TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "list_sources",
-        description: "Lists sources with their jobs, and the lists and versions that can be added.",
+        description: "Lists sources with their jobs and configuration (such as follow), and what can be added: \
+            the configured test slices only, or any list and version.",
         effect: READ,
         schema: schema::<NoArgs>,
     },

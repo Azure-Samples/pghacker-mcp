@@ -21,8 +21,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Creates or updates the roles, extensions, schema and graph (as the
-    /// administrator: PGHACKER_ADMIN_DATABASE_URL), then migrates.
+    /// Creates the database if it's missing, then the roles, extensions,
+    /// schema and graph (as the administrator: PGHACKER_ADMIN_DATABASE_URL),
+    /// then migrates.
     Bootstrap,
     /// Migrates, then runs the job workers and the MCP server.
     Serve,
@@ -63,7 +64,11 @@ async fn main() -> Result<()> {
 }
 
 async fn bootstrap(env: &Env) -> Result<()> {
-    let mut admin = db::connect(&env.admin_database_url()?, "pghacker-indexer")
+    let admin_url = env.admin_database_url()?;
+    migrate::create_database_if_missing(&admin_url)
+        .await
+        .context("bootstrap creates the database")?;
+    let mut admin = db::connect(&admin_url, "pghacker-indexer")
         .await
         .context("bootstrap connects as the administrator")?;
     migrate::bootstrap(&mut admin, &env.passwords()?).await?;

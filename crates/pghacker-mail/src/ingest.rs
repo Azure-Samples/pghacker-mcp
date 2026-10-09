@@ -12,7 +12,7 @@ use serde::Serialize;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
 
-use crate::client::ArchiveClient;
+use crate::client::{ArchiveClient, Mbox};
 use crate::mbox;
 use crate::parse::{self, ParsedMessage, normalize_message_id};
 use crate::store::{self, StoreContext, Stored};
@@ -36,10 +36,15 @@ pub struct IngestStats {
     pub failed: usize,
     /// Threads that gained messages.
     pub threads_touched: usize,
+    /// The month hasn't changed since it was ingested in full.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 /// Retrieves `list`'s mbox for `month` (YYYY-MM; again if `refresh` and the
-/// month is not complete) and stores the messages not stored yet.
+/// month is not complete) and stores the messages not stored yet. Once all
+/// are stored, the archive client records it, so that an unchanged month
+/// needn't be retrieved again.
 pub async fn ingest_mbox_month(
     pool: &Pool,
     client: &ArchiveClient,
@@ -49,7 +54,16 @@ pub async fn ingest_mbox_month(
     refresh: bool,
 ) -> Result<IngestStats> {
     let started = Instant::now();
-    let data = Arc::new(client.mbox_month(list, month, refresh).await?);
+    let data = match client.mbox_month(list, month, refresh).await? {
+        Mbox::Data(data) => Arc::new(data),
+        Mbox::Unchanged => {
+            tracing::debug!(%list, %month, "the month hasn't changed since it was ingested");
+            return Ok(IngestStats {
+                unchanged: true,
+                ..Default::default()
+            });
+        }
+    };
     let ranges = {
         let data = data.clone();
         tokio::task::spawn_blocking(move || mbox::ranges(&data)).await?
@@ -113,6 +127,9 @@ pub async fn ingest_mbox_month(
         store_batch(pool, &ctx, &messages, &mut stats, &mut touched).await?;
     }
     stats.threads_touched = touched.len();
+    if stats.failed == 0 {
+        client.mark_mbox_ingested(list, month).await?;
+    }
     tracing::info!(
         %list,
         %month,

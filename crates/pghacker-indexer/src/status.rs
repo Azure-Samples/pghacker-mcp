@@ -1,11 +1,15 @@
 //! `ingest_status`: what each source has retrieved, parsed, embedded and
-//! extracted, and the graph's size.
+//! extracted, and the graph's size. Months are summarized per list, with the
+//! unfinished and latest ones in detail: a whole archive has hundreds.
 
 use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::Indexer;
 use crate::jobs::kind;
+
+/// The months detailed: unfinished first, then the latest.
+const MONTHS_LISTED: i64 = 24;
 
 pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
     let client = indexer.pool.get().await?;
@@ -32,17 +36,43 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
         .collect();
     let months: Vec<Value> = client
         .query(
-            "SELECT j.payload->>'month', j.state, j.result, j.last_error,
-                    (SELECT count(*) FROM messages m WHERE m.archive_month = j.payload->>'month')
-             FROM jobs j WHERE j.kind = $1 ORDER BY j.payload->>'month'",
+            "WITH counts AS (
+                 SELECT list, archive_month, count(*) AS n FROM messages
+                 WHERE archive_month IS NOT NULL GROUP BY list, archive_month)
+             SELECT j.payload->>'list', j.payload->>'month', j.state, j.result, j.last_error, coalesce(c.n, 0)
+             FROM jobs j
+             LEFT JOIN counts c ON c.list = j.payload->>'list' AND c.archive_month = j.payload->>'month'
+             WHERE j.kind = $1
+             ORDER BY j.state = 'done', j.payload->>'month' DESC, j.payload->>'list'
+             LIMIT $2",
+            &[&kind::MBOX_MONTH, &MONTHS_LISTED],
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            json!({ "list": row.get::<_, Option<String>>(0), "month": row.get::<_, Option<String>>(1),
+                    "state": row.get::<_, String>(2), "stats": row.get::<_, Option<Value>>(3),
+                    "error": row.get::<_, Option<String>>(4), "messages": row.get::<_, i64>(5) })
+        })
+        .collect();
+    let lists: Vec<Value> = client
+        .query(
+            "SELECT s.name, coalesce((s.config->>'follow')::boolean, false), s.enabled,
+                    count(j.*) FILTER (WHERE j.state = 'done'), count(j.*) FILTER (WHERE j.state = 'queued'),
+                    count(j.*) FILTER (WHERE j.state = 'running'), count(j.*) FILTER (WHERE j.state = 'failed'),
+                    min(j.payload->>'month'), max(j.payload->>'month')
+             FROM sources s LEFT JOIN jobs j ON j.source_id = s.id AND j.kind = $1
+             WHERE s.kind = 'mailing_list' GROUP BY s.id ORDER BY s.name",
             &[&kind::MBOX_MONTH],
         )
         .await?
         .iter()
         .map(|row| {
-            json!({ "month": row.get::<_, Option<String>>(0), "state": row.get::<_, String>(1),
-                    "stats": row.get::<_, Option<Value>>(2), "error": row.get::<_, Option<String>>(3),
-                    "messages": row.get::<_, i64>(4) })
+            json!({ "list": row.get::<_, String>(0), "follow": row.get::<_, bool>(1),
+                    "enabled": row.get::<_, bool>(2),
+                    "months": { "done": row.get::<_, i64>(3), "queued": row.get::<_, i64>(4),
+                                "running": row.get::<_, i64>(5), "failed": row.get::<_, i64>(6),
+                                "first": row.get::<_, Option<String>>(7), "last": row.get::<_, Option<String>>(8) } })
         })
         .collect();
     let seeds: Vec<Value> = client
@@ -119,6 +149,7 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
     Ok(json!({
         "jobs": jobs,
         "mail": {
+            "lists": lists,
             "months": months,
             "seed_threads": seeds,
             "messages": counts.get::<_, i64>(0),
@@ -133,6 +164,7 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
             "embedded": embedded,
         },
         "extraction": {
+            "scheduler": if indexer.settings.extraction_automatic { "automatic" } else { "manual" },
             "threads_pending": counts.get::<_, i64>(6),
             "threads_extracted": counts.get::<_, i64>(7),
             "threads_skipped": counts.get::<_, i64>(8),

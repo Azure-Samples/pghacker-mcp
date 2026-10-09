@@ -1,7 +1,9 @@
 //! Bootstrap and migrations on a fresh database, and what each role may do.
 
-use pghacker_core::migrate;
+use pghacker_core::config::{Env, with_credentials, with_database};
 use pghacker_core::testing::TestDb;
+use pghacker_core::{db, migrate};
+use tokio_postgres::error::SqlState;
 
 #[tokio::test]
 async fn bootstrap_and_migrations_are_idempotent() {
@@ -139,4 +141,59 @@ async fn the_indexer_writes_the_graph_and_the_reader_queries_it_read_only() {
         )
         .await;
     assert!(refused.is_err());
+}
+
+/// The bootstrap of a database it creates, with PilotSwarm's own role: it
+/// creates its schemas and can't read schema pghacker.
+#[tokio::test]
+async fn bootstrap_creates_the_database_and_a_least_privileged_swarm_role() {
+    let env = Env::local().unwrap();
+    let admin = env.admin_database_url().unwrap();
+    let name = format!("pgh_test_{}", uuid::Uuid::new_v4().simple());
+    let url = with_database(&admin, &name).unwrap();
+    assert!(migrate::create_database_if_missing(&url).await.unwrap());
+    let result = async {
+        assert!(!migrate::create_database_if_missing(&url).await?);
+        let mut passwords = env.passwords()?;
+        let swarm_password = format!("swarm-{}", uuid::Uuid::new_v4().simple());
+        passwords.swarm = Some(swarm_password.clone());
+        let mut client = db::connect(&url, "pghacker-test").await?;
+        migrate::bootstrap(&mut client, &passwords).await?;
+        let indexer_url = with_database(&env.indexer_database_url()?, &name)?;
+        migrate::migrate(&mut db::connect(&indexer_url, "pghacker-test").await?).await?;
+
+        let swarm = db::connect(
+            &with_credentials(&url, "pgh_swarm", &swarm_password)?,
+            "pghacker-test",
+        )
+        .await?;
+        swarm
+            .batch_execute("CREATE SCHEMA swarm_owned; CREATE TABLE swarm_owned.t (x int);")
+            .await?;
+        let denied = swarm
+            .query("SELECT count(*) FROM pghacker.messages", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code(), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
+        let setting: Option<String> = client
+            .query_one(
+                "SELECT (SELECT s FROM pg_db_role_setting d, unnest(d.setconfig) s
+                         WHERE d.setrole = 'pgh_reader'::regrole AND d.setdatabase = 0
+                           AND s LIKE 'hnsw.ef_search=%')",
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(setting.as_deref(), Some("hnsw.ef_search=100"));
+        anyhow::Ok(())
+    }
+    .await;
+    let maintenance = db::connect(&with_database(&admin, "postgres").unwrap(), "pghacker-test")
+        .await
+        .unwrap();
+    maintenance
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    result.unwrap();
 }

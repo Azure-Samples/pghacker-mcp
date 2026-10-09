@@ -7,16 +7,19 @@ use anyhow::{Context, Result, bail};
 use include_dir::{Dir, include_dir};
 use sha2::{Digest, Sha256};
 use tokio_postgres::Client;
+use tokio_postgres::error::SqlState;
 
 static MIGRATIONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../migrations");
 const ROLES: &str = include_str!("../sql/roles.sql");
 const DATABASE: &str = include_str!("../sql/database.sql");
 
-/// The two roles' passwords.
+/// The roles' passwords: pgh_indexer's and pgh_reader's, and pgh_swarm's
+/// when PilotSwarm gets a role of its own rather than the administrator's.
 #[derive(Clone)]
 pub struct Passwords {
     pub indexer: String,
     pub reader: String,
+    pub swarm: Option<String>,
 }
 
 impl std::fmt::Debug for Passwords {
@@ -35,39 +38,98 @@ pub async fn bootstrap(admin: &mut Client, passwords: &Passwords) -> Result<()> 
 /// The cluster's roles. Concurrent bootstraps can collide on the roles'
 /// catalog rows, so this retries.
 pub async fn bootstrap_roles(admin: &mut Client, passwords: &Passwords) -> Result<()> {
+    let swarm = passwords.swarm.clone().unwrap_or_default();
+    retry_races(admin, async |admin: &mut Client| {
+        let tx = admin.transaction().await?;
+        tx.execute(
+            "SELECT set_config('pghacker.indexer_password', $1, true), \
+                    set_config('pghacker.reader_password', $2, true), \
+                    set_config('pghacker.swarm_password', $3, true)",
+            &[&passwords.indexer, &passwords.reader, &swarm],
+        )
+        .await?;
+        tx.batch_execute(ROLES).await?;
+        tx.commit().await
+    })
+    .await
+    .context("cannot create the roles")
+}
+
+/// Runs `step` in its own transactions until it doesn't collide with a
+/// concurrent bootstrap on the cluster's shared catalogs, up to 5 times.
+async fn retry_races(
+    admin: &mut Client,
+    step: impl AsyncFn(&mut Client) -> std::result::Result<(), tokio_postgres::Error>,
+) -> std::result::Result<(), tokio_postgres::Error> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        let result = async {
-            let tx = admin.transaction().await?;
-            tx.execute(
-                "SELECT set_config('pghacker.indexer_password', $1, true), \
-                        set_config('pghacker.reader_password', $2, true)",
-                &[&passwords.indexer, &passwords.reader],
-            )
-            .await?;
-            tx.batch_execute(ROLES).await?;
-            tx.commit().await
-        }
-        .await;
-        match result {
-            Ok(()) => return Ok(()),
+        match step(admin).await {
             Err(error) if attempt < 5 && is_race(&error) => {
                 tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
             }
-            Err(error) => return Err(error).context("cannot create the roles"),
+            result => return result,
         }
     }
 }
 
+/// Creates the database of `admin_url` unless it exists, from the server's
+/// `postgres` database. Returns whether it created it.
+pub async fn create_database_if_missing(admin_url: &str) -> Result<bool> {
+    let config: tokio_postgres::Config =
+        admin_url.parse().context("the database URL is invalid")?;
+    let name = config
+        .get_dbname()
+        .or(config.get_user())
+        .context("the administrator's URL names no database")?
+        .to_owned();
+    match crate::db::connect(admin_url, "pghacker-bootstrap").await {
+        Ok(_) => return Ok(false),
+        Err(error) if !is_missing_database(&error) => return Err(error),
+        Err(_) => {}
+    }
+    let maintenance = crate::db::connect(
+        &crate::config::with_database(admin_url, "postgres")?,
+        "pghacker-bootstrap",
+    )
+    .await?;
+    match maintenance
+        .batch_execute(&format!("CREATE DATABASE {}", quote_ident(&name)))
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(database = %name, "created the database");
+            Ok(true)
+        }
+        // Another bootstrap created it first.
+        Err(error) if error.code() == Some(&SqlState::DUPLICATE_DATABASE) => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot create the database {name}")),
+    }
+}
+
+fn is_missing_database(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<tokio_postgres::Error>()
+            .and_then(tokio_postgres::Error::code)
+            == Some(&SqlState::INVALID_CATALOG_NAME)
+    })
+}
+
+/// `name` as an SQL identifier.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// The database's extensions, schema, graph, labels and grants.
 pub async fn bootstrap_database(admin: &mut Client) -> Result<()> {
-    let tx = admin.transaction().await?;
-    tx.batch_execute(DATABASE)
-        .await
-        .context("cannot bootstrap the database")?;
-    tx.commit().await?;
-    Ok(())
+    retry_races(admin, async |admin: &mut Client| {
+        let tx = admin.transaction().await?;
+        tx.batch_execute(DATABASE).await?;
+        tx.commit().await
+    })
+    .await
+    .context("cannot bootstrap the database")
 }
 
 /// Whether `error` is a collision with a concurrent bootstrap.

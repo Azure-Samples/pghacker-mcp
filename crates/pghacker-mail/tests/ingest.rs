@@ -22,6 +22,7 @@ fn offline_client(cache: &Path) -> ArchiveClient {
         requests_per_second: 100.0,
         cache_dir: cache.to_path_buf(),
         user_agent: "pghacker-mail tests".into(),
+        keep_mbox: true,
     })
     .unwrap()
 }

@@ -123,6 +123,11 @@ fn in_paths(path: &str, prefixes: &[String]) -> bool {
         })
 }
 
+/// Where a [`RepoSource::Remote`] fetch of `repo` at `sha` goes in `cache_dir`.
+pub fn remote_clone_dir(cache_dir: &Path, repo: &str, sha: &str) -> PathBuf {
+    cache_dir.join(format!("{repo}-{sha}.git"))
+}
+
 /// The repository with the spec's commit, fetching it if needed (blocking).
 fn open_repo(spec: &SnapshotSpec) -> Result<gix::Repository> {
     let id = ObjectId::from_hex(spec.sha.as_bytes())
@@ -136,7 +141,7 @@ fn open_repo(spec: &SnapshotSpec) -> Result<gix::Repository> {
             Ok(repo)
         }
         RepoSource::Remote { url, cache_dir } => {
-            let dir = cache_dir.join(format!("{}-{}.git", spec.repo, spec.sha));
+            let dir = remote_clone_dir(cache_dir, &spec.repo, &spec.sha);
             if dir.exists() {
                 if let Ok(repo) = gix::open(&dir)
                     && repo.find_commit(id).is_ok()

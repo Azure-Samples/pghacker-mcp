@@ -14,7 +14,7 @@
 //! - `max_rows` is 100 by default and at most 1,000.
 //! - The statement timeout is 5 seconds, and the call as a whole has a
 //!   deadline of its own, [`CALL_TIMEOUT`].
-//! - The pool is pghacker-core's, over pgh_reader's URL and without TLS, and
+//! - The pool is pghacker-core's, over pgh_reader's URL with its TLS, and
 //!   the call waits for a connection with a tokio timeout rather than the
 //!   pool's.
 //! - A dropped call's cancel task isn't spawned outside a tokio runtime.
@@ -31,7 +31,6 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
-use tokio_postgres::NoTls;
 
 use crate::QueryArgs;
 use crate::execute::{QueryResponse, run_readonly_query};
@@ -378,8 +377,8 @@ impl Drop for Checkout {
             return;
         };
         runtime.spawn(async move {
-            if let Err(error) = cancel.cancel_query(NoTls).await {
-                tracing::debug!(%error, "couldn't cancel a query's statement");
+            if let Err(error) = db::cancel_query(&cancel).await {
+                tracing::debug!(error = %format!("{error:#}"), "couldn't cancel a query's statement");
             }
             drop(connection);
         });

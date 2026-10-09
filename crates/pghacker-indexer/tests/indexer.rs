@@ -121,7 +121,7 @@ async fn sources_queue_the_test_slices() {
     let added = sources::add_source(&indexer, args(list.clone()))
         .await
         .unwrap();
-    let queued = added["jobs_queued"].as_array().unwrap().len();
+    let queued = added["jobs_queued"].as_u64().unwrap() as usize;
     assert_eq!(
         queued,
         indexer.slices.mail.months.len() + indexer.slices.mail.seed_threads.len()
@@ -129,9 +129,17 @@ async fn sources_queue_the_test_slices() {
     let again = sources::add_source(&indexer, args(list.clone()))
         .await
         .unwrap();
-    assert!(again["jobs_queued"].as_array().unwrap().is_empty());
+    assert_eq!(again["jobs_queued"], 0);
     let other = json!({ "kind": "mailing_list", "name": "pgsql-general" });
     assert!(sources::add_source(&indexer, args(other)).await.is_err());
+    let months = json!({ "kind": "mailing_list", "name": "pgsql-hackers", "months": ["2026-06"] });
+    let refused = sources::add_source(&indexer, args(months))
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("PGHACKER_SOURCES=open"),
+        "{refused}"
+    );
     let code = sources::add_source(
         &indexer,
         args(json!({ "kind": "postgres_version", "name": "19" })),
@@ -139,7 +147,7 @@ async fn sources_queue_the_test_slices() {
     .await
     .unwrap();
     assert_eq!(
-        code["jobs_queued"][0],
+        code["queued"][0],
         format!("postgres/{}", indexer.slices.code.sha)
     );
     let removed = sources::remove_source(&indexer, args(list)).await.unwrap();
@@ -848,4 +856,158 @@ async fn leases_show_commit_signals_and_reuse_never_downgrades_a_status() {
         .unwrap()
         .get(0);
     assert_eq!(status, "committed");
+}
+
+/// An HTTP server on a free port that answers `GET path` from `pages`, and
+/// 404 otherwise.
+async fn archive(pages: Vec<(&'static str, &'static str)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let pages = pages.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match socket.read(&mut byte).await {
+                        Ok(1) => head.push(byte[0]),
+                        _ => return,
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).into_owned();
+                let path = head.split(' ').nth(1).unwrap_or("").to_owned();
+                let (status, body) = pages
+                    .iter()
+                    .find(|(page, _)| *page == path)
+                    .map_or((404, "Not found"), |(_, body)| (200, *body));
+                let reply = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn open_sources_take_months_ranges_follows_and_commits() {
+    let db = TestDb::create().await.unwrap();
+    let base = archive(vec![(
+        "/list/pgsql-hackers/",
+        r#"<a href="/list/pgsql-hackers/2026-05/">May</a> <a href="/list/pgsql-hackers/2026-06/">June</a>
+           <a href="/list/pgsql-hackers/2026-07/">July</a>"#,
+    )])
+    .await;
+    let root = pghacker_core::config::repo_root().unwrap();
+    let cache = tempfile::tempdir().unwrap().keep();
+    let env = Env::from_pairs([
+        ("PGHACKER_INDEXER_DATABASE_URL", db.indexer_url.as_str()),
+        ("PGHACKER_SOURCES", "open"),
+        ("PGHACKER_ARCHIVE_BASE_URL", base.as_str()),
+        ("PGHACKER_HTTP_RATE", "100"),
+    ]);
+    let mut settings = Settings::from_env(&env).unwrap();
+    settings.slices_path = root.join("config/test-slices.toml");
+    settings.cache_dir = cache.clone();
+    settings.git_dir = cache;
+    let indexer = Indexer::new(settings, &env).unwrap();
+
+    let range = json!({ "kind": "mailing_list", "name": "pgsql-hackers", "from": "2026-06" });
+    let added = sources::add_source(&indexer, args(range)).await.unwrap();
+    assert_eq!(added["jobs_queued"], 2);
+    assert_eq!(
+        added["queued"],
+        json!(["pgsql-hackers/2026-07", "pgsql-hackers/2026-06"])
+    );
+    assert_eq!(added["months"]["archive"]["first"], "2026-05");
+    assert_eq!(added["source"]["config"], json!({}));
+
+    let follow = json!({
+        "kind": "mailing_list", "name": "pgsql-hackers", "months": ["2026-05"], "follow": true,
+        "seed_threads": [{ "message_id": "<seed@example.org>", "topic": "a seed" }],
+    });
+    let added = sources::add_source(&indexer, args(follow)).await.unwrap();
+    assert_eq!(
+        added["queued"],
+        json!([
+            "pgsql-hackers/thread/seed@example.org",
+            "pgsql-hackers/2026-05"
+        ])
+    );
+    assert_eq!(added["source"]["config"]["follow"], true);
+    // follow stays until it's set again.
+    let again = json!({ "kind": "mailing_list", "name": "pgsql-hackers", "months": ["2026-07"] });
+    let added = sources::add_source(&indexer, args(again)).await.unwrap();
+    assert_eq!(added["jobs_queued"], 0);
+    assert_eq!(added["source"]["config"]["follow"], true);
+
+    let missing = json!({ "kind": "mailing_list", "name": "pgsql-nothing" });
+    let error = sources::add_source(&indexer, args(missing))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no mailing list"), "{error}");
+    let outside = json!({ "kind": "mailing_list", "name": "pgsql-hackers", "months": ["2025-01"] });
+    assert!(sources::add_source(&indexer, args(outside)).await.is_err());
+
+    // The hourly refresh queues the followed list's current month again once it's done.
+    let client = db.indexer().await.unwrap();
+    let now = "2026-07-01T10:00:00Z".parse().unwrap();
+    assert!(
+        sources::refresh_followed(&client, now)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    client
+        .execute(
+            "UPDATE jobs SET state = 'done' WHERE kind = 'mbox_month'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sources::refresh_followed(&client, now).await.unwrap(),
+        ["pgsql-hackers/2026-06", "pgsql-hackers/2026-07"]
+    );
+    let refresh: Value = client
+        .query_one(
+            "SELECT payload FROM jobs WHERE key = 'pgsql-hackers/2026-07' AND state = 'queued'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(refresh["refresh"], true);
+
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let code = json!({
+        "kind": "postgres_version", "name": "18", "branch": "REL_18_STABLE", "sha": sha,
+        "paths": ["src/backend/parser"],
+    });
+    let added = sources::add_source(&indexer, args(code)).await.unwrap();
+    assert_eq!(added["queued"], json!([format!("postgres/{sha}")]));
+    assert_eq!(
+        added["source"]["config"]["paths"],
+        json!(["src/backend/parser"])
+    );
+    let bad = json!({ "kind": "postgres_version", "name": "18", "sha": sha, "paths": ["../etc"] });
+    assert!(sources::add_source(&indexer, args(bad)).await.is_err());
+    let foreign = json!({
+        "kind": "postgres_version", "name": "18", "sha": sha,
+        "repo_url": "https://example.org/postgres.git",
+    });
+    assert!(sources::add_source(&indexer, args(foreign)).await.is_err());
+    let listed = sources::list_sources(&indexer).await.unwrap();
+    assert_eq!(listed["available"]["mode"], "open");
+
+    let status = pghacker_indexer::status::ingest_status(&indexer)
+        .await
+        .unwrap();
+    assert_eq!(status["mail"]["lists"][0]["follow"], true);
+    assert_eq!(status["mail"]["lists"][0]["months"]["queued"], 2);
+    assert_eq!(status["extraction"]["scheduler"], "manual");
 }

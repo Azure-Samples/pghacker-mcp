@@ -105,11 +105,12 @@ impl Env {
         )
     }
 
-    /// The roles' passwords, for bootstrap.
+    /// The roles' passwords, for bootstrap; pgh_swarm's is optional.
     pub fn passwords(&self) -> Result<crate::migrate::Passwords> {
         Ok(crate::migrate::Passwords {
             indexer: self.require("PGH_INDEXER_PASSWORD")?.to_owned(),
             reader: self.require("PGH_READER_PASSWORD")?.to_owned(),
+            swarm: self.get("PGH_SWARM_PASSWORD").map(str::to_owned),
         })
     }
 

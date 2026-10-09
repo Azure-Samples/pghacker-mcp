@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use pghacker_core::config::Env;
 
+use crate::sources::SourcesMode;
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// pgh_indexer's URL.
@@ -23,6 +25,15 @@ pub struct Settings {
     /// Accepted Host headers, comma-separated, `*` for any:
     /// `PGHACKER_ALLOWED_HOSTS`. Unset keeps loopback only.
     pub allowed_hosts: Option<Vec<String>>,
+    /// What add_source may add: `PGHACKER_SOURCES`, `test-slices` (the
+    /// default) or `open`.
+    pub sources: SourcesMode,
+    /// Whether a scheduler runs extraction sessions by itself:
+    /// `PGHACKER_EXTRACTION`, `manual` (the default) or `automatic`.
+    pub extraction_automatic: bool,
+    /// Whether downloads (months' mbox files, git clones) stay in the cache
+    /// once loaded: `PGHACKER_KEEP_DOWNLOADS`, true by default.
+    pub keep_downloads: bool,
 }
 
 impl Settings {
@@ -47,6 +58,15 @@ impl Settings {
                     .filter(|host| !host.is_empty())
                     .collect()
             }),
+            sources: env.get_or("PGHACKER_SOURCES", "test-slices").parse()?,
+            extraction_automatic: match env.get_or("PGHACKER_EXTRACTION", "manual").trim() {
+                "manual" => false,
+                "automatic" => true,
+                other => {
+                    anyhow::bail!("PGHACKER_EXTRACTION must be manual or automatic, not {other:?}")
+                }
+            },
+            keep_downloads: env.parse_or("PGHACKER_KEEP_DOWNLOADS", true)?,
         })
     }
 }

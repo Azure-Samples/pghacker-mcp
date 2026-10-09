@@ -39,6 +39,11 @@ serde_json = "1"
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 deadpool-postgres = "0.14"
+# PostgreSQL over TLS: rustls on aws-lc-rs, reqwest's provider, with Mozilla's roots.
+tokio-postgres-rustls = { version = "0.14", features = ["aws-lc-rs"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+webpki-roots = "1"
 pgvector = { version = "0.4", features = ["postgres", "halfvec"] }
 half = "2"
 sqlparser = { version = "0.63", default-features = false, features = ["std"] }

@@ -5,7 +5,9 @@
 //! The cache keeps raw messages and flat pages forever. A month's mbox is kept
 //! forever once it was retrieved after the month ended (plus a grace period
 //! for late deliveries); until then, `refresh` retrieves it again, with a
-//! conditional request when the archive sent validators.
+//! conditional request when the archive sent validators. Without
+//! `keep_mbox`, only the validators are kept: a month ingested in full is
+//! retrieved again only when it may have changed, and only if it did.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -49,6 +51,8 @@ pub struct ArchiveConfig {
     pub requests_per_second: f64,
     pub cache_dir: PathBuf,
     pub user_agent: String,
+    /// Whether months' mbox files stay in the cache once ingested.
+    pub keep_mbox: bool,
 }
 
 impl fmt::Debug for ArchiveConfig {
@@ -60,6 +64,7 @@ impl fmt::Debug for ArchiveConfig {
             .field("requests_per_second", &self.requests_per_second)
             .field("cache_dir", &self.cache_dir)
             .field("user_agent", &self.user_agent)
+            .field("keep_mbox", &self.keep_mbox)
             .finish()
     }
 }
@@ -67,8 +72,8 @@ impl fmt::Debug for ArchiveConfig {
 impl ArchiveConfig {
     /// `PGHACKER_ARCHIVE_BASE_URL` (default `https://www.postgresql.org`),
     /// `PGHACKER_ARCHIVE_USER` (`archives`), `PGHACKER_ARCHIVE_PASSWORD`
-    /// (`antispam`), `PGHACKER_HTTP_RATE` (2 requests per second) and
-    /// `PGHACKER_HTTP_USER_AGENT`.
+    /// (`antispam`), `PGHACKER_HTTP_RATE` (2 requests per second),
+    /// `PGHACKER_HTTP_USER_AGENT` and `PGHACKER_KEEP_DOWNLOADS` (true).
     pub fn from_env(env: &Env, cache_dir: PathBuf) -> Result<Self> {
         let config = Self {
             base_url: env
@@ -85,6 +90,7 @@ impl ArchiveConfig {
             user_agent: env
                 .get_or("PGHACKER_HTTP_USER_AGENT", DEFAULT_USER_AGENT)
                 .to_owned(),
+            keep_mbox: env.parse_or("PGHACKER_KEEP_DOWNLOADS", true)?,
         };
         config.validate()?;
         Ok(config)
@@ -147,6 +153,17 @@ struct MboxMeta {
     etag: Option<String>,
     last_modified: Option<String>,
     bytes: u64,
+    /// Every message of the retrieved mbox is stored.
+    #[serde(default)]
+    ingested: bool,
+}
+
+/// A month's mbox, or the news that it hasn't changed since it was ingested
+/// in full (when the cache doesn't keep mbox files).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Mbox {
+    Data(Vec<u8>),
+    Unchanged,
 }
 
 enum Fetched {
@@ -189,7 +206,9 @@ impl ArchiveClient {
 
     /// The mbox of `list` for `month` (YYYY-MM). A complete month comes from
     /// the cache; the current month is retrieved again when `refresh` is set.
-    pub async fn mbox_month(&self, list: &str, month: &str, refresh: bool) -> Result<Vec<u8>> {
+    /// Without `keep_mbox`, a month ingested in full is [`Mbox::Unchanged`]
+    /// unless a refresh finds that it changed.
+    pub async fn mbox_month(&self, list: &str, month: &str, refresh: bool) -> Result<Mbox> {
         validate_list(list)?;
         let (year, month_no) = parse_month(month)?;
         let url = format!(
@@ -203,6 +222,7 @@ impl ArchiveClient {
 
         let cached = tokio::fs::metadata(&path).await.is_ok();
         let mut meta = read_meta(&meta_path).await;
+        let ingested = !cached && meta.as_ref().is_some_and(|m| m.ingested);
         if cached {
             let fetched_at = match meta.as_ref().and_then(|m| m.fetched_at) {
                 Some(at) => Some(at),
@@ -210,20 +230,30 @@ impl ArchiveClient {
             };
             let complete = fetched_at.is_some_and(|at| at >= complete_at);
             if complete || (!refresh && now < complete_at) {
-                return read_file(&path).await;
+                return read_file(&path).await.map(Mbox::Data);
+            }
+        } else if ingested {
+            let fetched_at = meta.as_ref().and_then(|m| m.fetched_at);
+            let complete = fetched_at.is_some_and(|at| at >= complete_at);
+            if complete || !refresh {
+                return Ok(Mbox::Unchanged);
             }
         } else {
             meta = None;
         }
 
-        let validators = meta.as_ref().filter(|_| cached);
+        let validators = meta.as_ref().filter(|_| cached || ingested);
         match self.fetch(&url, validators).await? {
             Fetched::NotModified => {
                 tracing::debug!(%url, "the mbox has not changed");
                 let mut meta = meta.unwrap_or_default();
                 meta.fetched_at = Some(now);
                 write_meta(&meta_path, &meta).await?;
-                read_file(&path).await
+                if cached {
+                    read_file(&path).await.map(Mbox::Data)
+                } else {
+                    Ok(Mbox::Unchanged)
+                }
             }
             Fetched::Body {
                 bytes,
@@ -234,18 +264,48 @@ impl ArchiveClient {
                     bytes.is_empty() || bytes.starts_with(b"From "),
                     "{url} did not return an mbox"
                 );
-                write_atomic(&path, &bytes).await?;
+                if self.inner.config.keep_mbox {
+                    write_atomic(&path, &bytes).await?;
+                } else if cached {
+                    remove_file(&path).await?;
+                }
                 let meta = MboxMeta {
                     url,
                     fetched_at: Some(now),
                     etag,
                     last_modified,
                     bytes: bytes.len() as u64,
+                    ingested: false,
                 };
                 write_meta(&meta_path, &meta).await?;
-                Ok(bytes)
+                Ok(Mbox::Data(bytes))
             }
         }
+    }
+
+    /// Records that every message of `list`'s mbox for `month`, as last
+    /// retrieved, is stored, so that a month that doesn't change isn't
+    /// retrieved again when the cache doesn't keep mbox files.
+    pub async fn mark_mbox_ingested(&self, list: &str, month: &str) -> Result<()> {
+        let meta_path = self.mbox_path(list, month).with_extension("mbox.json");
+        if let Some(mut meta) = read_meta(&meta_path).await
+            && !meta.ingested
+        {
+            meta.ingested = true;
+            write_meta(&meta_path, &meta).await?;
+        }
+        Ok(())
+    }
+
+    /// The months the archive has for `list`, oldest first, from the list's
+    /// page; [`NotFound`] when the archive has no such list.
+    pub async fn list_months(&self, list: &str) -> Result<Vec<String>> {
+        validate_list(list)?;
+        let url = format!("{}/list/{list}/", self.inner.config.base_url);
+        let bytes = self.fetch_body(&url).await?;
+        let months = parse_list_months(&String::from_utf8_lossy(&bytes), list);
+        ensure!(!months.is_empty(), "{url} lists no months");
+        Ok(months)
     }
 
     /// The Message-IDs of the thread that contains `message_id`, oldest
@@ -475,6 +535,24 @@ pub fn encode_path_segment(segment: &str) -> String {
     out
 }
 
+/// The months (YYYY-MM) that a list's archive page links to, oldest first:
+/// links such as `/list/pgsql-hackers/2026-07/`.
+pub fn parse_list_months(html: &str, list: &str) -> Vec<String> {
+    let needle = format!("/list/{list}/");
+    let mut months = std::collections::BTreeSet::new();
+    let mut rest = html;
+    while let Some(at) = rest.find(&needle) {
+        rest = &rest[at + needle.len()..];
+        if let Some(month) = rest.get(..8)
+            && month.ends_with('/')
+            && parse_month(&month[..7]).is_ok()
+        {
+            months.insert(month[..7].to_owned());
+        }
+    }
+    months.into_iter().collect()
+}
+
 /// One request per interval, in arrival order, across all clones.
 struct RateLimiter {
     interval: Duration,
@@ -566,6 +644,14 @@ async fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
     Some(modified.into())
 }
 
+async fn remove_file(path: &Path) -> Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("cannot remove {}", path.display())),
+    }
+}
+
 async fn read_meta(path: &Path) -> Option<MboxMeta> {
     let bytes = tokio::fs::read(path).await.ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -623,6 +709,19 @@ mod tests {
             month_end(2026, 12).unwrap().to_rfc3339(),
             "2027-01-01T00:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn list_pages_link_their_months() {
+        let html = r#"<a href="/list/pgsql-hackers/2026-07/">July</a>
+            <a href="/list/pgsql-hackers/1997-06/">June</a><a href="/list/pgsql-hackers/2026-07/">again</a>
+            <a href="/list/pgsql-hackers/since/202607010000/">since</a>
+            <a href="/list/pgsql-general/2001-01/">another list</a><a href="/list/pgsql-hackers/2026-13/">bad</a>"#;
+        assert_eq!(
+            parse_list_months(html, "pgsql-hackers"),
+            ["1997-06", "2026-07"]
+        );
+        assert!(parse_list_months("<html></html>", "pgsql-hackers").is_empty());
     }
 
     #[test]

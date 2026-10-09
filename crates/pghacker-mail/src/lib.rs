@@ -25,4 +25,7 @@ pub mod patch;
 pub mod store;
 pub mod subject;
 
-pub use client::{ArchiveClient, ArchiveConfig, DEFAULT_USER_AGENT, NotFound, encode_path_segment};
+pub use client::{
+    ArchiveClient, ArchiveConfig, DEFAULT_USER_AGENT, Mbox, NotFound, encode_path_segment,
+    parse_list_months,
+};

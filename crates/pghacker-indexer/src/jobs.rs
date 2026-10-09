@@ -20,6 +20,7 @@ pub mod kind {
     pub const RESOLVE_ANCHORS: &str = "resolve_anchors";
     pub const GRAPH_SYNC: &str = "graph_sync";
     pub const REPAIR_STATS: &str = "repair_stats";
+    pub const MAIL_REFRESH: &str = "mail_refresh";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -28,6 +29,8 @@ pub const RECURRING: &[(&str, Duration)] = &[
     (kind::RESOLVE_ANCHORS, Duration::from_secs(60)),
     (kind::GRAPH_SYNC, Duration::from_secs(60)),
     (kind::REPAIR_STATS, Duration::from_secs(120)),
+    // Followed lists' current months, hourly.
+    (kind::MAIL_REFRESH, Duration::from_secs(3600)),
 ];
 
 /// Attempts of an ingest job whose messages partly failed (a deadlock with a
@@ -261,6 +264,18 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             let stats = pghacker_code::load_snapshot(&mut client, &spec).await?;
             wake(&**client, kind::RESOLVE_ANCHORS).await?;
             wake(&**client, kind::GRAPH_SYNC).await?;
+            if !indexer.settings.keep_downloads {
+                let clone = pghacker_code::remote_clone_dir(
+                    &indexer.settings.git_dir,
+                    &spec.repo,
+                    &spec.sha,
+                );
+                if let Err(error) = tokio::fs::remove_dir_all(&clone).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(path = %clone.display(), %error, "cannot remove a loaded clone");
+                }
+            }
             Ok(Outcome::Done(serde_json::to_value(stats)?))
         }
         kind::EMBED => {
@@ -297,6 +312,17 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             Ok(Outcome::Again {
                 after: recurring_interval(kind::REPAIR_STATS),
                 result: json!({ "repaired": repaired }),
+            })
+        }
+        kind::MAIL_REFRESH => {
+            let client = indexer.pool.get().await?;
+            let queued = crate::sources::refresh_followed(&**client, chrono::Utc::now()).await?;
+            if !queued.is_empty() {
+                tracing::info!(?queued, "refreshing followed lists");
+            }
+            Ok(Outcome::Again {
+                after: recurring_interval(kind::MAIL_REFRESH),
+                result: json!({ "queued": queued }),
             })
         }
         other => Err(anyhow!("unknown job kind {other}")),
@@ -375,6 +401,7 @@ const RECURRING_KINDS: &[&str] = &[
     kind::RESOLVE_ANCHORS,
     kind::GRAPH_SYNC,
     kind::REPAIR_STATS,
+    kind::MAIL_REFRESH,
 ];
 
 async fn worker_loop(
@@ -403,7 +430,7 @@ async fn worker_loop(
                 }
                 if !matches!(
                     job.kind.as_str(),
-                    kind::EMBED | kind::RESOLVE_ANCHORS | kind::GRAPH_SYNC
+                    kind::EMBED | kind::RESOLVE_ANCHORS | kind::GRAPH_SYNC | kind::MAIL_REFRESH
                 ) || !ok
                 {
                     tracing::info!(job = job.id, kind = %job.kind, key = %job.key, ok, ms = started.elapsed().as_millis() as u64, "job finished");

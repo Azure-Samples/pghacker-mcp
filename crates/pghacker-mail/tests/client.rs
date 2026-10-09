@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Utc};
-use pghacker_mail::{ArchiveClient, ArchiveConfig};
+use pghacker_mail::{ArchiveClient, ArchiveConfig, Mbox};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -115,8 +115,13 @@ fn client(base_url: &str, cache: &TempDir) -> ArchiveClient {
         requests_per_second: 50.0,
         cache_dir: cache.path().to_path_buf(),
         user_agent: "pghacker-mail tests".into(),
+        keep_mbox: true,
     })
     .unwrap()
+}
+
+fn data(bytes: &[u8]) -> Mbox {
+    Mbox::Data(bytes.to_vec())
 }
 
 fn scratch() -> TempDir {
@@ -230,14 +235,14 @@ async fn complete_months_come_from_the_cache() {
             .mbox_month("pgsql-hackers", "2026-05", false)
             .await
             .unwrap(),
-        MBOX_V1
+        data(MBOX_V1)
     );
     assert_eq!(
         client
             .mbox_month("pgsql-hackers", "2026-05", true)
             .await
             .unwrap(),
-        MBOX_V1
+        data(MBOX_V1)
     );
     let requests = log.lock().unwrap().clone();
     assert_eq!(requests.len(), 1);
@@ -281,7 +286,7 @@ async fn the_current_month_refreshes_conditionally() {
             .mbox_month("pgsql-hackers", &month, false)
             .await
             .unwrap(),
-        MBOX_V1
+        data(MBOX_V1)
     );
     // Without refresh, the cached copy.
     assert_eq!(
@@ -289,7 +294,7 @@ async fn the_current_month_refreshes_conditionally() {
             .mbox_month("pgsql-hackers", &month, false)
             .await
             .unwrap(),
-        MBOX_V1
+        data(MBOX_V1)
     );
     assert_eq!(log.lock().unwrap().len(), 1);
     // Refreshing asks whether it changed: not yet, then yes.
@@ -298,14 +303,14 @@ async fn the_current_month_refreshes_conditionally() {
             .mbox_month("pgsql-hackers", &month, true)
             .await
             .unwrap(),
-        MBOX_V1
+        data(MBOX_V1)
     );
     assert_eq!(
         client
             .mbox_month("pgsql-hackers", &month, true)
             .await
             .unwrap(),
-        MBOX_V2
+        data(MBOX_V2)
     );
     let requests = log.lock().unwrap().clone();
     assert_eq!(requests.len(), 3);
@@ -315,7 +320,7 @@ async fn the_current_month_refreshes_conditionally() {
             .mbox_month("pgsql-hackers", &month, false)
             .await
             .unwrap(),
-        MBOX_V2
+        data(MBOX_V2)
     );
 }
 
@@ -343,4 +348,102 @@ async fn the_rate_limit_spaces_requests() {
         "{:?}",
         start.elapsed()
     );
+}
+
+#[tokio::test]
+async fn without_kept_files_unchanged_months_are_not_retrieved_again() {
+    let (url, log) = serve(Arc::new(|request: &Request, n: usize| {
+        if request.header("if-none-match") == Some("\"v1\"") && n < 2 {
+            return response(304, b"");
+        }
+        let (etag, body) = if n == 0 {
+            ("\"v1\"", MBOX_V1)
+        } else {
+            ("\"v2\"", MBOX_V2)
+        };
+        Response {
+            status: 200,
+            headers: vec![("etag", etag.into())],
+            body: body.to_vec(),
+        }
+    }))
+    .await;
+    let cache = scratch();
+    let client = ArchiveClient::new(ArchiveConfig {
+        keep_mbox: false,
+        ..client(&url, &cache).config().clone()
+    })
+    .unwrap();
+    let now = Utc::now();
+    let month = format!("{:04}-{:02}", now.year(), now.month());
+    let path = client.mbox_path("pgsql-hackers", &month);
+    assert_eq!(
+        client
+            .mbox_month("pgsql-hackers", &month, false)
+            .await
+            .unwrap(),
+        data(MBOX_V1)
+    );
+    assert!(!path.exists(), "the mbox isn't kept");
+    // Not ingested in full yet: retrieved again, without validators.
+    assert_eq!(
+        client
+            .mbox_month("pgsql-hackers", &month, true)
+            .await
+            .unwrap(),
+        data(MBOX_V2)
+    );
+    assert_eq!(log.lock().unwrap()[1].header("if-none-match"), None);
+    client
+        .mark_mbox_ingested("pgsql-hackers", &month)
+        .await
+        .unwrap();
+    // Ingested: unchanged without a request unless refreshing, and a refresh asks.
+    assert_eq!(
+        client
+            .mbox_month("pgsql-hackers", &month, false)
+            .await
+            .unwrap(),
+        Mbox::Unchanged
+    );
+    assert_eq!(log.lock().unwrap().len(), 2);
+    assert_eq!(
+        client
+            .mbox_month("pgsql-hackers", &month, true)
+            .await
+            .unwrap(),
+        data(MBOX_V2)
+    );
+    assert_eq!(
+        log.lock().unwrap()[2].header("if-none-match"),
+        Some("\"v2\"")
+    );
+}
+
+#[tokio::test]
+async fn lists_the_months_of_a_list() {
+    let (url, log) = serve(Arc::new(|request: &Request, _| {
+        if request.path == "/list/pgsql-hackers/" {
+            response(
+                200,
+                b"<a href=\"/list/pgsql-hackers/2026-06/\">June</a> <a href=\"/list/pgsql-hackers/1997-06/\">1997</a>",
+            )
+        } else {
+            response(404, b"Not found")
+        }
+    }))
+    .await;
+    let cache = scratch();
+    let client = client(&url, &cache);
+    assert_eq!(
+        client.list_months("pgsql-hackers").await.unwrap(),
+        ["1997-06", "2026-06"]
+    );
+    let error = client.list_months("pgsql-nothing").await.unwrap_err();
+    assert!(
+        error.downcast_ref::<pghacker_mail::NotFound>().is_some(),
+        "{error:#}"
+    );
+    assert!(client.list_months("../x").await.is_err());
+    assert_eq!(log.lock().unwrap().len(), 2);
 }
