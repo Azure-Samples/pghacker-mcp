@@ -11,6 +11,7 @@ case "$kind" in
   *) echo "usage: $0 probe|restore" >&2; exit 2 ;;
 esac
 cd "$(dirname "$0")/../terraform"
+subscription=$(terraform output -raw subscription_id)
 rg=$(terraform output -raw resource_group_name)
 job=$(terraform output -raw "${kind}_job_name")
 workspace=$(terraform output -raw log_analytics_workspace_id)
@@ -19,10 +20,11 @@ if [ -z "$job" ] || [ "$job" = "null" ]; then
   exit 1
 fi
 
-execution=$(az containerapp job start --name "$job" --resource-group "$rg" --query name --output tsv)
+execution=$(az containerapp job start --subscription "$subscription" --name "$job" --resource-group "$rg" \
+  --query name --output tsv)
 echo "Started $execution; waiting for it to finish." >&2
 while :; do
-  state=$(az containerapp job execution show --name "$job" --resource-group "$rg" \
+  state=$(az containerapp job execution show --subscription "$subscription" --name "$job" --resource-group "$rg" \
     --job-execution-name "$execution" --query properties.status --output tsv)
   case "$state" in
     Running | Processing | "") sleep 20 ;;
