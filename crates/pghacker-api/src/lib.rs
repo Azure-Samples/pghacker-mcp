@@ -25,8 +25,10 @@ pub mod descriptions {
         meaning or both (mode hybrid, the default). Optional kind and author filters. Each result cites messages with \
         verbatim quotes.";
     pub const AUTHOR_PERSPECTIVE: &str = "Summarizes an author's perspective on a topic: their extracted positions \
-        (stance and summary on features and decisions), ranked by relevance to the topic in mode fulltext, semantic or \
-        hybrid (default), each with cited quotes; plus their most relevant messages on the topic as further evidence.";
+        (stance and summary on features and decisions) that match the topic through their own text or the feature or \
+        decision they are about, best first, in mode fulltext, semantic or hybrid (default; semantic and hybrid keep \
+        only positions close to the topic), each with cited quotes; plus their most relevant messages on the topic as \
+        further evidence.";
     pub const SEARCH_AUTHORS: &str =
         "Finds authors by name, with how many messages they wrote and when.";
     pub const GET_AUTHOR: &str = "Returns an author's profile: names used, message counts and dates, most active \

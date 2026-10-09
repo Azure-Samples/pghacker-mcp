@@ -1,6 +1,7 @@
 //! The mail and graph tools on a synthetic corpus, as the read-only role.
 
 use pghacker_api::{extracts, ontology, people, threads};
+use pghacker_core::embed::{EmbedConfig, Embedder};
 use pghacker_core::testing::TestDb;
 use serde_json::{Value, json};
 
@@ -207,6 +208,108 @@ async fn finds_authors_and_their_perspective() {
     assert!(none["positions"].as_array().unwrap().is_empty());
     assert!(none["note"].is_string());
     assert_eq!(none["messages"][0]["message_id"], "m4@example.org");
+}
+
+/// An embeddings endpoint with fixed unit vectors: text that mentions "plan"
+/// points along the first axis, anything else along the second.
+async fn fake_embedder() -> Embedder {
+    async fn embeddings(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
+        let data: Vec<Value> = body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let mut vector = vec![0.0f32; 1536];
+                let plan = input.as_str().unwrap().to_lowercase().contains("plan");
+                vector[usize::from(!plan)] = 1.0;
+                json!({ "index": index, "embedding": vector })
+            })
+            .collect();
+        axum::Json(json!({ "data": data }))
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let app = axum::Router::new().route("/", axum::routing::post(embeddings));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    Embedder::new(EmbedConfig {
+        url,
+        model: "test".into(),
+        dim: 1536,
+        api_key: None,
+        api_key_header: "api-key".into(),
+        bearer: false,
+    })
+    .unwrap()
+}
+
+/// The unit vector along `axis` (1-based), as SQL.
+fn axis(axis: usize) -> String {
+    format!(
+        "(SELECT array_agg(CASE WHEN g = {axis} THEN 1 ELSE 0 END ORDER BY g)::real[]::vector::halfvec
+          FROM generate_series(1, 1536) g)"
+    )
+}
+
+#[tokio::test]
+async fn narrows_an_author_perspective_to_the_topic() {
+    let db = corpus().await;
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "INSERT INTO features (id, slug, name, description, status) VALUES
+                 (2, 'autovacuum-cost-limits', 'Autovacuum cost limits', 'Raise the autovacuum cost limits.', 'proposed');
+             INSERT INTO positions (id, author_id, thread_id, feature_id, stance, summary) VALUES
+                 (3, 2, 11, 2, 'proposes', 'Wants a plan to raise the limits for modern disks.');
+             UPDATE features SET embedding = CASE id WHEN 1 THEN {plan} ELSE {other} END;
+             UPDATE positions SET embedding = {far};
+             UPDATE message_chunks SET embedding = CASE thread_id WHEN 10 THEN {plan} ELSE {other} END;",
+            plan = axis(1),
+            other = axis(2),
+            far = axis(3),
+        ))
+        .await
+        .unwrap();
+    let embedder = fake_embedder().await;
+    let reader = db.reader().await.unwrap();
+    for mode in ["semantic", "hybrid"] {
+        let out = people::author_perspective(
+            &reader,
+            Some(&embedder),
+            args(json!({ "author": 2, "topic": "the PLAN clause", "mode": mode })),
+        )
+        .await
+        .unwrap();
+        // Position 1's summary is far from the topic but its feature is the
+        // topic. Position 3 mentions a plan but is about another feature, and
+        // the vacuum message is off topic: both drop out.
+        let positions: Vec<i64> = out["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["position_id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(positions, [1], "{mode}: {out:#}");
+        assert_eq!(out["stances"], json!({ "concerned": 1 }));
+        let messages: Vec<&str> = out["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["message_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(messages, ["m2@example.org"], "{mode}: {out:#}");
+    }
+    let fulltext = people::author_perspective(
+        &reader,
+        None,
+        args(json!({ "author": 2, "topic": "the PLAN clause", "mode": "fulltext" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fulltext["positions"].as_array().unwrap().len(), 2);
+    assert!((people::topic_cutoff(0.2) - 0.45).abs() < 1e-9);
+    assert!((people::topic_cutoff(0.6) - 0.7).abs() < 1e-9);
 }
 
 #[tokio::test]

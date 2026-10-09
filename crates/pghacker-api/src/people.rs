@@ -1,6 +1,6 @@
 //! search_authors, get_author and author_perspective.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -10,8 +10,20 @@ use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
 use pghacker_core::embed::Embedder;
+use pghacker_core::search::{RRF_K, rrf};
 
 use crate::common::{AuthorRef, Mode, Searcher, citations, resolve_author, snippet};
+
+/// A topic narrows an author's record instead of ranking all of it: with an
+/// embedding, rows count only within this cosine distance of the topic...
+const TOPIC_CEILING: f64 = 0.7;
+/// ...and within this margin of the closest row.
+const TOPIC_MARGIN: f64 = 0.25;
+
+/// The largest distance from the topic that counts, given the closest row's.
+pub fn topic_cutoff(closest: f64) -> f64 {
+    (closest + TOPIC_MARGIN).min(TOPIC_CEILING)
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchAuthorsArgs {
@@ -149,16 +161,11 @@ pub async fn author_perspective(
         .get(0);
     let searcher = Searcher::new(args.mode, &args.topic, embedder).await?;
     let authors = vec![id];
-    let ranked = searcher
-        .rank_table(
-            client,
-            "positions",
-            "t.author_id = ANY ($3)",
-            Some(&authors),
-            50,
-        )
-        .await?;
-    let position_ids: Vec<i64> = ranked.into_iter().take(limit).collect();
+    let position_ids: Vec<i64> = topic_positions(client, &searcher, id)
+        .await?
+        .into_iter()
+        .take(limit)
+        .collect();
     let cites = citations(client, "position", &position_ids, 3).await?;
     let mut positions: HashMap<i64, Value> = HashMap::new();
     for row in client
@@ -193,9 +200,35 @@ pub async fn author_perspective(
             .or_default() += 1;
     }
     // The author's own most relevant messages, as further evidence.
-    let chunks = searcher
+    let mut chunks = searcher
         .rank_chunks(client, Some(&authors), None, None, 40)
         .await?;
+    if let Some(embedding) = topic_embedding(&searcher) {
+        let ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
+        let distances: HashMap<i64, Option<f64>> = client
+            .query(
+                "SELECT id, (embedding <=> $1)::float8 FROM message_chunks WHERE id = ANY ($2)",
+                &[embedding, &ids],
+            )
+            .await?
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        let closest = distances
+            .values()
+            .flatten()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let cutoff = topic_cutoff(closest);
+        // Chunks not embedded yet still count when their text matched.
+        chunks.retain(|(chunk, _)| {
+            distances
+                .get(chunk)
+                .copied()
+                .flatten()
+                .is_none_or(|distance| distance <= cutoff)
+        });
+    }
     let mut seen_messages = std::collections::HashSet::new();
     let chunk_ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
     let rows = client
@@ -244,4 +277,89 @@ pub async fn author_perspective(
         out["notes"] = json!(searcher.notes);
     }
     Ok(out)
+}
+
+/// The topic's embedding when the mode ranks by meaning.
+fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfVector> {
+    searcher
+        .embedding()
+        .filter(|_| searcher.mode != Mode::Fulltext)
+}
+
+/// The author's positions on the topic, best first. A position matches
+/// through its summary or through the feature or decision it is about, since
+/// a summary often leaves its subject implicit. With an embedding, a position
+/// counts only within the topic cutoff, so loose text matches drop out.
+async fn topic_positions(
+    client: &impl GenericClient,
+    searcher: &Searcher<'_>,
+    author: i64,
+) -> Result<Vec<i64>> {
+    let mut rankings: Vec<Vec<i64>> = Vec::new();
+    let mut counted: Option<HashSet<i64>> = None;
+    if let Some(embedding) = topic_embedding(searcher) {
+        let rows = client
+            .query(
+                "SELECT p.id, LEAST(p.embedding <=> $1, f.embedding <=> $1, d.embedding <=> $1)::float8
+                 FROM positions p LEFT JOIN features f ON f.id = p.feature_id
+                 LEFT JOIN decisions d ON d.id = p.decision_id
+                 WHERE p.author_id = $2",
+                &[embedding, &author],
+            )
+            .await?;
+        let mut near: Vec<(i64, f64)> = rows
+            .iter()
+            .filter_map(|row| row.get::<_, Option<f64>>(1).map(|d| (row.get(0), d)))
+            .collect();
+        near.sort_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some(&(_, closest)) = near.first() {
+            let cutoff = topic_cutoff(closest);
+            near.retain(|&(_, distance)| distance <= cutoff);
+        }
+        // Positions not embedded yet still count when their text matches.
+        let mut ids: HashSet<i64> = rows
+            .iter()
+            .filter(|row| row.get::<_, Option<f64>>(1).is_none())
+            .map(|row| row.get(0))
+            .collect();
+        ids.extend(near.iter().map(|&(id, _)| id));
+        counted = Some(ids);
+        rankings.push(near.into_iter().map(|(id, _)| id).collect());
+    }
+    if searcher.mode != Mode::Semantic {
+        let rows = client
+            .query(
+                "SELECT p.id,
+                        (p.search_text <@> to_bm25query($1, 'pghacker.positions_bm25'))::float8,
+                        (f.search_text <@> to_bm25query($1, 'pghacker.features_bm25'))::float8,
+                        (d.search_text <@> to_bm25query($1, 'pghacker.decisions_bm25'))::float8
+                 FROM positions p LEFT JOIN features f ON f.id = p.feature_id
+                 LEFT JOIN decisions d ON d.id = p.decision_id
+                 WHERE p.author_id = $2",
+                &[&searcher.query(), &author],
+            )
+            .await?;
+        for column in 1..=3 {
+            let mut matched: Vec<(i64, f64)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let id: i64 = row.get(0);
+                    let score = row
+                        .get::<_, Option<f64>>(column)
+                        .filter(|score| *score < 0.0)?;
+                    counted
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&id))
+                        .then_some((id, score))
+                })
+                .collect();
+            matched.sort_by(|a, b| a.1.total_cmp(&b.1));
+            rankings.push(matched.into_iter().map(|(id, _)| id).collect());
+        }
+    }
+    rankings.retain(|ranking| !ranking.is_empty());
+    Ok(rrf(&rankings, RRF_K)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
 }

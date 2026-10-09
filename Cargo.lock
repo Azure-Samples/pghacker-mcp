@@ -2495,6 +2495,7 @@ name = "pghacker-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "pghacker-core",
  "pgvector",
