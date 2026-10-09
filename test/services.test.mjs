@@ -30,3 +30,15 @@ test("an HTTP error from an MCP server is reported", async () => {
     /HTTP 429/,
   );
 });
+
+test("a rate-limited request is retried when the server says when", async () => {
+  const calls = [];
+  const ok = mcpFetch("json", calls);
+  let limited = 0;
+  const fetchImpl = async (url, init) => {
+    if (limited++ < 2) return new Response("rate limit exceeded", { status: 429, headers: { "retry-after": "0" } });
+    return ok(url, init);
+  };
+  assert.deepEqual(await listTools("http://127.0.0.1:1/mcp", { fetchImpl }), ["search", "grep"]);
+  assert.deepEqual(calls, ["initialize", "tools/list"]);
+});

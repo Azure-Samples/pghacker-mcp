@@ -192,6 +192,12 @@ test("each process gets only the credentials it needs", () => {
   assert.equal(services.indexer.HORIZON_EMBED_API_KEY, "unit-test-key");
   assert.equal(services.mcp.HORIZON_EMBED_URL, "https://embed.example/embeddings");
   assert.equal(services.indexer.PATH, "/test/path");
+  assert.equal(services.mcp.PGHACKER_RATE_PER_MINUTE, "3000");
+  assert.equal(services.mcp.PGHACKER_RATE_BURST, "500");
+  assert.equal(
+    serviceEnvironments(parseLocalConfig(`${initialEnv(password)}PGHACKER_RATE_PER_MINUTE=120\n`), {}).mcp.PGHACKER_RATE_PER_MINUTE,
+    "120",
+  );
   const portal = portalEnvironment(config, {});
   assert.equal(portal.PILOTSWARM_WORKER_CONCURRENCY, "8");
   assert.equal(portalEnvironment(parseLocalConfig(`${initialEnv(password)}PILOTSWARM_WORKER_CONCURRENCY=12\n`), {}).PILOTSWARM_WORKER_CONCURRENCY, "12");

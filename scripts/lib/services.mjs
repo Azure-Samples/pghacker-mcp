@@ -142,16 +142,25 @@ export function stopRecordedServices(config) {
 }
 
 async function postJson(url, body, timeout, fetchImpl) {
-  const response = await fetchImpl(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${url} answered HTTP ${response.status}: ${text.slice(0, 200)}`);
-  const json = text.startsWith("{") ? text : text.split("\n").find((line) => line.startsWith("data:"))?.slice(5);
-  return JSON.parse(json);
+  const deadline = Date.now() + timeout;
+  for (let attempt = 1; ; attempt++) {
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+    });
+    const text = await response.text();
+    // pghacker-mcp rate-limits each client address and says when to retry.
+    const retryAfter = response.headers.has("retry-after") ? Number(response.headers.get("retry-after")) * 1000 : NaN;
+    if (response.status === 429 && retryAfter >= 0 && attempt < 6 && Date.now() + retryAfter < deadline) {
+      await delay(retryAfter);
+      continue;
+    }
+    if (!response.ok) throw new Error(`${url} answered HTTP ${response.status}: ${text.slice(0, 200)}`);
+    const json = text.startsWith("{") ? text : text.split("\n").find((line) => line.startsWith("data:"))?.slice(5);
+    return JSON.parse(json);
+  }
 }
 
 /** The tool names an MCP server lists, through a client's initialize handshake. */

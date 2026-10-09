@@ -1,5 +1,7 @@
 import { mkdirSync } from "node:fs";
+import { once } from "node:events";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { readLocalConfig, portalEnvironment, LOCAL_HOST } from "./lib/config.mjs";
 import {
   assertPortAvailable, preparePortalRecord, writePortalRecord, clearPortalRecord, runDatabase,
@@ -65,13 +67,19 @@ try {
   }
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => {
-      Promise.allSettled([stopWorker(), stopServices()]).then((results) => {
+      // The portal closes itself on the same signal.
+      const portalClosed = server ? once(server, "close").catch(() => {}) : Promise.resolve();
+      Promise.allSettled([stopWorker(), stopServices()]).then(async (results) => {
         for (const result of results) {
           if (result.status === "rejected") {
             console.error(`[pghacker-mcp] Shutdown failed: ${result.reason?.message ?? result.reason}`);
             process.exitCode = 1;
           }
         }
+        // Database pools inside the SDK outlive a graceful stop and would keep
+        // the process alive: exit once the portal has closed.
+        await Promise.race([portalClosed, delay(10_000)]);
+        process.exit();
       });
     });
   }

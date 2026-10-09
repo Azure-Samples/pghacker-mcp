@@ -52,6 +52,8 @@ Everything listens on loopback only, and sign-in is disabled: **don't expose it*
 | `HORIZON_EMBED_URL`, `HORIZON_EMBED_MODEL`, `HORIZON_EMBED_DIM=1536`, `HORIZON_EMBED_API_KEY` (`_API_KEY_HEADER`, `_BEARER`) | Embeddings for semantic and hybrid search, configured the same way as PilotSwarm's embedder. Example: an Azure OpenAI `text-embedding-3-small` deployment's `/embeddings?api-version=2024-10-21` URL. Without them, search uses full text only. |
 | `GITHUB_TOKEN` (or in the shell) | GitHub Copilot models for the agents. `config/model_providers.json` lists them, with `github-copilot:gpt-6-luna` as the default. |
 | `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Service ports (3101, 3102). |
+| `PILOTSWARM_WORKER_CONCURRENCY` | Session turns the worker runs at once (default 8). |
+| `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
 
 `config/test-slices.toml` chooses the months, seed threads and code paths that wave 1 retrieves.
 
@@ -98,10 +100,18 @@ The worker runs `PILOTSWARM_WORKER_CONCURRENCY` session turns at once (8 by defa
 npm test                 # launcher, configuration, readiness and evaluation helpers
 npm run rust:check       # rustfmt, clippy -D warnings, and the Rust tests (they create temporary databases)
 npm run smoke            # with the app running: both MCP servers, the portal, the worker and the agents
-npm run eval             # with the corpus built: the 20-question evaluation (eval/questions.json)
+npm run eval             # with the corpus built: the 20-question evaluation (eval/questions.json, results in eval/RESULTS.md)
 ```
 
-The code-search exactness replay lives in `crates/pghacker-replay`. Its PG19 replay compares `search` and `grep` with ripgrep and GNU grep. Its study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`.
+The code-search exactness replay lives in `crates/pghacker-replay`, against its own `pghacker_replay` database:
+
+```bash
+cargo run --release -p pghacker-replay -- prepare                       # create and migrate pghacker_replay
+cargo run --release -p pghacker-replay -- pg19                          # 2,000 generated searches on the PG19 subset
+PGHACKER_STUDY_DIR=<study> cargo run --release -p pghacker-replay -- study
+```
+
+The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in Docker: 2,000 of 2,000 match each. The study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`. It matched ripgrep on all 10,540 replayable searches through `search` and 7,254 through `grep`, which is byte-identical to GNU grep on 7,277 command lines.
 
 ## Repository
 
