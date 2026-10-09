@@ -14,6 +14,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "test@example.org")
         .env("GIT_COMMITTER_NAME", "Test")
         .env("GIT_COMMITTER_EMAIL", "test@example.org")
+        .env("GIT_COMMITTER_DATE", "2026-09-30T12:00:00Z")
         .output()
         .expect("git runs");
     assert!(
@@ -68,6 +69,17 @@ async fn lines(client: &tokio_postgres::Client, path: &str) -> Vec<String> {
         .iter()
         .map(|row| row.get(0))
         .collect()
+}
+
+async fn committed_at(client: &tokio_postgres::Client, snapshot: i32) -> Option<String> {
+    client
+        .query_one(
+            "SELECT committed_at::text FROM code_snapshots WHERE id = $1",
+            &[&snapshot],
+        )
+        .await
+        .unwrap()
+        .get(0)
 }
 
 #[tokio::test]
@@ -140,11 +152,24 @@ async fn loads_a_local_commit_by_the_rules() {
         .unwrap()
         .get(0);
     assert_eq!(state, "ready");
+    assert_eq!(
+        committed_at(&client, stats.snapshot_id).await.as_deref(),
+        Some("2026-09-30 12:00:00+00")
+    );
 
+    // A snapshot loaded before commit times were recorded gets its time on reuse.
+    client
+        .execute("UPDATE code_snapshots SET committed_at = NULL", &[])
+        .await
+        .unwrap();
     let again = load_snapshot(&mut client, &spec).await.unwrap();
     assert!(again.reused);
     assert_eq!(again.snapshot_id, stats.snapshot_id);
     assert_eq!((again.text_files, again.binary_files), (6, 2));
+    assert_eq!(
+        committed_at(&client, stats.snapshot_id).await.as_deref(),
+        Some("2026-09-30 12:00:00+00")
+    );
 
     let out = tempfile::tempdir().unwrap();
     let tree = out.path().join("tree");

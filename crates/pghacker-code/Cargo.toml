@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 gix = { workspace = true, features = ["sha1", "max-performance-safe", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 pghacker-core.workspace = true

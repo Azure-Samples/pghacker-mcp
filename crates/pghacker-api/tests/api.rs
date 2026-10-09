@@ -349,11 +349,23 @@ async fn searches_extracts_with_citations() {
 #[tokio::test]
 async fn describes_the_ontology() {
     let db = corpus().await;
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO code_snapshots (repo, ref, sha, version, state, committed_at)
+             VALUES ('postgres', 'REL_19_STABLE', 'abc', '19', 'ready', '2026-09-30 12:00:00+00')",
+        )
+        .await
+        .unwrap();
     let reader = db.reader().await.unwrap();
     let out = match ontology::get_ontology(&reader).await {
         Ok(out) => out,
         Err(error) => panic!("{error:?}"),
     };
+    let code = &out["loaded"]["code"][0];
+    assert_eq!(code["ref"], "REL_19_STABLE");
+    assert_eq!(code["committed_at"], "2026-09-30T12:00:00Z");
     let tables: Vec<&str> = out["tables"]
         .as_array()
         .unwrap()

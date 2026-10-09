@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Utc};
 use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use tokio_postgres::Client;
@@ -69,6 +70,7 @@ struct TreeFile {
 struct Tree {
     files: Vec<TreeFile>,
     skipped_links: u64,
+    committed_at: DateTime<Utc>,
 }
 
 /// A text file's lines and whether it ends with a newline, per the loader's
@@ -162,11 +164,27 @@ fn open_repo(spec: &SnapshotSpec) -> Result<gix::Repository> {
     }
 }
 
+/// When the commit was committed: its branch's state at that moment.
+fn commit_time(commit: &gix::Commit<'_>) -> Result<DateTime<Utc>> {
+    let time = commit.time().context("cannot read the commit's time")?;
+    DateTime::from_timestamp(time.seconds, 0)
+        .ok_or_else(|| anyhow!("the commit's time is out of range"))
+}
+
+/// When the spec's commit was committed (blocking).
+fn spec_commit_time(spec: &SnapshotSpec) -> Result<DateTime<Utc>> {
+    let repo = open_repo(spec)?;
+    let commit = repo.find_commit(ObjectId::from_hex(spec.sha.as_bytes())?)?;
+    commit_time(&commit)
+}
+
 /// The commit's files under the spec's paths, sorted by path (blocking).
 fn read_tree(spec: &SnapshotSpec) -> Result<Tree> {
     let repo = open_repo(spec)?;
     let id = ObjectId::from_hex(spec.sha.as_bytes())?;
-    let tree = repo.find_commit(id)?.tree()?;
+    let commit = repo.find_commit(id)?;
+    let committed_at = commit_time(&commit)?;
+    let tree = commit.tree()?;
     let mut recorder = gix::traverse::tree::Recorder::default();
     tree.traverse()
         .breadthfirst(&mut recorder)
@@ -202,6 +220,7 @@ fn read_tree(spec: &SnapshotSpec) -> Result<Tree> {
     Ok(Tree {
         files,
         skipped_links,
+        committed_at,
     })
 }
 
@@ -211,7 +230,8 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
     if let Some(row) = client
         .query_opt(
             "SELECT s.id, s.file_count, s.line_count, s.bytes,
-                    count(f.id) FILTER (WHERE NOT f.is_binary), count(f.id) FILTER (WHERE f.is_binary)
+                    count(f.id) FILTER (WHERE NOT f.is_binary), count(f.id) FILTER (WHERE f.is_binary),
+                    s.committed_at IS NULL
              FROM code_snapshots s LEFT JOIN code_files f ON f.snapshot_id = s.id
              WHERE s.repo = $1 AND s.sha = $2 AND s.state = 'ready'
              GROUP BY s.id",
@@ -219,6 +239,26 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
         )
         .await?
     {
+        // Snapshots loaded before commit times were recorded get theirs now.
+        if row.get::<_, bool>(6) {
+            let time_spec = spec.clone();
+            match tokio::task::spawn_blocking(move || spec_commit_time(&time_spec))
+                .await
+                .context("the commit reader panicked")?
+            {
+                Ok(committed_at) => {
+                    client
+                        .execute(
+                            "UPDATE code_snapshots SET committed_at = $2 WHERE id = $1",
+                            &[&row.get::<_, i32>(0), &committed_at],
+                        )
+                        .await?;
+                }
+                Err(error) => {
+                    tracing::warn!(sha = %spec.sha, %error, "cannot read the commit's time")
+                }
+            }
+        }
         return Ok(LoadStats {
             snapshot_id: row.get(0),
             files: row.get::<_, i32>(1) as u64,
@@ -248,8 +288,8 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
     .await?;
     let snapshot_id: i32 = tx
         .query_one(
-            "INSERT INTO code_snapshots (source_id, repo, ref, sha, version, paths, state)
-             VALUES ($1, $2, $3, $4, $5, $6, 'loading') RETURNING id",
+            "INSERT INTO code_snapshots (source_id, repo, ref, sha, version, paths, state, committed_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'loading', $7) RETURNING id",
             &[
                 &spec.source_id,
                 &spec.repo,
@@ -257,6 +297,7 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
                 &spec.sha,
                 &spec.version,
                 &spec.paths,
+                &tree.committed_at,
             ],
         )
         .await?

@@ -105,15 +105,19 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
         .await?;
     let snapshots: Vec<Value> = client
         .query(
-            "SELECT repo, version, ref, sha, paths, file_count, line_count FROM code_snapshots WHERE state = 'ready' ORDER BY id",
+            "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
+             FROM code_snapshots WHERE state = 'ready' ORDER BY id",
             &[],
         )
         .await?
         .iter()
         .map(|row| json!({ "repo": row.get::<_, String>(0), "version": row.get::<_, Option<String>>(1),
                            "ref": row.get::<_, String>(2), "sha": row.get::<_, String>(3),
+                           "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
                            "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
-                           "lines": row.get::<_, i64>(6) }))
+                           "lines": row.get::<_, i64>(6),
+                           "note": "The branch as of committed_at: for a release branch, what that release contains. \
+                                    Work committed to master after the branch point goes to a later release." }))
         .collect();
     Ok(json!({
         "graph": {
