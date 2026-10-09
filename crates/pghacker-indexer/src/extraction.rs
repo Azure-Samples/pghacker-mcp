@@ -614,7 +614,7 @@ impl Candidate {
     }
 }
 
-/// Existing features or decisions like a draft: by meaning, words and name.
+/// Existing features or decisions like a draft: by semantic search, words and name.
 async fn candidates(
     client: &impl GenericClient,
     kind: DraftKind,

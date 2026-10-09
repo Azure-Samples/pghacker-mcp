@@ -3,11 +3,13 @@
 // environment, user and arguments of each process the supervisor
 // (scripts/container.mjs) runs. Each process gets only what it needs: no
 // other process sees the administrator's password, the roles' passwords or
-// oauth2-proxy's secrets, and none gets the managed identity's endpoint.
+// oauth2-proxy's secrets, and none gets the managed identity's endpoint:
+// the supervisor's Foundry proxy (scripts/lib/foundry.mjs) uses it for them.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT } from "./config.mjs";
+import { PLACEHOLDER_KEY } from "./foundry.mjs";
 
 export const DATA_DIR = "/var/lib/pghacker";
 
@@ -18,7 +20,11 @@ export const PORTS = {
   indexer: 3101,
   mcp: 3102,
   mcpInternal: 3103,
+  foundry: 3110,
 };
+
+/** The supervisor's Foundry proxy, which adds the managed identity's token. */
+export const FOUNDRY_PROXY = `http://127.0.0.1:${PORTS.foundry}`;
 
 /** The Unix users the processes run as (the Dockerfile creates them). */
 export const USERS = {
@@ -34,7 +40,7 @@ const EMBED_API_VERSION = "2024-10-21";
 const REQUIRED = [
   "PGHACKER_DB_HOST", "PGHACKER_DB_NAME", "PGHACKER_DB_ADMIN_USER", "PGHACKER_DB_ADMIN_PASSWORD",
   "PGH_INDEXER_PASSWORD", "PGH_READER_PASSWORD", "PGH_SWARM_PASSWORD",
-  "AZURE_OAI_KEY", "PGHACKER_FOUNDRY_ENDPOINT", "PGHACKER_FOUNDRY_SOL", "PGHACKER_FOUNDRY_LUNA",
+  "AZURE_CLIENT_ID", "PGHACKER_FOUNDRY_ENDPOINT", "PGHACKER_FOUNDRY_SOL", "PGHACKER_FOUNDRY_LUNA",
   "PGHACKER_FOUNDRY_EMBEDDING",
 ];
 
@@ -112,7 +118,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     },
     foundry: {
       endpoint,
-      key: env.AZURE_OAI_KEY,
+      // The user-assigned identity whose tokens the proxy requests.
+      clientId: value(env, "AZURE_CLIENT_ID"),
       sol: value(env, "PGHACKER_FOUNDRY_SOL"),
       luna: value(env, "PGHACKER_FOUNDRY_LUNA"),
       embedding: value(env, "PGHACKER_FOUNDRY_EMBEDDING"),
@@ -165,14 +172,17 @@ export function databaseUrls(config) {
   };
 }
 
-/** PilotSwarm's model catalog: Foundry's Sol, the default, and Luna. */
+/**
+ * PilotSwarm's model catalog: Foundry's Sol, the default, and Luna, through
+ * the proxy, which replaces the placeholder key with a token.
+ */
 export function foundryCatalog(foundry) {
   return {
     defaultModel: `azure-foundry:${foundry.sol}`,
     providers: [{
       id: "azure-foundry",
       type: "openai",
-      baseUrl: `${foundry.endpoint}/openai/v1`,
+      baseUrl: `${FOUNDRY_PROXY}/openai/v1`,
       apiKey: "env:AZURE_OAI_KEY",
       wireApi: "responses",
       models: [
@@ -191,13 +201,13 @@ export function foundryCatalog(foundry) {
   };
 }
 
-/** The embeddings settings both Rust services read, on the Foundry account. */
+/** The embeddings settings both Rust services read: the Foundry account's, through the proxy. */
 export function embedEnvironment(foundry) {
   return {
-    HORIZON_EMBED_URL: `${foundry.endpoint}/openai/deployments/${encodeURIComponent(foundry.embedding)}/embeddings?api-version=${EMBED_API_VERSION}`,
+    HORIZON_EMBED_URL: `${FOUNDRY_PROXY}/openai/deployments/${encodeURIComponent(foundry.embedding)}/embeddings?api-version=${EMBED_API_VERSION}`,
     HORIZON_EMBED_MODEL: foundry.embedding,
     HORIZON_EMBED_DIM: EMBED_DIM,
-    HORIZON_EMBED_API_KEY: foundry.key,
+    HORIZON_EMBED_API_KEY: PLACEHOLDER_KEY,
   };
 }
 
@@ -289,7 +299,7 @@ export function processEnvironments(config) {
       PS_MODEL_PROVIDERS_PATH: files.modelProviders,
       PILOTSWARM_WORKER_CONCURRENCY: concurrency,
       PILOTSWARM_ORCHESTRATION_CONCURRENCY: concurrency,
-      AZURE_OAI_KEY: config.foundry.key,
+      AZURE_OAI_KEY: PLACEHOLDER_KEY,
       PGHACKER_INDEXER_MCP_URL: local(PORTS.indexer),
       // Agents use pghacker-mcp's listener without the public rate limit.
       PGHACKER_MCP_URL: local(PORTS.mcpInternal),
@@ -301,9 +311,9 @@ export function processEnvironments(config) {
       PGHACKER_DEPLOYMENT: "azure",
       DATABASE_URL: urls.swarm,
       PS_MODEL_PROVIDERS_PATH: files.modelProviders,
-      AZURE_OAI_KEY: config.foundry.key,
+      AZURE_OAI_KEY: PLACEHOLDER_KEY,
       PGHACKER_INDEXER_MCP_URL: local(PORTS.indexer),
-      PGHACKER_FOUNDRY_ENDPOINT: config.foundry.endpoint,
+      PGHACKER_FOUNDRY_ENDPOINT: FOUNDRY_PROXY,
       PGHACKER_FOUNDRY_LUNA: config.foundry.luna,
       PGHACKER_CRAWL_MODEL: crawlModel,
       PGHACKER_CRAWL_START_SESSIONS: String(config.crawl.start),

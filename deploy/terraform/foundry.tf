@@ -1,7 +1,9 @@
 # Azure AI Foundry: an AIServices account with the app's model deployments,
-# reachable only through its private endpoint. PilotSwarm's OpenAI-compatible
-# provider authenticates with an API key, so key (local) authentication stays
-# on; the key goes to Key Vault as foundry-key.
+# reachable only through its private endpoint. Key (local) authentication is
+# off, as the subscription's policy requires: the app's managed identity calls
+# the models with Entra tokens, which a proxy in the container adds to the
+# requests of PilotSwarm, the embedder and the crawl scheduler
+# (scripts/lib/foundry.mjs).
 
 locals {
   foundry_private_endpoint_name = "${local.foundry_account_name}-pe"
@@ -24,7 +26,7 @@ resource "azurerm_cognitive_account" "foundry" {
   kind                          = "AIServices"
   sku_name                      = "S0"
   custom_subdomain_name         = local.foundry_account_name
-  local_auth_enabled            = true
+  local_auth_enabled            = false
   public_network_access_enabled = false
   tags                          = var.tags
 
@@ -130,14 +132,11 @@ data "azapi_resource" "foundry_private_endpoint_connection" {
   }
 }
 
-# The app's AZURE_OAI_KEY. Regenerating the key in Azure updates the secret at
-# the next apply; the app reads it when it starts.
-resource "azurerm_key_vault_secret" "foundry_key" {
-  name         = "foundry-key"
-  key_vault_id = azurerm_key_vault.this.id
-  value        = azurerm_cognitive_account.foundry.primary_access_key
-  content_type = "text/plain"
-  tags         = var.tags
-
-  depends_on = [time_sleep.rbac_propagation]
+# The app's identity calls the models: inference only, on this account.
+resource "azurerm_role_assignment" "app_foundry_openai_user" {
+  scope                            = azurerm_cognitive_account.foundry.id
+  role_definition_name             = "Cognitive Services OpenAI User"
+  principal_id                     = azurerm_user_assigned_identity.app.principal_id
+  principal_type                   = "ServicePrincipal"
+  skip_service_principal_aad_check = true
 }

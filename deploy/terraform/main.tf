@@ -87,9 +87,9 @@ resource "azurerm_role_assignment" "app_acr_pull" {
   skip_service_principal_aad_check = true
 }
 
-# New role assignments take a minute or so to reach Key Vault and the
-# registry. Writing secrets and creating the apps wait for this, rather than
-# fail with 403s.
+# New role assignments take a minute or so to reach Key Vault, the registry
+# and Foundry. Writing secrets and creating the apps wait for this, rather
+# than fail with 403s.
 resource "time_sleep" "rbac_propagation" {
   create_duration = "60s"
 
@@ -97,6 +97,7 @@ resource "time_sleep" "rbac_propagation" {
     deployer_kv = join(",", [for assignment in azurerm_role_assignment.deployer_kv_secrets_officer : assignment.id])
     app_kv      = azurerm_role_assignment.app_kv_secrets_user.id
     app_acr     = azurerm_role_assignment.app_acr_pull.id
+    app_foundry = azurerm_role_assignment.app_foundry_openai_user.id
   }
 }
 

@@ -10,7 +10,6 @@ const SECRETS = {
   PGH_INDEXER_PASSWORD: "indexer-secret-0123456789",
   PGH_READER_PASSWORD: "reader-secret-0123456789",
   PGH_SWARM_PASSWORD: "swarm-secret-0123456789",
-  AZURE_OAI_KEY: "foundry-key-0123456789",
   OAUTH2_PROXY_CLIENT_ID: "github-client-id-0123",
   OAUTH2_PROXY_CLIENT_SECRET: "github-client-secret-0123456789",
   OAUTH2_PROXY_COOKIE_SECRET: "cookie-secret-0123456789abcdefgh",
@@ -24,6 +23,7 @@ const ENV = {
   PGHACKER_DB_NAME: "pghacker",
   PGHACKER_DB_SSLMODE: "require",
   PGHACKER_DB_ADMIN_USER: "pghacker_admin",
+  AZURE_CLIENT_ID: "uami-client-id",
   PGHACKER_FOUNDRY_ENDPOINT: "https://pghacker-example-foundry.openai.azure.com/",
   PGHACKER_FOUNDRY_SOL: "gpt-6.1-sol",
   PGHACKER_FOUNDRY_LUNA: "gpt-6-luna",
@@ -38,7 +38,6 @@ const ENV = {
   IDENTITY_HEADER: "identity-header-secret",
   MSI_ENDPOINT: "http://localhost:42356/msi/token",
   MSI_SECRET: "msi-secret",
-  AZURE_CLIENT_ID: "uami-client-id",
   RUST_LOG: "debug",
 };
 
@@ -48,7 +47,6 @@ const ALLOWED = {
   PGH_INDEXER_PASSWORD: ["bootstrap", "indexer"],
   PGH_READER_PASSWORD: ["bootstrap", "mcp"],
   PGH_SWARM_PASSWORD: ["bootstrap", "swarm", "crawl"],
-  AZURE_OAI_KEY: ["indexer", "mcp", "swarm", "crawl"],
   OAUTH2_PROXY_CLIENT_ID: ["proxy"],
   OAUTH2_PROXY_CLIENT_SECRET: ["proxy"],
   OAUTH2_PROXY_COOKIE_SECRET: ["proxy"],
@@ -105,6 +103,10 @@ test("agents use the internal pghacker-mcp listener; the public one is rate-limi
   assert.equal(environments.indexer.PGHACKER_EXTRACTION, "automatic");
   assert.equal(environments.indexer.PGHACKER_KEEP_DOWNLOADS, "false");
   assert.equal(environments.crawl.PGHACKER_CRAWL_MODEL, "azure-foundry:gpt-6-luna");
+  // Foundry is reached through the supervisor's proxy, which adds the token.
+  assert.equal(environments.crawl.PGHACKER_FOUNDRY_ENDPOINT, `http://127.0.0.1:${PORTS.foundry}`);
+  assert.equal(environments.swarm.AZURE_OAI_KEY, "managed-identity");
+  assert.equal(environments.crawl.AZURE_OAI_KEY, "managed-identity");
   assert.equal(environments.swarm.PILOTSWARM_WORKER_CONCURRENCY, "20");
 });
 
@@ -128,6 +130,7 @@ test("oauth2-proxy signs in the team for the portal, passes /mcp through, and ge
 
 test("the configuration refuses what would be unsafe or incomplete", () => {
   assert.throws(() => readAzureConfig({ ...ENV, PGH_SWARM_PASSWORD: "" }), /PGH_SWARM_PASSWORD/);
+  assert.throws(() => readAzureConfig({ ...ENV, AZURE_CLIENT_ID: "" }), /AZURE_CLIENT_ID/);
   assert.throws(() => readAzureConfig({ ...ENV, OAUTH2_PROXY_COOKIE_SECRET: undefined }), /OAUTH2_PROXY_COOKIE_SECRET/);
   assert.throws(
     () => readAzureConfig({ ...ENV, PGHACKER_GITHUB_ORG: "", PGHACKER_GITHUB_TEAM: "" }),
@@ -144,20 +147,23 @@ test("the configuration refuses what would be unsafe or incomplete", () => {
   assert.ok(environments.bootstrap.PGHACKER_ADMIN_DATABASE_URL);
 });
 
-test("PilotSwarm's catalog is Foundry's Sol and Luna over the Responses API, and embeddings use the same account", () => {
+test("PilotSwarm's catalog is Foundry's Sol and Luna over the Responses API, and embeddings use the same account, all through the proxy", () => {
   const config = readAzureConfig(ENV);
   const catalog = foundryCatalog(config.foundry);
   assert.equal(catalog.defaultModel, "azure-foundry:gpt-6.1-sol");
   const [provider] = catalog.providers;
   assert.equal(provider.type, "openai");
   assert.equal(provider.wireApi, "responses");
-  assert.equal(provider.baseUrl, "https://pghacker-example-foundry.openai.azure.com/openai/v1");
+  assert.equal(provider.baseUrl, `http://127.0.0.1:${PORTS.foundry}/openai/v1`);
   assert.equal(provider.apiKey, "env:AZURE_OAI_KEY");
   assert.deepEqual(provider.models.map((m) => m.name), ["gpt-6.1-sol", "gpt-6-luna"]);
   const embed = embedEnvironment(config.foundry);
   assert.equal(embed.HORIZON_EMBED_URL,
-    "https://pghacker-example-foundry.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-10-21");
+    `http://127.0.0.1:${PORTS.foundry}/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-10-21`);
   assert.equal(embed.HORIZON_EMBED_DIM, "1536");
+  assert.equal(embed.HORIZON_EMBED_API_KEY, "managed-identity");
+  assert.equal(config.foundry.endpoint, "https://pghacker-example-foundry.openai.azure.com");
+  assert.equal(config.foundry.clientId, "uami-client-id");
 });
 
 test("users come from /etc/passwd and each has its own directories", () => {

@@ -1,6 +1,6 @@
 //! pghacker-mcp's mail and graph tools: threads, authors, extracts and
-//! author perspectives, searched by full text (BM25), meaning (pgvector) or
-//! both (hybrid, the default). Read-only; results cite Message-IDs and
+//! author perspectives, searched by full text (BM25), semantic search
+//! (pgvector) or both (hybrid, the default). Read-only; results cite Message-IDs and
 //! verbatim quotes and never contain email addresses.
 
 mod common;
@@ -13,7 +13,7 @@ pub use common::{AuthorRef, Mode, Searcher};
 
 /// Tool descriptions, for agents.
 pub mod descriptions {
-    pub const SEARCH_THREADS: &str = "Searches pgsql-hackers threads by full text (BM25), meaning (embeddings) or both \
+    pub const SEARCH_THREADS: &str = "Searches pgsql-hackers threads by full text (BM25), semantic search (embeddings) or both \
         (mode hybrid, the default). Optional author (id or name) and since/until (ISO dates) filters. Returns threads with \
         subject, dates, participants, linked features and the best-matching passages with their Message-IDs.";
     pub const GET_THREAD: &str = "Returns a thread by thread_id or by any of its Message-IDs: subject, dates, \
@@ -22,7 +22,7 @@ pub mod descriptions {
         commits, CommitFest entries and releases. Pages with offset/limit.";
     pub const SEARCH_EXTRACTS: &str = "Searches the extracted features (proposal to commit, revert or rejection; \
         release), decisions (outcome, alternatives, rationale) and positions (an author's stance), by full text, \
-        meaning or both (mode hybrid, the default). Optional kind and author filters. Each result cites messages with \
+        semantic search or both (mode hybrid, the default). Optional kind and author filters. Each result cites messages with \
         verbatim quotes.";
     pub const AUTHOR_PERSPECTIVE: &str = "Summarizes an author's perspective on a topic: their extracted positions \
         (stance and summary on features and decisions) that match the topic through their own text or the feature or \

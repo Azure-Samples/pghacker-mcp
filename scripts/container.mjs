@@ -1,8 +1,10 @@
 // The Azure container's supervisor, run as root by tini (Dockerfile). It
-// prepares each user's directories and PilotSwarm's model catalog,
-// bootstraps the database, then runs every service as its own user with
-// only its own environment (scripts/lib/azure.mjs), restarts those that
-// exit, and serves the probes' health checks on PORTS.health:
+// prepares each user's directories and PilotSwarm's model catalog, runs the
+// Foundry proxy, which signs the services' model requests with the managed
+// identity's tokens (scripts/lib/foundry.mjs), bootstraps the database, then
+// runs every service as its own user with only its own environment
+// (scripts/lib/azure.mjs), restarts those that exit, and serves the probes'
+// health checks on PORTS.health:
 //   /healthz  the supervisor is working: 503 once bootstrap has failed for
 //             15 minutes or a service keeps exiting, so the platform
 //             restarts the container
@@ -19,6 +21,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   PORTS, USERS, foundryCatalog, layout, lookupUser, oauth2ProxyArgs, processEnvironments, readAzureConfig,
 } from "./lib/azure.mjs";
+import { managedIdentityTokens, startFoundryProxy } from "./lib/foundry.mjs";
 
 const BOOTSTRAP_GIVE_UP_MS = 15 * 60_000;
 const RESTART_WINDOW_MS = 10 * 60_000;
@@ -256,6 +259,21 @@ for (const signal of ["SIGTERM", "SIGINT"]) process.once(signal, () => shutdown(
 
 prepareFiles();
 health.listen(PORTS.health, "0.0.0.0");
+const foundryToken = managedIdentityTokens({
+  endpoint: process.env.IDENTITY_ENDPOINT,
+  header: process.env.IDENTITY_HEADER,
+  clientId: config.foundry.clientId,
+});
+await startFoundryProxy({
+  upstream: config.foundry.endpoint,
+  token: foundryToken,
+  port: PORTS.foundry,
+  log: (message) => log(`Foundry proxy: ${message}`),
+});
+foundryToken().then(
+  () => log(`Foundry proxy on :${PORTS.foundry} for ${config.foundry.endpoint}, with the managed identity's token.`),
+  (error) => log(`Foundry proxy on :${PORTS.foundry}, but no token yet: ${error.message}`),
+);
 log(`Health checks on :${PORTS.health}; bootstrapping ${config.db.name} on ${config.db.host}.`);
 if (await bootstrap()) {
   byName.indexer.start();

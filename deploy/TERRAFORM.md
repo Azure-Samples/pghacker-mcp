@@ -46,13 +46,12 @@ The first apply runs with `create_app = false`: everything but the app, includin
 
 ## Key Vault secrets
 
-The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps.
+The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps. Foundry has no key at all: the subscription's policy refuses local authentication, so the identity is a *Cognitive Services OpenAI User* of the account, and the container's Foundry proxy requests its tokens (`AZURE_CLIENT_ID`).
 
 | Secret | Made by | Read as | By |
 |---|---|---|---|
 | `db-admin-password` | Terraform, 40 characters; also set on the cluster | `PGHACKER_DB_ADMIN_PASSWORD` | App, jobs |
 | `pgh-indexer-password`, `pgh-reader-password`, `pgh-swarm-password` | Terraform, 40 characters | `PGH_INDEXER_PASSWORD`, `PGH_READER_PASSWORD`, `PGH_SWARM_PASSWORD` | App, jobs |
-| `foundry-key` | Terraform, from the Foundry account's primary key | `AZURE_OAI_KEY` | App, jobs |
 | `oauth2-cookie-secret` | Terraform, 32 alphanumerics | `OAUTH2_PROXY_COOKIE_SECRET` | App |
 | `github-client-id`, `github-client-secret` | The operator, from the GitHub OAuth App | `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET` | App |
 

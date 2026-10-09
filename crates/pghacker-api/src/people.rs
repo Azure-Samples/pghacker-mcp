@@ -279,7 +279,7 @@ pub async fn author_perspective(
     Ok(out)
 }
 
-/// The topic's embedding when the mode ranks by meaning.
+/// The topic's embedding when the mode uses semantic search.
 fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfVector> {
     searcher
         .embedding()

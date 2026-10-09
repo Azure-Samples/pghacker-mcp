@@ -69,11 +69,11 @@ run "foundry_is_private" {
   assert {
     condition = (
       !azurerm_cognitive_account.foundry.public_network_access_enabled
-      && azurerm_cognitive_account.foundry.local_auth_enabled
+      && !azurerm_cognitive_account.foundry.local_auth_enabled
       && azurerm_cognitive_account.foundry.network_acls[0].default_action == "Deny"
       && azurerm_cognitive_account.foundry.network_acls[0].bypass == "None"
     )
-    error_message = "The account must refuse public network access and deny by default, and keep key authentication for PilotSwarm."
+    error_message = "The account must refuse public network access and deny by default, and refuse keys, as the subscription's policy requires."
   }
 
   assert {
@@ -133,8 +133,12 @@ run "foundry_is_private" {
   }
 
   assert {
-    condition     = azurerm_key_vault_secret.foundry_key.name == "foundry-key" && nonsensitive(azurerm_key_vault_secret.foundry_key.value == azurerm_cognitive_account.foundry.primary_access_key)
-    error_message = "The account's primary key must be stored as the foundry-key secret."
+    condition = (
+      azurerm_role_assignment.app_foundry_openai_user.scope == azurerm_cognitive_account.foundry.id
+      && azurerm_role_assignment.app_foundry_openai_user.role_definition_name == "Cognitive Services OpenAI User"
+      && azurerm_role_assignment.app_foundry_openai_user.principal_id == azurerm_user_assigned_identity.app.principal_id
+    )
+    error_message = "The app's identity must be a Cognitive Services OpenAI User of the account, which its tokens need."
   }
 
   assert {

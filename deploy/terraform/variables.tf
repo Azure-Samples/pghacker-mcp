@@ -571,7 +571,7 @@ variable "app_env" {
 
   validation {
     condition = !anytrue([for name in keys(var.app_env) : startswith(name, "OAUTH2_PROXY_")]) && length(setintersection(keys(var.app_env), [
-      "AZURE_OAI_KEY",
+      "AZURE_CLIENT_ID",
       "PGH_INDEXER_PASSWORD",
       "PGH_READER_PASSWORD",
       "PGH_SWARM_PASSWORD",

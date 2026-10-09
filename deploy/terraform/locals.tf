@@ -52,7 +52,6 @@ locals {
   job_secrets = merge(
     { "db-admin-password" = azurerm_key_vault_secret.db_admin_password.versionless_id },
     { for role, name in local.db_role_secrets : name => azurerm_key_vault_secret.db_role[role].versionless_id },
-    { "foundry-key" = azurerm_key_vault_secret.foundry_key.versionless_id },
   )
   app_secrets = merge(
     local.job_secrets,
@@ -68,7 +67,6 @@ locals {
     PGH_INDEXER_PASSWORD       = "pgh-indexer-password"
     PGH_READER_PASSWORD        = "pgh-reader-password"
     PGH_SWARM_PASSWORD         = "pgh-swarm-password"
-    AZURE_OAI_KEY              = "foundry-key"
   }
   app_secret_env = merge(local.job_secret_env, {
     OAUTH2_PROXY_CLIENT_ID     = "github-client-id"
@@ -77,9 +75,11 @@ locals {
   })
 
   # Plain settings for the app and the jobs. The model names come from the
-  # deployments, so that the jobs and the app wait for them.
+  # deployments, so that the jobs and the app wait for them. AZURE_CLIENT_ID
+  # names the identity whose tokens the Foundry proxy requests.
   job_env = {
     PGHACKER_DEPLOYMENT        = "azure"
+    AZURE_CLIENT_ID            = azurerm_user_assigned_identity.app.client_id
     PGHACKER_DB_HOST           = azapi_resource.horizondb.output.fqdn
     PGHACKER_DB_PORT           = "5432"
     PGHACKER_DB_NAME           = var.database_name

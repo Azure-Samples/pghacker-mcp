@@ -1,4 +1,5 @@
-import { databaseUrls, embedEnvironment, processEnvironments, readAzureConfig } from "./lib/azure.mjs";
+import { FOUNDRY_PROXY, PORTS, databaseUrls, embedEnvironment, processEnvironments, readAzureConfig } from "./lib/azure.mjs";
+import { PLACEHOLDER_KEY, managedIdentityTokens, startFoundryProxy } from "./lib/foundry.mjs";
 import { psqlJson, run } from "./lib/psql.mjs";
 
 // Checks the Azure deployment from inside its network: the probe job runs
@@ -6,8 +7,9 @@ import { psqlJson, run } from "./lib/psql.mjs";
 // bootstraps the database as the app would (TLS verified, roles, extensions,
 // schema, graph, migrations), then reports in one JSON line: the server,
 // its extensions and the roles; whether BM25, vector and graph queries run
-// as pgh_reader; each Foundry deployment; and the outside services the
-// app reaches. Exits 1 when anything the app needs failed.
+// as pgh_reader; the managed identity's token and each Foundry deployment,
+// through the same proxy as the app's; and the outside services the app
+// reaches. Exits 1 when anything the app needs failed.
 const started = Date.now();
 const report = { ok: false };
 const failures = [];
@@ -78,22 +80,35 @@ try {
   if (!report.queries.ok) failures.push("queries");
 
   const foundry = config.foundry;
+  const token = managedIdentityTokens({
+    endpoint: process.env.IDENTITY_ENDPOINT,
+    header: process.env.IDENTITY_HEADER,
+    clientId: foundry.clientId,
+  });
+  report.identity = await timed(async () => {
+    await token();
+    return { client_id: foundry.clientId };
+  });
+  if (!report.identity.ok) failures.push("identity");
+  const proxy = await startFoundryProxy({ upstream: foundry.endpoint, token, port: PORTS.foundry });
+  const key = { "api-key": PLACEHOLDER_KEY };
   report.foundry = {};
   for (const deployment of [foundry.sol, foundry.luna]) {
     report.foundry[deployment] = await timed(async () => {
-      const { json } = await post(`${foundry.endpoint}/openai/v1/responses`, { "api-key": foundry.key },
+      const { json } = await post(`${FOUNDRY_PROXY}/openai/v1/responses`, key,
         { model: deployment, input: "Reply with OK.", max_output_tokens: 64 });
       return { model: json.model, status: json.status };
     });
   }
   const embed = embedEnvironment(foundry);
   report.foundry[foundry.embedding] = await timed(async () => {
-    const { json } = await post(embed.HORIZON_EMBED_URL, { "api-key": foundry.key }, { input: ["ping"], model: foundry.embedding });
+    const { json } = await post(embed.HORIZON_EMBED_URL, key, { input: ["ping"], model: foundry.embedding });
     const dimensions = json.data?.[0]?.embedding?.length;
     if (String(dimensions) !== embed.HORIZON_EMBED_DIM) throw new Error(`${dimensions} dimensions, not ${embed.HORIZON_EMBED_DIM}`);
     return { dimensions };
   });
   for (const [name, result] of Object.entries(report.foundry)) if (!result.ok) failures.push(`foundry ${name}`);
+  proxy.close();
 
   report.network = {
     archive: await timed(async () => {
@@ -120,4 +135,5 @@ report.ok = failures.length === 0;
 report.failures = failures;
 report.seconds = Math.round((Date.now() - started) / 1000);
 console.log(JSON.stringify(report));
-process.exitCode = report.ok ? 0 : 1;
+// The proxy's keep-alive connections would keep the job running.
+process.exit(report.ok ? 0 : 1);

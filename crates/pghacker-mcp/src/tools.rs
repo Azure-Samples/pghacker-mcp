@@ -22,7 +22,7 @@ const READ: Effect = Effect::Read;
 pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and code with \
 citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
 (search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full text, \
-meaning or both. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
+semantic search or both. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
 read-only SQL and Cypher. Code: search (first-class code search), grep (grep command lines), read_file and \
 list_files over the PostgreSQL source loaded (see list_files or get_ontology). Cite Message-IDs and file paths \
 with line numbers in answers.";

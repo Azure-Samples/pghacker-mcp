@@ -23,7 +23,7 @@ flowchart LR
 
 - **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client (`X-Azure-ClientIP`, IPv6 by /64), and serves only requests that came through this Front Door profile (`X-Azure-FDID`).
 - **`https://<front door>/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of example-org/example-team (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
-- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings.
+- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads) and any branch, tag or commit of PostgreSQL.
   - `follow` retrieves a list's current month again every hour.
@@ -32,15 +32,15 @@ flowchart LR
 
 ## The container
 
-`scripts/container.mjs` runs as root under tini. It bootstraps the database (creating it, the roles, extensions, schema and graph, then migrating), then runs each service as its own user, with an environment that lists only what it needs (`scripts/lib/azure.mjs`):
+`scripts/container.mjs` runs as root under tini. It starts the Foundry proxy on loopback and bootstraps the database (creating it, the roles, extensions, schema and graph, then migrating). It then runs each service as its own user, with an environment that lists only what it needs (`scripts/lib/azure.mjs`):
 
 | Process | User | Gets |
 | --- | --- | --- |
 | oauth2-proxy | `pgh-proxy` | The GitHub OAuth App's ID and secret, and the cookie secret |
-| pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`) and the Foundry key for embeddings |
-| PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus, and the Foundry key |
+| pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy |
+| PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus; models through the Foundry proxy |
 
-Only the bootstrap, which runs once before the services start, gets the administrator's password; no process gets the managed identity's endpoint. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
+Only the bootstrap, which runs once before the services start, gets the administrator's password. No process gets the managed identity's endpoint: the proxy, in the supervisor, uses it, and forwards only to the Foundry account. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
 - `/healthz` fails after 15 minutes of failed bootstraps, or when a service keeps exiting.
 - `/readyz` passes when bootstrap is done and oauth2-proxy, pghacker-mcp and the portal answer.
 
@@ -84,7 +84,7 @@ You need the Azure CLI, signed in (`az login`) with Owner on the subscription, T
 
 5. **The probe.** It bootstraps the database from inside the VNet. It then checks:
    - the extensions, and that BM25, vector, trigram and Cypher queries run as `pgh_reader`;
-   - each Foundry deployment;
+   - the managed identity's token, and each Foundry deployment through the same proxy as the app's;
    - the archive, git.postgresql.org and GitHub.
 
    ```sh
@@ -169,7 +169,6 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 - **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Secrets.**
   - Rotating the GitHub OAuth App's secret means a new `github-client-secret` version and then a restart.
-  - Regenerating the Foundry key in Azure updates `foundry-key` at the next apply; restart afterwards.
   - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. The next bootstrap sets it on the role.
 - **Front Door's ranges** change now and then. Every apply reads the `AzureFrontDoor.Backend` tag again.
 - **Limits.**

@@ -66,10 +66,6 @@ override_resource {
   target = azurerm_key_vault_secret.oauth2_cookie
   values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/oauth2-cookie-secret" }
 }
-override_resource {
-  target = azurerm_key_vault_secret.foundry_key
-  values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/foundry-key" }
-}
 
 # The defaults: everything but the app, so the probe can run first.
 run "first_apply_creates_no_app" {
@@ -142,7 +138,7 @@ run "app_and_restore_job" {
     condition = (
       nonsensitive(alltrue([for secret in azurerm_container_app.app[0].secret : secret.value == null && secret.identity == azurerm_user_assigned_identity.app.id]))
       && { for secret in azurerm_container_app.app[0].secret : secret.name => secret.key_vault_secret_id } == {
-        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password", "foundry-key", "oauth2-cookie-secret", "github-client-id", "github-client-secret"] :
+        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password", "oauth2-cookie-secret", "github-client-id", "github-client-secret"] :
         name => "https://pghacker-example-kv.vault.azure.net/secrets/${name}"
       }
     )
@@ -154,11 +150,11 @@ run "app_and_restore_job" {
       for job in azurerm_container_app_job.this :
       nonsensitive(alltrue([for secret in job.secret : secret.value == null && secret.identity == azurerm_user_assigned_identity.app.id]))
       && { for secret in job.secret : secret.name => secret.key_vault_secret_id } == {
-        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password", "foundry-key"] :
+        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password"] :
         name => "https://pghacker-example-kv.vault.azure.net/secrets/${name}"
       }
     ])
-    error_message = "Every job secret must be a Key Vault reference through the identity, and the jobs must get only the database and Foundry secrets."
+    error_message = "Every job secret must be a Key Vault reference through the identity, and the jobs must get only the database's secrets."
   }
 
   assert {
@@ -169,7 +165,6 @@ run "app_and_restore_job" {
       PGH_INDEXER_PASSWORD       = "pgh-indexer-password"
       PGH_READER_PASSWORD        = "pgh-reader-password"
       PGH_SWARM_PASSWORD         = "pgh-swarm-password"
-      AZURE_OAI_KEY              = "foundry-key"
       OAUTH2_PROXY_CLIENT_ID     = "github-client-id"
       OAUTH2_PROXY_CLIENT_SECRET = "github-client-secret"
       OAUTH2_PROXY_COOKIE_SECRET = "oauth2-cookie-secret"
@@ -182,6 +177,7 @@ run "app_and_restore_job" {
       for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
       } == {
       PGHACKER_DEPLOYMENT           = "azure"
+      AZURE_CLIENT_ID               = "00000000-0000-0000-0000-000000000001"
       PGHACKER_DB_HOST              = "pghacker-example-hdb.mock-cluster.westus3.horizondb.azure.com"
       PGHACKER_DB_PORT              = "5432"
       PGHACKER_DB_NAME              = "pghacker"
@@ -215,12 +211,12 @@ run "app_and_restore_job" {
         PGH_INDEXER_PASSWORD       = "pgh-indexer-password"
         PGH_READER_PASSWORD        = "pgh-reader-password"
         PGH_SWARM_PASSWORD         = "pgh-swarm-password"
-        AZURE_OAI_KEY              = "foundry-key"
       }
       && {
         for env in job.template[0].container[0].env : env.name => env.value if env.secret_name == null
         } == {
         PGHACKER_DEPLOYMENT        = "azure"
+        AZURE_CLIENT_ID            = "00000000-0000-0000-0000-000000000001"
         PGHACKER_DB_HOST           = "pghacker-example-hdb.mock-cluster.westus3.horizondb.azure.com"
         PGHACKER_DB_PORT           = "5432"
         PGHACKER_DB_NAME           = "pghacker"
