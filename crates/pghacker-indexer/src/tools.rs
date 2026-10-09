@@ -9,8 +9,8 @@ use pghacker_core::mcp::{Effect, Output, ToolSpec, Tools, failed, parse, schema}
 
 use crate::Indexer;
 use crate::extraction::{
-    FindDuplicatesArgs, MatchArgs, MergeAuthorsArgs, MergeExtractsArgs, NextBatchArgs,
-    ReadMessagesArgs, SubmitArgs, UndoMergeArgs,
+    FindDuplicatesArgs, MarkDistinctArgs, MatchArgs, MergeAuthorsArgs, MergeExtractsArgs,
+    NextBatchArgs, ReadMessagesArgs, SubmitArgs, UndoMergeArgs,
 };
 use crate::sources::{AddSourceArgs, RemoveSourceArgs};
 
@@ -36,7 +36,7 @@ Sources (add_source, list_sources, remove_source) choose mailing lists and Postg
 retrieve, parse, embed and graph them; ingest_status shows progress. Extraction: next_extraction_batch leases \
 threads, read_messages pages through long ones, match_extracts compares your draft features and decisions with \
 existing ones, and submit_extracts saves a thread's features, decisions and positions with verbatim citations. \
-find_duplicates, merge_authors, merge_extracts and undo_merge repair the corpus.";
+find_duplicates, mark_distinct, merge_authors, merge_extracts and undo_merge repair the corpus.";
 
 pub static TOOLS: &[ToolSpec] = &[
     ToolSpec {
@@ -97,16 +97,25 @@ pub static TOOLS: &[ToolSpec] = &[
             existing id; status, release, files from the thread's patches), decisions (outcome, alternatives, \
             rationale, the feature decided), and positions (an author's stance on a feature or decision, citing \
             the author's own messages). Every extract cites messages of the thread with verbatim quotes. A new \
-            extract that resembles an existing one needs distinct_because. Send skip_reason instead for a thread \
-            without technical discussion. On errors nothing is saved: fix all and resubmit.",
+            extract that resembles an existing one needs distinct_because, which is recorded so that \
+            find_duplicates doesn't offer the pair. Send skip_reason instead for a thread without technical \
+            discussion. On errors nothing is saved: fix all and resubmit.",
         effect: CREATE,
         schema: schema::<SubmitArgs>,
     },
     ToolSpec {
         name: "find_duplicates",
-        description: "Lists pairs of features or decisions that look like the same thing, by meaning or name.",
+        description: "Lists pairs of features or decisions that look like the same thing, by meaning or name, \
+            except pairs already judged different: by an extractor's distinct_because or by mark_distinct.",
         effect: READ,
         schema: schema::<FindDuplicatesArgs>,
+    },
+    ToolSpec {
+        name: "mark_distinct",
+        description: "Records that two features, or two decisions, are different things, with a one-sentence \
+            reason, so find_duplicates doesn't offer the pair again. Idempotent.",
+        effect: WRITE,
+        schema: schema::<MarkDistinctArgs>,
     },
     ToolSpec {
         name: "merge_authors",
@@ -166,6 +175,9 @@ impl Tools for Indexer {
             "submit_extracts" => output(extraction::submit(self, parse(name, arguments)?).await),
             "find_duplicates" => {
                 output(extraction::find_duplicates(self, parse(name, arguments)?).await)
+            }
+            "mark_distinct" => {
+                output(extraction::mark_distinct(self, parse(name, arguments)?).await)
             }
             "merge_authors" => {
                 output(extraction::merge_authors(self, parse(name, arguments)?).await)

@@ -73,7 +73,7 @@ Everything listens on loopback only, and sign-in is disabled: **don't expose it*
 | --- | --- |
 | Sources and progress | `add_source`, `remove_source`, `list_sources`, `ingest_status` |
 | Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
-| Repair | `find_duplicates`, `merge_authors`, `merge_extracts`, `undo_merge` |
+| Repair | `find_duplicates` (skips pairs already judged different), `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
 
 Results cite Message-IDs, verbatim quotes and file paths. Email addresses are used only to match authors: they live in a table the reader can't access, and bodies are stored with addresses redacted.
 

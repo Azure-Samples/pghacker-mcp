@@ -537,6 +537,141 @@ async fn extracts_save_with_citations_and_near_duplicates_need_a_reason() {
 }
 
 #[tokio::test]
+async fn judged_distinct_pairs_are_not_offered_as_duplicates() {
+    let (db, indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    let first = submit_extracts(&indexer).await;
+    let feature = first["created"]["features"][0]["id"].as_i64().unwrap();
+    let decision = first["created"]["decisions"][0]["id"].as_i64().unwrap();
+
+    // A new version of the thread brings look-alikes that its extractor says are different.
+    client
+        .execute("UPDATE threads SET content_version = 2 WHERE id = 10", &[])
+        .await
+        .unwrap();
+    let (token, _) = lease(&indexer).await;
+    let matched = extraction::match_extracts(
+        &indexer,
+        args(json!({ "lease_token": token, "drafts": [
+            { "thread_id": 10, "kind": "feature", "name": "JSON_TABLE PLAN clause defaults", "description": "A default plan for nested paths." },
+            { "thread_id": 10, "kind": "decision", "name": "Simplify nested path handling first", "description": "Before the default plan." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    for draft in matched["drafts"].as_array().unwrap() {
+        assert_eq!(draft["near_duplicate"], true, "{matched:#}");
+    }
+    let saved = extraction::submit(
+        &indexer,
+        args(json!({
+            "lease_token": token, "thread_id": 10,
+            "features": [{ "draft_id": matched["drafts"][0]["draft_id"], "action": "new", "slug": "json-table-plan-defaults",
+                           "name": "JSON_TABLE PLAN clause defaults", "description": "A default plan for nested paths.",
+                           "status": "proposed",
+                           "citations": [{ "message_id": "m1@example.org", "quote": "adding the PLAN clause to JSON_TABLE" }],
+                           "distinct_because": "It changes the default plan, not the PLAN syntax." }],
+            "decisions": [{ "draft_id": matched["drafts"][1]["draft_id"], "action": "new",
+                            "feature_slug": "json-table-plan-defaults", "title": "Simplify nested path handling first",
+                            "outcome": "Simplify nested path handling before the default plan",
+                            "rationale": "The default plan builds on it",
+                            "citations": [{ "message_id": "m3@example.org", "quote": "I will simplify the nested path handling first" }],
+                            "distinct_because": "It orders work on the default plan, not on the PLAN clause." }]
+        })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["accepted"], true, "{saved:#}");
+    assert_eq!(saved["judged_distinct"], 2);
+    let added = saved["created"]["features"][0]["id"].as_i64().unwrap();
+    let rows = client
+        .query(
+            "SELECT kind, low_id, high_id, judged_by, session FROM distinct_pairs ORDER BY kind",
+            &[],
+        )
+        .await
+        .unwrap();
+    let recorded: Vec<(String, i64, String, Option<String>)> = rows
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(3), row.get(4)))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (
+                "decision".into(),
+                decision,
+                "extractor".into(),
+                Some("s1".into())
+            ),
+            (
+                "feature".into(),
+                feature,
+                "extractor".into(),
+                Some("s1".into())
+            ),
+        ]
+    );
+    for kind in ["feature", "decision"] {
+        let found = extraction::find_duplicates(&indexer, args(json!({ "kind": kind })))
+            .await
+            .unwrap();
+        assert!(found["pairs"].as_array().unwrap().is_empty(), "{found:#}");
+        assert_eq!(found["judged_distinct"], 1);
+    }
+
+    // Without its record the pair is offered again; the deduplicator's verdict hides it.
+    client
+        .execute("DELETE FROM distinct_pairs WHERE kind = 'feature'", &[])
+        .await
+        .unwrap();
+    let found = extraction::find_duplicates(&indexer, args(json!({ "kind": "feature" })))
+        .await
+        .unwrap();
+    let pair = &found["pairs"][0];
+    assert_eq!(
+        (pair["a"]["id"].as_i64(), pair["b"]["id"].as_i64()),
+        (Some(feature), Some(added))
+    );
+    let verdict = json!({ "kind": "feature", "a_id": added, "b_id": feature,
+                          "reason": "Different scope: the default plan, not the clause.", "session": "d1" });
+    let marked = extraction::mark_distinct(&indexer, args(verdict.clone()))
+        .await
+        .unwrap();
+    assert_eq!(marked["recorded"], true, "{marked:#}");
+    assert_eq!(marked["pair"], json!([feature, added]));
+    let found = extraction::find_duplicates(&indexer, args(json!({ "kind": "feature" })))
+        .await
+        .unwrap();
+    assert!(found["pairs"].as_array().unwrap().is_empty(), "{found:#}");
+    let again = extraction::mark_distinct(&indexer, args(verdict))
+        .await
+        .unwrap();
+    assert_eq!(again["recorded"], false);
+    assert_eq!(again["already_judged"]["judged_by"], "dedup");
+
+    for (bad, expected) in [
+        (
+            json!({ "kind": "feature", "a_id": feature, "b_id": feature, "reason": "The same one twice." }),
+            "the same",
+        ),
+        (
+            json!({ "kind": "feature", "a_id": feature, "b_id": added, "reason": "Differs." }),
+            "what differs",
+        ),
+        (
+            json!({ "kind": "feature", "a_id": feature, "b_id": 999, "reason": "No such feature here." }),
+            "must exist",
+        ),
+    ] {
+        let error = extraction::mark_distinct(&indexer, args(bad))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn merges_are_logged_and_undone() {
     let (db, indexer) = corpus().await;
     let client = db.indexer().await.unwrap();

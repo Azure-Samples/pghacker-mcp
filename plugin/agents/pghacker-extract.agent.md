@@ -36,6 +36,8 @@ threads) is met or `next_extraction_batch` returns `done: true`:
      a later patch version of the same proposal is the same feature);
    - **new** otherwise. When a candidate is flagged `near_duplicate` but is
      genuinely different, give `distinct_because` (one sentence: what differs).
+     It is recorded, and the deduplicator won't review the pair again, so be
+     specific.
 4. Draft **positions** for participants with a clear stance.
 5. `submit_extracts` for the thread. If it returns errors, nothing was saved:
    fix every error (usually a quote that isn't verbatim) and submit again.

@@ -19,7 +19,9 @@ the whole corpus.
 
 ## Features and decisions
 
-1. `find_duplicates` with `kind: feature`, then `kind: decision`.
+1. `find_duplicates` with `kind: feature`, then `kind: decision`. It leaves
+   out pairs already judged different, by an extractor's `distinct_because` or
+   an earlier `mark_distinct`.
 2. For each pair, decide whether they are the same thing. Read both if you
    need to: `search_extracts` (pghacker-mcp) shows descriptions and citations,
    `get_thread` shows the discussion. Same thing: the same capability or
@@ -28,6 +30,9 @@ the whole corpus.
 3. Merge true duplicates with `merge_extracts`, from the less complete into
    the more complete one (more threads, better name, later status), with a
    one-sentence `reason`.
+4. Record every pair that is different with `mark_distinct`: a one-sentence
+   `reason` (what differs), your `session` ID and your `model`. The pair
+   isn't offered again.
 
 ## Authors
 

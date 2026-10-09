@@ -374,6 +374,10 @@ async fn describes_the_ontology() {
         .collect();
     assert!(tables.contains(&"messages") && tables.contains(&"features"));
     assert!(!tables.contains(&"author_emails") && !tables.contains(&"jobs"));
+    assert!(
+        !tables.contains(&"distinct_pairs"),
+        "judged pairs are bookkeeping"
+    );
     assert_eq!(out["graph"]["vertices"].as_array().unwrap().len(), 11);
     assert_eq!(out["loaded"]["mail"]["messages"], 4);
 }

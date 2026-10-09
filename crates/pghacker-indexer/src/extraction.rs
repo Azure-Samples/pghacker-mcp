@@ -274,6 +274,21 @@ pub struct FindDuplicatesArgs {
     pub limit: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarkDistinctArgs {
+    pub kind: DraftKind,
+    pub a_id: i64,
+    pub b_id: i64,
+    /// One sentence: what differs.
+    pub reason: String,
+    /// Your PilotSwarm session ID, recorded with the verdict.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Your model, recorded with the verdict.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 struct Lease {
     thread_ids: Vec<i64>,
     session: Option<String>,
@@ -1162,6 +1177,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     .await?;
     let session = lease_record.session.clone();
     let model = lease_record.model.clone();
+    let mut judged_distinct = 0;
     let mut slug_ids: HashMap<String, i64> = existing_features
         .iter()
         .map(|(id, slug)| (slug.clone(), *id))
@@ -1209,6 +1225,18 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                     .as_array_mut()
                     .unwrap()
                     .push(json!({ "id": id, "slug": slug }));
+                if let Some(reason) = given(&feature.distinct_because)
+                    && let Some(draft) = drafts.get(&feature.draft_id)
+                {
+                    let verdict = Distinct {
+                        kind: "feature",
+                        reason,
+                        judged_by: "extractor",
+                        session: session.as_deref(),
+                        model: model.as_deref(),
+                    };
+                    judged_distinct += verdict.record_against(&*tx, id, &draft.candidates).await?;
+                }
                 id
             }
             Action::Reuse => {
@@ -1287,6 +1315,18 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                     .as_array_mut()
                     .unwrap()
                     .push(json!({ "id": id, "title": decision.title }));
+                if let Some(reason) = given(&decision.distinct_because)
+                    && let Some(draft) = drafts.get(&decision.draft_id)
+                {
+                    let verdict = Distinct {
+                        kind: "decision",
+                        reason,
+                        judged_by: "extractor",
+                        session: session.as_deref(),
+                        model: model.as_deref(),
+                    };
+                    judged_distinct += verdict.record_against(&*tx, id, &draft.candidates).await?;
+                }
                 id
             }
             Action::Reuse => {
@@ -1354,7 +1394,55 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         "created": created,
         "reused": reused,
         "citations": citation_rows.len(),
+        "judged_distinct": judged_distinct,
     }))
+}
+
+/// The text, unless it's missing or blank.
+fn given(text: &Option<String>) -> Option<&str> {
+    text.as_deref().map(str::trim).filter(|t| !t.is_empty())
+}
+
+/// A verdict that two features, or two decisions, are different things.
+struct Distinct<'a> {
+    kind: &'static str,
+    reason: &'a str,
+    judged_by: &'static str,
+    session: Option<&'a str>,
+    model: Option<&'a str>,
+}
+
+impl Distinct<'_> {
+    /// Records the pair; false when it was already recorded.
+    async fn record(&self, client: &impl GenericClient, a: i64, b: i64) -> Result<bool> {
+        let inserted = client
+            .execute(
+                "INSERT INTO distinct_pairs (kind, low_id, high_id, reason, judged_by, session, model)
+                 VALUES ($1, least($2::bigint, $3::bigint), greatest($2::bigint, $3::bigint), $4, $5, $6, $7)
+                 ON CONFLICT DO NOTHING",
+                &[&self.kind, &a, &b, &self.reason, &self.judged_by, &self.session, &self.model],
+            )
+            .await?;
+        Ok(inserted == 1)
+    }
+
+    /// Records `id` as different from each of its draft's near-duplicate
+    /// candidates, the ones its distinct_because answered. Returns how many
+    /// pairs are new.
+    async fn record_against(
+        &self,
+        client: &impl GenericClient,
+        id: i64,
+        candidates: &[Candidate],
+    ) -> Result<u64> {
+        let mut recorded = 0;
+        for candidate in candidates.iter().filter(|c| c.near_duplicate()) {
+            if self.record(client, id, candidate.id).await? {
+                recorded += 1;
+            }
+        }
+        Ok(recorded)
+    }
 }
 
 /// Releases a lease once each of its threads has been submitted or skipped.
@@ -1718,7 +1806,8 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
     Ok(json!({ "merge_id": args.merge_id, "undone": true }))
 }
 
-/// Pairs of features or decisions that look like the same thing.
+/// Pairs of features or decisions that look like the same thing, except
+/// pairs already judged different.
 pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Result<Value> {
     let min = args
         .min_similarity
@@ -1729,6 +1818,7 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
         DraftKind::Feature => ("features", "name", "description"),
         DraftKind::Decision => ("decisions", "title", "outcome"),
     };
+    let kind = args.kind.as_str();
     let client = indexer.pool.get().await?;
     let rows = client
         .query(
@@ -1740,10 +1830,11 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
                  WHERE a.merged_into IS NULL AND b.merged_into IS NULL
                    AND ((a.embedding IS NOT NULL AND b.embedding IS NOT NULL AND 1 - (a.embedding <=> b.embedding) >= $1::float8)
                         OR similarity(a.{label}, b.{label}) >= $2::float8)
+                   AND NOT EXISTS (SELECT FROM distinct_pairs p WHERE p.kind = $4 AND p.low_id = a.id AND p.high_id = b.id)
                  ORDER BY greatest(coalesce(1 - (a.embedding <=> b.embedding), 0), similarity(a.{label}, b.{label})) DESC
                  LIMIT $3"
             ),
-            &[&min, &NAME_DUPLICATE, &limit],
+            &[&min, &NAME_DUPLICATE, &limit, &kind],
         )
         .await?;
     let pairs: Vec<Value> = rows
@@ -1757,6 +1848,72 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
             })
         })
         .collect();
-    Ok(json!({ "kind": args.kind.as_str(), "pairs": pairs,
-               "next": "Merge true duplicates with merge_extracts (from the less complete into the more complete)." }))
+    let judged: i64 = client
+        .query_one(
+            "SELECT count(*) FROM distinct_pairs WHERE kind = $1",
+            &[&kind],
+        )
+        .await?
+        .get(0);
+    Ok(
+        json!({ "kind": kind, "pairs": pairs, "judged_distinct": judged,
+               "next": "Merge true duplicates with merge_extracts (from the less complete into the more complete), \
+                        and record every pair that differs with mark_distinct. Pairs already judged different \
+                        (judged_distinct) aren't listed." }),
+    )
+}
+
+/// Records a deduplicator's verdict that two features, or two decisions, are
+/// different things, so find_duplicates doesn't offer the pair again.
+pub async fn mark_distinct(indexer: &Indexer, args: MarkDistinctArgs) -> Result<Value> {
+    if args.a_id == args.b_id {
+        return Err(anyhow!("a_id and b_id are the same"));
+    }
+    let reason = args.reason.trim();
+    if reason.chars().count() < 10 {
+        return Err(anyhow!("reason must say what differs"));
+    }
+    let table = match args.kind {
+        DraftKind::Feature => "features",
+        DraftKind::Decision => "decisions",
+    };
+    let kind = args.kind.as_str();
+    let client = indexer.pool.get().await?;
+    let found: i64 = client
+        .query_one(
+            &format!("SELECT count(*) FROM {table} WHERE id IN ($1, $2) AND merged_into IS NULL"),
+            &[&args.a_id, &args.b_id],
+        )
+        .await?
+        .get(0);
+    if found != 2 {
+        return Err(anyhow!("both must exist and not be merged"));
+    }
+    let verdict = Distinct {
+        kind,
+        reason,
+        judged_by: "dedup",
+        session: args.session.as_deref(),
+        model: args.model.as_deref(),
+    };
+    let pair = [args.a_id.min(args.b_id), args.a_id.max(args.b_id)];
+    if verdict.record(&**client, args.a_id, args.b_id).await? {
+        return Ok(json!({ "recorded": true, "kind": kind, "pair": pair }));
+    }
+    let earlier = client
+        .query_one(
+            "SELECT reason, judged_by, created_at FROM distinct_pairs WHERE kind = $1 AND low_id = $2 AND high_id = $3",
+            &[&kind, &pair[0], &pair[1]],
+        )
+        .await?;
+    Ok(json!({
+        "recorded": false,
+        "kind": kind,
+        "pair": pair,
+        "already_judged": {
+            "reason": earlier.get::<_, String>(0),
+            "judged_by": earlier.get::<_, String>(1),
+            "at": earlier.get::<_, DateTime<Utc>>(2),
+        },
+    }))
 }
