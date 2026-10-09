@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 196" width="1050" height="196" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title description">
+  <title id="title">pghacker-mcp architecture</title>
+  <desc id="description">Top row: MCP clients connect to pghacker-mcp, which reads the pghacker schema and AGE graph in PilotSwarm HorizonDB. Bottom row: PilotSwarm crawler sessions call pghacker-indexer, which fetches PostgreSQL sources (mail archives and git) and writes to HorizonDB.</desc>
+  <style>
+    .node { fill: #F5F3FF; stroke: #C4B5FD; stroke-width: 1.5; }
+    .secondary { fill: #F8FAFC; stroke: #CBD5E1; }
+    .service { fill: #6D4ACD; stroke: #5B3CB5; }
+    .label { font-family: "Trebuchet MS", Verdana, Arial, sans-serif; font-size: 18px; fill: #334155; text-anchor: middle; }
+    .subtitle { font-size: 14px; fill: #64748B; }
+    .service-label { fill: #FFFFFF; font-weight: bold; }
+    .service-subtitle { fill: #E9E3FF; font-weight: normal; }
+    .edge { fill: none; stroke: #7C6BA6; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .head { fill: #7C6BA6; }
+  </style>
+
+  <rect width="1050" height="196" rx="16" fill="#FFFFFF" />
+
+  <path class="edge" d="M 280 48 H 395" />
+  <polygon class="head" points="394,43 394,53 405,48" />
+  <path class="edge" d="M 645 48 H 760" />
+  <polygon class="head" points="759,43 759,53 770,48" />
+  <path class="edge" d="M 280 148 H 395" />
+  <polygon class="head" points="394,143 394,153 405,148" />
+  <path class="edge" d="M 645 148 H 760" />
+  <polygon class="head" points="759,143 759,153 770,148" />
+  <path class="edge" d="M 610 116 C 610 96, 810 102, 810 91" />
+  <polygon class="head" points="805,91 815,91 810,80" />
+
+  <rect class="node secondary" x="40" y="16" width="240" height="64" rx="12" />
+  <text class="label" x="160" y="41" dominant-baseline="central">MCP clients</text>
+  <text class="label subtitle" x="160" y="63" dominant-baseline="central">(AI agents)</text>
+
+  <rect class="node service" x="405" y="16" width="240" height="64" rx="12" />
+  <text class="label service-label" x="525" y="41" dominant-baseline="central">pghacker-mcp</text>
+  <text class="label subtitle service-subtitle" x="525" y="63" dominant-baseline="central">(public, read-only)</text>
+
+  <rect class="node secondary" x="770" y="16" width="240" height="64" rx="12" />
+  <text class="label" x="890" y="41" dominant-baseline="central">PilotSwarm HorizonDB</text>
+  <text class="label subtitle" x="890" y="63" dominant-baseline="central">(pghacker schema + AGE graph)</text>
+
+  <rect class="node" x="40" y="116" width="240" height="64" rx="12" />
+  <text class="label" x="160" y="141" dominant-baseline="central">Crawler sessions</text>
+  <text class="label subtitle" x="160" y="163" dominant-baseline="central">(PilotSwarm)</text>
+
+  <rect class="node service" x="405" y="116" width="240" height="64" rx="12" />
+  <text class="label service-label" x="525" y="141" dominant-baseline="central">pghacker-indexer</text>
+  <text class="label subtitle service-subtitle" x="525" y="163" dominant-baseline="central">(async workers)</text>
+
+  <rect class="node secondary" x="770" y="116" width="240" height="64" rx="12" />
+  <text class="label" x="890" y="141" dominant-baseline="central">PostgreSQL sources</text>
+  <text class="label subtitle" x="890" y="163" dominant-baseline="central">(mail archives, git)</text>
+</svg>
