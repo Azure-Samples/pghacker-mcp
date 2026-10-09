@@ -395,6 +395,61 @@ async fn extraction_validates_everything_and_applies_all_or_nothing() {
 }
 
 #[tokio::test]
+async fn leases_are_renewed_by_use_and_lapse_when_abandoned() {
+    let (db, indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    let minutes_left = async |token: &str| -> f64 {
+        client
+            .query_one(
+                "SELECT (extract(epoch FROM expires_at - now()) / 60)::float8
+                 FROM extraction_leases WHERE token::text = $1",
+                &[&token],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    };
+    let set_expiry = async |token: &str, interval: &str| {
+        client
+            .execute(
+                "UPDATE extraction_leases SET expires_at = now() + $2::text::interval WHERE token::text = $1",
+                &[&token, &interval],
+            )
+            .await
+            .unwrap();
+    };
+    let (token, _) = lease(&indexer).await;
+    let left = minutes_left(&token).await;
+    assert!(
+        (19.0..=20.0).contains(&left),
+        "a default lease lasts 20 minutes: {left}"
+    );
+
+    set_expiry(&token, "1 minute").await;
+    let read = json!({ "lease_token": token, "thread_id": 10, "offset": 0 });
+    extraction::read_messages(&indexer, args(read.clone()))
+        .await
+        .unwrap();
+    assert!(
+        minutes_left(&token).await >= 19.0,
+        "using a lease renews it"
+    );
+
+    set_expiry(&token, "-1 second").await;
+    let error = extraction::read_messages(&indexer, args(read))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("expired"), "{error}");
+    let again = extraction::next_batch(&indexer, args(json!({ "thread_ids": [10] })))
+        .await
+        .unwrap();
+    assert_eq!(
+        again["threads"][0]["thread_id"], 10,
+        "an abandoned lease's thread can be leased again: {again:#}"
+    );
+}
+
+#[tokio::test]
 async fn extracts_save_with_citations_and_near_duplicates_need_a_reason() {
     let (db, indexer) = corpus().await;
     let accepted = submit_extracts(&indexer).await;

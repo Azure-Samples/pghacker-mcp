@@ -36,7 +36,8 @@ pub struct NextBatchArgs {
     /// Lease these threads instead of the next pending ones.
     #[serde(default)]
     pub thread_ids: Option<Vec<i64>>,
-    /// The lease's length in minutes, 5 to 180. Default 60.
+    /// The lease's length in minutes, 5 to 180. Default 20. Every call that
+    /// uses the lease renews it for at least 20 minutes more.
     #[serde(default)]
     pub lease_minutes: Option<u32>,
     /// Your PilotSwarm session ID, recorded with what you submit.
@@ -279,30 +280,39 @@ struct Lease {
     model: Option<String>,
 }
 
+/// How long a lease lasts by default, and how far each use renews it: a
+/// working session keeps its threads, and an abandoned lease lapses soon.
+const LEASE_MINUTES: i32 = 20;
+
 async fn lease(client: &impl GenericClient, token: &str) -> Result<Lease> {
-    let token: Uuid = token
-        .parse()
-        .map_err(|_| anyhow!("lease_token isn't a lease token"))?;
-    let row = client
+    let token = lease_token(token)?;
+    if let Some(row) = client
         .query_opt(
-            "SELECT thread_ids, session, model, expires_at > now(), released_at IS NOT NULL
-             FROM extraction_leases WHERE token = $1",
+            "UPDATE extraction_leases
+             SET expires_at = greatest(expires_at, now() + make_interval(mins => $2))
+             WHERE token = $1 AND released_at IS NULL AND expires_at > now()
+             RETURNING thread_ids, session, model",
+            &[&token, &LEASE_MINUTES],
+        )
+        .await?
+    {
+        return Ok(Lease {
+            thread_ids: row.get(0),
+            session: row.get(1),
+            model: row.get(2),
+        });
+    }
+    let released: Option<bool> = client
+        .query_opt(
+            "SELECT released_at IS NOT NULL FROM extraction_leases WHERE token = $1",
             &[&token],
         )
         .await?
-        .ok_or_else(|| anyhow!("there's no such lease"))?;
-    if row.get::<_, bool>(4) {
-        return Err(anyhow!(
-            "the lease was released; call next_extraction_batch"
-        ));
-    }
-    if !row.get::<_, bool>(3) {
-        return Err(anyhow!("the lease expired; call next_extraction_batch"));
-    }
-    Ok(Lease {
-        thread_ids: row.get(0),
-        session: row.get(1),
-        model: row.get(2),
+        .map(|row| row.get(0));
+    Err(match released {
+        None => anyhow!("there's no such lease"),
+        Some(true) => anyhow!("the lease was released; call next_extraction_batch"),
+        Some(false) => anyhow!("the lease expired; call next_extraction_batch"),
     })
 }
 
@@ -315,7 +325,11 @@ fn lease_token(token: &str) -> Result<Uuid> {
 /// Leases the next threads that need extraction, with their first page of messages.
 pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value> {
     let count = i64::from(args.threads.unwrap_or(1).clamp(1, 3));
-    let minutes = f64::from(args.lease_minutes.unwrap_or(60).clamp(5, 180));
+    let minutes = f64::from(
+        args.lease_minutes
+            .unwrap_or(LEASE_MINUTES.unsigned_abs())
+            .clamp(5, 180),
+    );
     let mut client = indexer.pool.get().await?;
     let tx = client.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('pghacker.extraction_leases'))")
