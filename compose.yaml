@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-bookworm
+    build: ./db
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Run npm run setup first}

@@ -95,7 +95,7 @@ function dockerOptions(config) {
 export async function runDatabase(action, config) {
   const options = dockerOptions(config);
   const command = action === "up"
-    ? ["up", "--detach", "--wait", "--wait-timeout", "90", "postgres"]
+    ? ["up", "--detach", "--build", "--wait", "--wait-timeout", "90", "postgres"]
     : action === "stop" ? ["stop", "postgres"] : null;
   if (!command) throw new Error(`Unsupported database action: ${action}.`);
   await new Promise((resolve, reject) => {

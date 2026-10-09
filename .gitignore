@@ -7,3 +7,4 @@ dist-tarballs/
 .model_providers.json
 npm-debug.log*
 .DS_Store
+/target/

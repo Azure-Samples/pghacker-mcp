@@ -1,0 +1,75 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The vendored tokio-postgres fork is its own workspace; the patch below uses it.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+pghacker-core = { path = "crates/pghacker-core" }
+pghacker-mail = { path = "crates/pghacker-mail" }
+pghacker-code = { path = "crates/pghacker-code" }
+pghacker-codesearch = { path = "crates/pghacker-codesearch" }
+pghacker-sqlquery = { path = "crates/pghacker-sqlquery" }
+pghacker-indexer = { path = "crates/pghacker-indexer" }
+
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "fs", "io-util", "process"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+bytes = "1"
+axum = "0.8"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "limit", "timeout", "catch-panic"] }
+# MCP: rmcp's streamable HTTP server, serving both stateless 2026-07-28
+# clients and clients that still send initialize.
+rmcp = { version = "3.5", default-features = false, features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+deadpool-postgres = "0.14"
+pgvector = { version = "0.4", features = ["postgres", "halfvec"] }
+half = "2"
+sqlparser = { version = "0.63", default-features = false, features = ["std"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "stream", "http2", "charset"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.11"
+hex = "0.4"
+base64 = "0.22"
+regex = "1"
+regex-syntax = "0.8"
+fancy-regex = "0.19"
+globset = "0.4"
+mail-parser = "0.11"
+encoding_rs = "0.8"
+html-escape = "0.2"
+gix = { version = "0.89", default-features = false }
+governor = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+toml = "1"
+url = "2"
+include_dir = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tempfile = "3"
+
+# A fork of tokio-postgres 0.7.18 (vendor/tokio-postgres; see its
+# FORK-README.md). It adds bind_text for the query tool's text-format reads
+# and only adds to the upstream API.
+# Patching crates.io moves the whole graph, deadpool-postgres included, onto it.
+[patch.crates-io]
+tokio-postgres = { path = "vendor/tokio-postgres" }
+
+[profile.release]
+debug = "line-tables-only"

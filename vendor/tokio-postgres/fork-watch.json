@@ -1,0 +1,38 @@
+{
+  "package": "tokio-postgres",
+  "pinned_version": "0.7.18",
+  "source_url": "https://static.crates.io/crates/tokio-postgres/tokio-postgres-0.7.18.crate",
+  "sha256": "a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3",
+  "vendor_path": "vendor/tokio-postgres",
+  "workspace_cargo_path": "Cargo.toml",
+  "cargo_lock_path": "Cargo.lock",
+  "patch_marker": "pghacker-mcp fork edit",
+  "expected_patch_markers": 5,
+  "required_snippets": [
+    {
+      "path": "Cargo.toml",
+      "text": "[workspace]",
+      "count": 1
+    },
+    {
+      "path": "src/query.rs",
+      "text": "Some(result_format)",
+      "count": 1
+    },
+    {
+      "path": "src/bind.rs",
+      "text": "pub async fn bind_with_result_format",
+      "count": 1
+    },
+    {
+      "path": "src/transaction.rs",
+      "text": "pub async fn bind_text",
+      "count": 1
+    },
+    {
+      "path": "src/transaction.rs",
+      "text": "pub async fn bind_raw_text",
+      "count": 1
+    }
+  ]
+}
