@@ -8,6 +8,7 @@ pub mod embedding;
 pub mod extraction;
 pub mod graph;
 pub mod jobs;
+pub mod repair;
 pub mod settings;
 pub mod slices;
 pub mod sources;

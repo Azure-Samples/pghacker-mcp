@@ -65,7 +65,9 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
     let mut enqueued = Vec::new();
     let source_id = match args.kind {
         SourceKind::MailingList => {
-            let slice = &indexer.slices.mail;
+            // Re-read, so seeds added to the file need no restart.
+            let slices = crate::slices::Slices::load(&indexer.settings.slices_path)?;
+            let slice = &slices.mail;
             if name != slice.list {
                 bail!(
                     "wave 1 retrieves only the test slice of {}; {name} isn't configured in the test slices",

@@ -144,6 +144,7 @@ async fn loads_a_local_commit_by_the_rules() {
     let again = load_snapshot(&mut client, &spec).await.unwrap();
     assert!(again.reused);
     assert_eq!(again.snapshot_id, stats.snapshot_id);
+    assert_eq!((again.text_files, again.binary_files), (6, 2));
 
     let out = tempfile::tempdir().unwrap();
     let tree = out.path().join("tree");

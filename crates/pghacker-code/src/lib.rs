@@ -210,8 +210,11 @@ fn read_tree(spec: &SnapshotSpec) -> Result<Tree> {
 pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<LoadStats> {
     if let Some(row) = client
         .query_opt(
-            "SELECT id, file_count, line_count, bytes FROM code_snapshots
-             WHERE repo = $1 AND sha = $2 AND state = 'ready'",
+            "SELECT s.id, s.file_count, s.line_count, s.bytes,
+                    count(f.id) FILTER (WHERE NOT f.is_binary), count(f.id) FILTER (WHERE f.is_binary)
+             FROM code_snapshots s LEFT JOIN code_files f ON f.snapshot_id = s.id
+             WHERE s.repo = $1 AND s.sha = $2 AND s.state = 'ready'
+             GROUP BY s.id",
             &[&spec.repo, &spec.sha],
         )
         .await?
@@ -221,6 +224,8 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
             files: row.get::<_, i32>(1) as u64,
             lines: row.get::<_, i64>(2) as u64,
             bytes: row.get::<_, i64>(3) as u64,
+            text_files: row.get::<_, i64>(4) as u64,
+            binary_files: row.get::<_, i64>(5) as u64,
             reused: true,
             ..LoadStats::default()
         });
@@ -341,6 +346,11 @@ pub async fn load_snapshot(client: &mut Client, spec: &SnapshotSpec) -> Result<L
     )
     .await?;
     tx.commit().await?;
+    // Fresh statistics, or the planner won't use the trigram index on the new lines.
+    client
+        .batch_execute("VACUUM (ANALYZE) code_files, code_lines")
+        .await
+        .context("cannot analyze the code tables")?;
     tracing::info!(
         repo = %spec.repo, sha = %spec.sha, files = stats.files, lines = stats.lines,
         ms = started.elapsed().as_millis() as u64, "loaded the snapshot"

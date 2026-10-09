@@ -9,4 +9,18 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+fancy-regex.workspace = true
+futures-util.workspace = true
+globset.workspace = true
 pghacker-core.workspace = true
+regex.workspace = true
+regex-automata = "0.4"
+regex-syntax.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

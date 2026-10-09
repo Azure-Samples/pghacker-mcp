@@ -400,6 +400,7 @@ async fn thread_overview(client: &impl GenericClient, thread_id: i64) -> Result<
         .map(|row| json!({ "author_id": row.get::<_, i64>(0), "name": row.get::<_, String>(1), "messages": row.get::<_, i64>(2) }))
         .collect();
     let existing = existing_extracts(client, thread_id).await?;
+    let signals = commit_signals(client, thread_id).await?;
     let page = messages_page(client, thread_id, 0).await?;
     Ok(json!({
         "thread_id": thread.get::<_, i64>(0),
@@ -411,9 +412,42 @@ async fn thread_overview(client: &impl GenericClient, thread_id: i64) -> Result<
         "previously": thread.get::<_, String>(6),
         "participants": participants,
         "existing_extracts": existing,
+        "status_signals": signals,
         "messages": page["messages"],
         "next_offset": page["next_offset"],
     }))
+}
+
+/// The thread's lines that report a commit, push, revert, rejection or
+/// CommitFest return, latest last: deterministic evidence for statuses that a
+/// long thread's last pages settle.
+async fn commit_signals(client: &impl GenericClient, thread_id: i64) -> Result<Vec<Value>> {
+    let rows = client
+        .query(
+            r"SELECT message_id, author, sent_at, line FROM (
+                  SELECT m.message_id, coalesce(a.display_name, m.from_name) AS author, m.sent_at,
+                         left(regexp_replace(substring(m.body_clean from
+                             '(?i)[^\n]*\m(?:committed|pushed|reverted|reverting|rejected|returned with feedback)\M[^\n]*'),
+                             '\s+', ' ', 'g'), 200) AS line
+                  FROM messages m LEFT JOIN authors a ON a.id = m.author_id
+                  WHERE m.thread_id = $1
+                    AND m.body_clean ~* '\m(committed|pushed|reverted|reverting|rejected|returned with feedback)\M'
+                  ORDER BY m.sent_at DESC NULLS LAST LIMIT 12
+              ) x ORDER BY sent_at NULLS FIRST",
+            &[&thread_id],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({
+                "message_id": row.get::<_, String>(0),
+                "author": row.get::<_, String>(1),
+                "sent_at": row.get::<_, Option<DateTime<Utc>>>(2),
+                "line": row.get::<_, Option<String>>(3),
+            })
+        })
+        .collect())
 }
 
 async fn existing_extracts(client: &impl GenericClient, thread_id: i64) -> Result<Value> {
@@ -1104,6 +1138,14 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     };
 
     let tx = client.transaction().await?;
+    tx.batch_execute(
+        "CREATE OR REPLACE FUNCTION pg_temp.status_rank(text) RETURNS int LANGUAGE sql IMMUTABLE AS $$
+             SELECT CASE $1 WHEN 'unknown' THEN 0 WHEN 'proposed' THEN 1 WHEN 'in_progress' THEN 2
+                            WHEN 'returned' THEN 3 WHEN 'withdrawn' THEN 3 WHEN 'rejected' THEN 4
+                            WHEN 'committed' THEN 4 WHEN 'reverted' THEN 5 ELSE 0 END
+         $$",
+    )
+    .await?;
     let session = lease_record.session.clone();
     let model = lease_record.model.clone();
     let mut slug_ids: HashMap<String, i64> = existing_features
@@ -1157,8 +1199,12 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             }
             Action::Reuse => {
                 let id = feature.existing_id.expect("validated");
+                // A status only moves forward: a follow-up thread doesn't undo a commit.
                 tx.execute(
-                    "UPDATE features SET status = $2, release = coalesce($3, release), updated_at = now() WHERE id = $1",
+                    "UPDATE features SET
+                         status = CASE WHEN pg_temp.status_rank($2) > pg_temp.status_rank(status) THEN $2 ELSE status END,
+                         release = coalesce($3, release), updated_at = now()
+                     WHERE id = $1",
                     &[&id, &feature.status.as_str(), &feature.release],
                 )
                 .await?;

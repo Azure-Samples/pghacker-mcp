@@ -19,6 +19,7 @@ pub mod kind {
     pub const EMBED: &str = "embed";
     pub const RESOLVE_ANCHORS: &str = "resolve_anchors";
     pub const GRAPH_SYNC: &str = "graph_sync";
+    pub const REPAIR_STATS: &str = "repair_stats";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -26,7 +27,12 @@ pub const RECURRING: &[(&str, Duration)] = &[
     (kind::EMBED, Duration::from_secs(20)),
     (kind::RESOLVE_ANCHORS, Duration::from_secs(60)),
     (kind::GRAPH_SYNC, Duration::from_secs(60)),
+    (kind::REPAIR_STATS, Duration::from_secs(120)),
 ];
+
+/// Attempts of an ingest job whose messages partly failed (a deadlock with a
+/// concurrent ingest, say) before it settles for what it stored.
+const INGEST_ATTEMPTS: i32 = 3;
 
 /// What a job's run decided.
 pub enum Outcome {
@@ -76,14 +82,16 @@ pub async fn enqueue(
     Ok(row.is_some())
 }
 
-/// Makes sure every recurring job exists and is queued.
+/// Makes sure every recurring job exists and is queued. They're short and
+/// take priority, so a long download doesn't starve embedding or the graph.
 pub async fn ensure_recurring(client: &impl GenericClient) -> Result<()> {
     for (kind, _) in RECURRING {
         client
             .execute(
-                "INSERT INTO jobs (kind, key, payload, max_attempts) VALUES ($1, 'recurring', '{}', 1000000)
-                 ON CONFLICT (kind, key) DO UPDATE SET state = 'queued', run_after = now()
-                 WHERE jobs.state IN ('done', 'failed', 'cancelled')",
+                "INSERT INTO jobs (kind, key, payload, max_attempts, priority) VALUES ($1, 'recurring', '{}', 1000000, 10)
+                 ON CONFLICT (kind, key) DO UPDATE SET priority = 10, state = CASE
+                     WHEN jobs.state IN ('done', 'failed', 'cancelled') THEN 'queued' ELSE jobs.state END,
+                     run_after = CASE WHEN jobs.state IN ('done', 'failed', 'cancelled') THEN now() ELSE jobs.run_after END",
                 &[kind],
             )
             .await?;
@@ -102,20 +110,26 @@ pub async fn wake(client: &impl GenericClient, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Claims the next due job, if any.
-pub async fn claim(client: &impl GenericClient, node: &str) -> Result<Option<Job>> {
+/// Claims the next due job, if any; of `kinds` only, when given.
+pub async fn claim(
+    client: &impl GenericClient,
+    node: &str,
+    kinds: Option<&[&str]>,
+) -> Result<Option<Job>> {
+    let kinds: Option<Vec<String>> =
+        kinds.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect());
     let row = client
         .query_opt(
             "UPDATE jobs SET state = 'running', locked_by = $1, locked_at = now(), attempts = attempts + 1
              WHERE id = (
                  SELECT id FROM jobs
-                 WHERE state = 'queued' AND run_after <= now()
+                 WHERE state = 'queued' AND run_after <= now() AND ($2::text[] IS NULL OR kind = ANY ($2))
                  ORDER BY priority DESC, run_after, id
                  FOR UPDATE SKIP LOCKED
                  LIMIT 1
              )
              RETURNING id, source_id, kind, key, payload, attempts, max_attempts",
-            &[&node],
+            &[&node, &kinds],
         )
         .await?;
     Ok(row.map(|row| Job {
@@ -210,7 +224,7 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             )
             .await?;
             after_ingest(indexer).await?;
-            Ok(Outcome::Done(serde_json::to_value(stats)?))
+            settle(job, stats)
         }
         kind::SEED_THREAD => {
             let stats = pghacker_mail::ingest::ingest_thread(
@@ -222,7 +236,7 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             )
             .await?;
             after_ingest(indexer).await?;
-            Ok(Outcome::Done(serde_json::to_value(stats)?))
+            settle(job, stats)
         }
         kind::CODE_SNAPSHOT => {
             let paths: Vec<String> =
@@ -277,8 +291,29 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
                 result: serde_json::to_value(stats)?,
             })
         }
+        kind::REPAIR_STATS => {
+            let client = indexer.pool.get().await?;
+            let repaired = crate::repair::thread_and_author_stats(&**client).await?;
+            Ok(Outcome::Again {
+                after: recurring_interval(kind::REPAIR_STATS),
+                result: json!({ "repaired": repaired }),
+            })
+        }
         other => Err(anyhow!("unknown job kind {other}")),
     }
+}
+
+/// An ingest job's outcome: done, or retried while some messages failed.
+/// Ingesting again is idempotent, so a retry stores only what's missing.
+fn settle(job: &Job, stats: pghacker_mail::ingest::IngestStats) -> Result<Outcome> {
+    if stats.failed > 0 && job.attempts < INGEST_ATTEMPTS {
+        return Err(anyhow!(
+            "{} of {} messages failed; retrying for the rest",
+            stats.failed,
+            stats.fetched
+        ));
+    }
+    Ok(Outcome::Done(serde_json::to_value(stats)?))
 }
 
 fn recurring_interval(kind: &str) -> Duration {
@@ -291,14 +326,20 @@ fn recurring_interval(kind: &str) -> Duration {
 /// After new messages: resolve their anchors, embed them and sync the graph soon.
 async fn after_ingest(indexer: &Indexer) -> Result<()> {
     let client = indexer.pool.get().await?;
-    for kind in [kind::EMBED, kind::RESOLVE_ANCHORS, kind::GRAPH_SYNC] {
+    for kind in [
+        kind::EMBED,
+        kind::RESOLVE_ANCHORS,
+        kind::REPAIR_STATS,
+        kind::GRAPH_SYNC,
+    ] {
         wake(&**client, kind).await?;
     }
     Ok(())
 }
 
 /// Runs `workers` workers until `shutdown` is cancelled; each finishes its
-/// current job first.
+/// current job first. Worker 0 runs only the recurring jobs, so embedding,
+/// anchors and the graph keep up while the others download.
 pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) -> Result<()> {
     {
         let client = indexer
@@ -318,8 +359,9 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
         let indexer = indexer.clone();
         let shutdown = shutdown.clone();
         let node = format!("{node}/{worker}");
+        let recurring_only = worker == 0 && workers > 1;
         handles.push(tokio::spawn(async move {
-            worker_loop(indexer, node, shutdown).await
+            worker_loop(indexer, node, recurring_only, shutdown).await
         }));
     }
     for handle in handles {
@@ -328,10 +370,23 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
     Ok(())
 }
 
-async fn worker_loop(indexer: Indexer, node: String, shutdown: CancellationToken) {
+const RECURRING_KINDS: &[&str] = &[
+    kind::EMBED,
+    kind::RESOLVE_ANCHORS,
+    kind::GRAPH_SYNC,
+    kind::REPAIR_STATS,
+];
+
+async fn worker_loop(
+    indexer: Indexer,
+    node: String,
+    recurring_only: bool,
+    shutdown: CancellationToken,
+) {
+    let kinds = recurring_only.then_some(RECURRING_KINDS);
     while !shutdown.is_cancelled() {
         let claimed = match indexer.pool.get().await {
-            Ok(client) => claim(&**client, &node).await,
+            Ok(client) => claim(&**client, &node, kinds).await,
             Err(error) => Err(error.into()),
         };
         match claimed {

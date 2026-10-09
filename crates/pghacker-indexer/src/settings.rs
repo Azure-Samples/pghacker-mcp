@@ -27,7 +27,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn from_env(env: &Env) -> Result<Self> {
-        let workers = env.parse_or("PGHACKER_WORKERS", 4usize)?.max(1);
+        let workers = env.parse_or("PGHACKER_WORKERS", 5usize)?.max(1);
         Ok(Self {
             database_url: env.indexer_database_url()?,
             addr: env

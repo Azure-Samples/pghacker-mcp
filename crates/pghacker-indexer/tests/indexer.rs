@@ -79,11 +79,17 @@ async fn jobs_are_idempotent_claimed_once_and_retried() {
             .unwrap()
     );
     let other = db.indexer().await.unwrap();
-    let first = jobs::claim(&client, "n1").await.unwrap().unwrap();
-    let second = jobs::claim(&other, "n2").await.unwrap().unwrap();
+    let first = jobs::claim(&client, "n1", None).await.unwrap().unwrap();
+    let second = jobs::claim(&other, "n2", None).await.unwrap().unwrap();
     assert_eq!(first.key, "b", "higher priority first");
     assert_eq!(second.key, "a");
-    assert!(jobs::claim(&client, "n1").await.unwrap().is_none());
+    assert!(jobs::claim(&client, "n1", None).await.unwrap().is_none());
+    assert!(
+        jobs::claim(&client, "n1", Some(&["other"]))
+            .await
+            .unwrap()
+            .is_none()
+    );
     client
         .execute("UPDATE jobs SET state = 'failed' WHERE key = 'a'", &[])
         .await
@@ -574,4 +580,82 @@ async fn merges_are_logged_and_undone() {
         .unwrap();
     assert_eq!(row.get::<_, i64>(0), 1);
     assert_eq!(row.get::<_, Option<i64>>(1), None);
+}
+
+#[tokio::test]
+async fn stale_counts_are_repaired() {
+    let (db, _indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "UPDATE threads SET participant_count = 99 WHERE id = 10;
+             UPDATE authors SET message_count = 7 WHERE id = 1;",
+        )
+        .await
+        .unwrap();
+    let repaired = pghacker_indexer::repair::thread_and_author_stats(&client)
+        .await
+        .unwrap();
+    assert!(repaired >= 2, "{repaired}");
+    let row = client
+        .query_one(
+            "SELECT (SELECT participant_count FROM threads WHERE id = 10), (SELECT message_count FROM authors WHERE id = 1)",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i32>(0), 2);
+    assert_eq!(row.get::<_, i32>(1), 2);
+    assert_eq!(
+        pghacker_indexer::repair::thread_and_author_stats(&client)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn leases_show_commit_signals_and_reuse_never_downgrades_a_status() {
+    let (db, indexer) = corpus().await;
+    submit_extracts(&indexer).await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "UPDATE messages SET body_clean = body_clean || E'\\nPushed to master, thanks!' WHERE id = 102;
+             UPDATE features SET status = 'committed';
+             UPDATE threads SET content_version = 2 WHERE id = 10;",
+        )
+        .await
+        .unwrap();
+    let (token, batch) = lease(&indexer).await;
+    let signals = batch["threads"][0]["status_signals"].as_array().unwrap();
+    assert_eq!(signals.len(), 1, "{batch:#}");
+    assert_eq!(signals[0]["message_id"], "m3@example.org");
+    assert_eq!(signals[0]["line"], "Pushed to master, thanks!");
+    let matched = extraction::match_extracts(
+        &indexer,
+        args(json!({ "lease_token": token, "drafts": [
+            { "thread_id": 10, "kind": "feature", "name": "JSON_TABLE PLAN clause", "description": "The PLAN clause." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    let draft = matched["drafts"][0]["draft_id"].as_i64().unwrap();
+    let id: i64 = client
+        .query_one("SELECT id FROM features", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let reuse = json!({ "lease_token": token, "thread_id": 10,
+        "features": [{ "draft_id": draft, "action": "reuse", "existing_id": id,
+                       "name": "JSON_TABLE PLAN clause", "description": "The PLAN clause.", "status": "proposed",
+                       "citations": [{ "message_id": "m1@example.org", "quote": "adding the PLAN clause to JSON_TABLE" }] }] });
+    let reused = extraction::submit(&indexer, args(reuse)).await.unwrap();
+    assert_eq!(reused["accepted"], true, "{reused:#}");
+    let status: String = client
+        .query_one("SELECT status FROM features", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(status, "committed");
 }
