@@ -16,6 +16,7 @@
     "db:reset": "node scripts/db-reset.mjs",
     "crawl": "node scripts/crawl.mjs",
     "eval": "node scripts/eval.mjs",
+    "corpus:dump": "node scripts/corpus-dump.mjs",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {

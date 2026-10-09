@@ -10,7 +10,7 @@
     },
     "ui": {
       "loadingMessage": "Starting pghacker-mcp",
-      "loadingCopy": "Connecting to the local runtime."
+      "loadingCopy": "Connecting to the pghacker-mcp runtime."
     },
     "auth": {
       "provider": "none"

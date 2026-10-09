@@ -118,6 +118,29 @@ export async function runDatabase(action, config) {
   }
 }
 
+/**
+ * Runs `args` in the database container (docker compose exec -T postgres),
+ * its standard output to `stdout` (a writable stream) or returned as text.
+ */
+export async function execInDatabase(config, args, { stdout } = {}) {
+  const options = dockerOptions(config);
+  return new Promise((resolve, reject) => {
+    const child = spawn("docker", [...options.args, "exec", "-T", "postgres", ...args], {
+      cwd: config.root, env: options.env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let text = "";
+    let errors = "";
+    if (stdout) child.stdout.pipe(stdout);
+    else child.stdout.on("data", (chunk) => { text += chunk; });
+    child.stderr.on("data", (chunk) => { errors += chunk; });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) resolve(text);
+      else reject(new Error(`${args[0]} failed in the database container (${signal || `exit ${code}`}): ${errors.trim().slice(0, 500)}`));
+    });
+  });
+}
+
 export async function stopPortal(config) {
   const record = readPortalRecord(config);
   if (!record) return false;

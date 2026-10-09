@@ -191,7 +191,10 @@ export function portalEnvironment(config, inherited = process.env) {
     || inherited.GITHUB_TOKEN || inherited.GH_TOKEN;
   if (token) env.GITHUB_TOKEN = token;
   env.PGHACKER_INDEXER_MCP_URL = serviceUrl(config.indexerPort);
-  env.PGHACKER_MCP_URL = serviceUrl(config.mcpPort);
+  // PGHACKER_AGENT_MCP_URL points the local agents at another pghacker-mcp,
+  // such as a deployment's public endpoint, for an evaluation of it.
+  env.PGHACKER_MCP_URL = config.values.PGHACKER_AGENT_MCP_URL || inherited.PGHACKER_AGENT_MCP_URL
+    || serviceUrl(config.mcpPort);
   return env;
 }
 

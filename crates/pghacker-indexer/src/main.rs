@@ -89,11 +89,19 @@ async fn run(env: &Env) -> Result<()> {
     }
     let indexer = Indexer::new(settings, env)?;
     let shutdown = CancellationToken::new();
-    let workers = tokio::spawn(jobs::run(
-        indexer.clone(),
-        indexer.settings.workers,
-        shutdown.clone(),
-    ));
+    // The tools serve at once; the workers wait until no other indexer runs
+    // the jobs, as while a new deployment replaces the old.
+    let workers = tokio::spawn({
+        let indexer = indexer.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            let Some(_leader) = jobs::lead(&indexer.settings.database_url, &shutdown).await? else {
+                return Ok(());
+            };
+            let workers = indexer.settings.workers;
+            jobs::run(indexer, workers, shutdown).await
+        }
+    });
     let server = McpServer::new(
         indexer.clone(),
         "pghacker-indexer",

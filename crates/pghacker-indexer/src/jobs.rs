@@ -146,8 +146,44 @@ pub async fn claim(
     }))
 }
 
-/// Returns jobs left running by a stopped indexer to the queue. One indexer
-/// runs per database, so at startup every running job is orphaned.
+/// Waits to be the database's only indexer that runs jobs, which a new
+/// deployment's indexer must while the old one still runs: a session
+/// advisory lock, held by the returned connection until the process exits.
+/// None when `shutdown` comes first.
+pub async fn lead(
+    database_url: &str,
+    shutdown: &CancellationToken,
+) -> Result<Option<tokio_postgres::Client>> {
+    let client = pghacker_core::db::connect(database_url, "pghacker-indexer leader").await?;
+    let mut waiting = false;
+    loop {
+        let led: bool = client
+            .query_one(
+                "SELECT pg_try_advisory_lock(hashtext('pghacker.indexer.jobs'))",
+                &[],
+            )
+            .await?
+            .get(0);
+        if led {
+            if waiting {
+                tracing::info!("the other indexer stopped; running the jobs");
+            }
+            return Ok(Some(client));
+        }
+        if !waiting {
+            tracing::info!("another indexer runs the jobs; waiting until it stops");
+            waiting = true;
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return Ok(None),
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
+    }
+}
+
+/// Returns jobs left running by a stopped indexer to the queue. Only the
+/// indexer that [`lead`]s runs jobs, so at its start every running job is
+/// orphaned.
 pub async fn requeue_orphans(client: &impl GenericClient) -> Result<u64> {
     Ok(client
         .execute(

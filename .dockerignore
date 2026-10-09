@@ -1,0 +1,31 @@
+# The image copies only what it needs, but the whole context goes to the
+# builder, and `az acr run` uploads it to Azure (deploy/acr-build.yaml, which
+# it reads from the context): keep out build output and local files that can
+# hold secrets. The Azure CLI matches a leading **/ only below the root, so
+# such names are listed for the root too.
+.git
+.env
+.env.*
+.runtime
+node_modules
+**/node_modules
+dist-tarballs
+target
+**/target
+docs
+eval
+test
+.DS_Store
+**/.DS_Store
+.terraform
+**/.terraform
+*.tfstate
+**/*.tfstate
+*.tfstate.*
+**/*.tfstate.*
+*.tfplan
+**/*.tfplan
+*.tfvars
+**/*.tfvars
+*.backend.hcl
+**/*.backend.hcl

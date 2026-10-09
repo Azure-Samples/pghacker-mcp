@@ -1,0 +1,22 @@
+# Builds the app's image from the repository's Dockerfile in Azure (ACR Tasks)
+# and pushes it as pghacker-mcp:<TAG>. BuildKit is on: `az acr build` uses the
+# classic builder, which can't build Dockerfiles that use BuildKit features
+# such as cache mounts. From the repository root, the build context:
+#
+#   az acr run --registry examplepghacr12345 --file deploy/acr-build.yaml \
+#     --set TAG="$(git rev-parse --short=12 HEAD)" .
+#
+# The upload leaves out what .dockerignore lists. Deploy the pushed image by
+# its digest: az acr repository show --name examplepghacr12345 \
+#   --image pghacker-mcp:<TAG> --query digest --output tsv
+version: v1.1.0
+# A release build of the Rust services takes a while on a task agent.
+stepTimeout: 3600
+steps:
+  - id: build
+    build: -t {{.Run.Registry}}/pghacker-mcp:{{.Values.TAG}} --platform linux/amd64 --label org.opencontainers.image.revision={{.Values.TAG}} -f Dockerfile .
+    env:
+      - DOCKER_BUILDKIT=1
+  - id: push
+    push:
+      - "{{.Run.Registry}}/pghacker-mcp:{{.Values.TAG}}"

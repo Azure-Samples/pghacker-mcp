@@ -1011,3 +1011,45 @@ async fn open_sources_take_months_ranges_follows_and_commits() {
     assert_eq!(status["mail"]["lists"][0]["months"]["queued"], 2);
     assert_eq!(status["extraction"]["scheduler"], "manual");
 }
+
+#[tokio::test]
+async fn one_indexer_runs_the_jobs_at_a_time() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let shutdown = CancellationToken::new();
+    let first = jobs::lead(&db.indexer_url, &shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::spawn({
+        let url = db.indexer_url.clone();
+        let shutdown = shutdown.clone();
+        async move { jobs::lead(&url, &shutdown).await }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!second.is_finished(), "the second waits for the first");
+    // The first stops: its connection closes and releases the lock.
+    drop(first);
+    let led = tokio::time::timeout(Duration::from_secs(15), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(led.is_some());
+    // Stopping ends a wait.
+    let stopping = CancellationToken::new();
+    let third = tokio::spawn({
+        let url = db.indexer_url.clone();
+        let stopping = stopping.clone();
+        async move { jobs::lead(&url, &stopping).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stopping.cancel();
+    let none = tokio::time::timeout(Duration::from_secs(10), third)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(none.is_none());
+}

@@ -7,7 +7,10 @@ import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 import { lastJsonBlock, parseCsv, quoteIn } from "./lib/evalcheck.mjs";
 
 // The wave 1 evaluation (npm start must be running):
-//   npm run eval -- [--questions eval/questions.json] [--only q01,q02] [--concurrency 3]
+//   npm run eval -- [--questions eval/questions.json] [--only q01,q02] [--concurrency 3] [--results eval/RESULTS.md]
+// To evaluate a deployment, start the app with PGHACKER_AGENT_MCP_URL set to
+// its public /mcp, so that the agents use it, and pass the same URL as
+// --mcp-url, so that the citations are checked against it.
 // Each question goes to a pghacker-eval session, which may use only
 // pghacker-mcp. The script checks every citation (the Message-ID exists and
 // the quote is verbatim) and a judge session grades the answer against the
@@ -21,11 +24,13 @@ const { values: options } = parseArgs({
     "judge-model": { type: "string", default: "github-copilot:gpt-6-luna" },
     concurrency: { type: "string", default: "3" },
     "timeout-minutes": { type: "string", default: "20" },
+    "mcp-url": { type: "string", default: "" },
+    results: { type: "string", default: "eval/RESULTS.md" },
   },
 });
 
 const config = readLocalConfig();
-const mcp = serviceUrl(config.mcpPort);
+const mcp = options["mcp-url"] || serviceUrl(config.mcpPort);
 const timeout = Number(options["timeout-minutes"]) * 60_000;
 
 const sqlText = (value) => `'${String(value).replace(/'/g, "''")}'`;
@@ -148,12 +153,13 @@ const lines = [
   "",
   `${passed} of ${results.length} questions passed (judged correct, with valid verbatim citations).`,
   `Answer model: \`${options.model}\`; judge: \`${options["judge-model"]}\`; run ${new Date().toISOString()}.`,
+  ...(options["mcp-url"] ? ["", `pghacker-mcp: \`${options["mcp-url"]}\`.`] : []),
   "",
   "| Question | Kind | Correct | Citations valid | On a gold thread | Seconds |",
   "| --- | --- | --- | --- | --- | --- |",
   ...results.map((r) => `| ${r.id}: ${String(r.question ?? "").replaceAll("|", "\\|")} | ${r.kind ?? ""} | ${r.correct ? "yes" : "no"} | ${r.citations_valid ? "yes" : "no"} | ${r.on_gold_thread ? "yes" : "no"} | ${r.seconds ?? ""} |`),
   "",
 ];
-writeFileSync(path.join(config.root, "eval", "RESULTS.md"), lines.join("\n"));
+writeFileSync(path.resolve(config.root, options.results), lines.join("\n"));
 console.log(`[eval] ${passed}/${results.length} passed. Details: ${path.join(dir, `eval-${stamp}.json`)}`);
 if (passed !== results.length) process.exitCode = 1;

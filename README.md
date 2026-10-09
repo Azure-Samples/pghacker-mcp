@@ -6,10 +6,12 @@ pghacker-mcp gives AI agents cited answers about PostgreSQL's design history and
 - **pghacker-indexer**: an internal async Rust service. Its workers retrieve sources (monthly mbox archives, seed threads, git), parse, thread, embed and project them into an Apache AGE graph. Its MCP tools serve the crawler sessions.
 - **Crawler sessions**: PilotSwarm agents in `plugin/` that extract features, decisions and author positions, deduplicate them, and submit them with verbatim citations.
 
-Wave 1 runs everything locally on test slices of the data:
+Locally, it runs on test slices of the data:
 - two months of pgsql-hackers (June–July 2026);
 - whole threads on SQL/PGQ and SQL/JSON;
 - a PG19 code subset (`src/backend/parser`, `src/backend/utils/adt`, `src/include/nodes`, `contrib/pg_trgm`).
+
+In Azure ([deploy/README.md](deploy/README.md)), it indexes whatever its users ask for, starting from the local corpus.
 
 ## Run locally
 
@@ -54,8 +56,9 @@ Everything listens on loopback only, and sign-in is disabled: **don't expose it*
 | `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Service ports (3101, 3102). |
 | `PILOTSWARM_WORKER_CONCURRENCY` | Session turns the worker runs at once (default 8). |
 | `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
+| `PGHACKER_AGENT_MCP_URL` | Another pghacker-mcp for the local agents, such as a deployment's public `/mcp`, to evaluate it. |
 
-`config/test-slices.toml` chooses the months, seed threads and code paths that wave 1 retrieves.
+`config/test-slices.toml` chooses the months, seed threads and code paths that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months, threads or commit instead, and `follow` keeps a list current (deploy/README.md).
 
 ## Tools
 
@@ -90,6 +93,7 @@ npm run crawl -- --pilot                          # 10 threads in one pghacker-e
 npm run crawl -- --concurrency 8                  # then the rest, 8 sessions at a time
 npm run crawl -- --dedup                          # a pghacker-dedup session merges duplicates
 npm run crawl -- --supervisor                     # or let the pghacker-crawler agent run the pilot
+npm run crawl -- --watch                          # or keep extracting as threads arrive, as Azure does
 ```
 
 The worker runs `PILOTSWARM_WORKER_CONCURRENCY` session turns at once (8 by default; set it in `.env`), so keep `--concurrency` at or below it.
@@ -113,6 +117,10 @@ PGHACKER_STUDY_DIR=<study> cargo run --release -p pghacker-replay -- study
 
 The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in Docker: 2,000 of 2,000 match each. The study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`. It matched ripgrep on all 10,540 replayable searches through `search` and 7,254 through `grep`, which is byte-identical to GNU grep on 7,277 command lines.
 
+## Deploy to Azure
+
+[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform. It runs as one image (`Dockerfile`), with HorizonDB and Azure AI Foundry behind private endpoints and Front Door in front. `/mcp` is public; the portal needs GitHub sign-in as a member of example-org/example-team. `npm run corpus:dump` exports the local corpus for the deployment's restore job.
+
 ## Repository
 
 | Path | Contents |
@@ -127,5 +135,6 @@ The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in D
 | `crates/pghacker-replay` | The exactness replay harness |
 | `migrations/`, `db/` | Schema and the PostgreSQL image |
 | `plugin/` | Branding, agents and the MCP catalog |
-| `scripts/` | The launcher, crawl and evaluation drivers |
+| `scripts/` | The launcher, crawl and evaluation drivers; the container's supervisor, probe and corpus restore |
+| `Dockerfile`, `deploy/` | The image, and the Azure deployment: Terraform, its environment and the runbook |
 | `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18 (adds `bind_text`) |
