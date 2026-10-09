@@ -1,0 +1,37 @@
+//! pghacker-mcp's mail and graph tools: threads, authors, extracts and
+//! author perspectives, searched by full text (BM25), meaning (pgvector) or
+//! both (hybrid, the default). Read-only; results cite Message-IDs and
+//! verbatim quotes and never contain email addresses.
+
+mod common;
+pub mod extracts;
+pub mod ontology;
+pub mod people;
+pub mod threads;
+
+pub use common::{AuthorRef, Mode, Searcher};
+
+/// Tool descriptions, for agents.
+pub mod descriptions {
+    pub const SEARCH_THREADS: &str = "Searches pgsql-hackers threads by full text (BM25), meaning (embeddings) or both \
+        (mode hybrid, the default). Optional author (id or name) and since/until (ISO dates) filters. Returns threads with \
+        subject, dates, participants, linked features and the best-matching passages with their Message-IDs.";
+    pub const GET_THREAD: &str = "Returns a thread by thread_id or by any of its Message-IDs: subject, dates, \
+        participants, extracts (features, decisions, positions) and its messages in order with author, date, \
+        Message-ID, reply parent, text without quoted replies, patches (files changed) and mentions of files, \
+        commits, CommitFest entries and releases. Pages with offset/limit.";
+    pub const SEARCH_EXTRACTS: &str = "Searches the extracted features (proposal to commit, revert or rejection; \
+        release), decisions (outcome, alternatives, rationale) and positions (an author's stance), by full text, \
+        meaning or both (mode hybrid, the default). Optional kind and author filters. Each result cites messages with \
+        verbatim quotes.";
+    pub const AUTHOR_PERSPECTIVE: &str = "Summarizes an author's perspective on a topic: their extracted positions \
+        (stance and summary on features and decisions), ranked by relevance to the topic in mode fulltext, semantic or \
+        hybrid (default), each with cited quotes; plus their most relevant messages on the topic as further evidence.";
+    pub const SEARCH_AUTHORS: &str =
+        "Finds authors by name, with how many messages they wrote and when.";
+    pub const GET_AUTHOR: &str = "Returns an author's profile: names used, message counts and dates, most active \
+        threads, positions by stance, and the features they took positions on.";
+    pub const GET_ONTOLOGY: &str = "Describes the data: graph vertex labels and edge types with counts and \
+        properties, tables and columns for the query tool, example SQL and Cypher, search modes, and what's loaded \
+        (months, seed threads, code snapshot, extraction coverage).";
+}

@@ -1,0 +1,65 @@
+# The wave 1 test slices: what the indexer retrieves when a source is added.
+# Sources choose mailing lists and PostgreSQL versions; this file chooses the
+# parts of them to retrieve until wave 3 retrieves everything.
+
+[mail]
+list = "pgsql-hackers"
+# Monthly mbox archives, for comparison with the postgres-hackers/v2 graph.
+months = ["2026-06", "2026-07"]
+
+# Whole threads, found by archive search, on reverted and uncommitted work.
+[[mail.seed_threads]]
+topic = "SQL Property Graph Queries (SQL/PGQ)"
+message_id = "CAExHW5suNPNFcphpabGmJnmF6EmQ2=oJ+KLWAE+o6WWScaSuDQ@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "Add support for label conjunction (&) in SQL/PGQ"
+message_id = "2dfda6847b31d8fee62b7b80441bfa62@data-bene.io"
+
+[[mail.seed_threads]]
+topic = "SQL/PGQ: Support multi-pattern path matching in GRAPH_TABLE"
+message_id = "CAAAe_zAxTXev97Zhc=Z+LH6ZWQ8UbHQ5LAo_iVkqHm=49SZS+g@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "SQL/JSON features for v15 (reverted)"
+message_id = "abd9b83b-aa66-f230-3d6d-734817f0995d@postgresql.org"
+
+[[mail.seed_threads]]
+topic = "PG 15 regression due to ExprEvalStep size (led to the SQL/JSON revert)"
+message_id = "35778.1660072664@sss.pgh.pa.us"
+
+[[mail.seed_threads]]
+topic = "SQL/JSON revisited"
+message_id = "20230503181732.26hx5ihbdkmzhlyw@alvherre.pgsql"
+
+[[mail.seed_threads]]
+topic = "remaining sql/json patches"
+message_id = "CA+HiwqE4XTdfb1nW=Ojoy_tQSRhYt-q_kb6i5d4xcKyrLC1Nbg@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "SQL/JSON json_table plan clause"
+message_id = "CAN-LCVMk6pBMBaghaq5h5awLyWje1iaDXUPJNpWhecFvwWonkw@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "jsonb subscripting vs SQL/JSON array accessor semantics (SQL:2023)"
+message_id = "CAK98qZ1P_edO9hZJVMuUpnXjN-9H=dz2zUj-06G5qW9CMjLqzA@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "Add SQL/JSON ON MISMATCH clause to JSON_VALUE"
+message_id = "CA+v5N42Kn65HauYbZJ=bAVHjzdp=wCg64dd+WzRmtu=Uu1z+Ow@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "SQL/JSON: JSON_TRANSFORM"
+message_id = "CAFC+b6pQxA0-YV8B-8KFub_bix_wdhA+oHrv7S1rYb2tQjjPzg@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "extend JSON_TABLE top level path expression"
+message_id = "CACJufxFvUppPZTSfdFof4aKBSYhgAdLhEJUiJPitBj+vcTh+Xg@mail.gmail.com"
+
+# The PG19 code subset with the SQL/JSON and SQL/PGQ parser and executor code.
+[code]
+repo_url = "https://github.com/postgres/postgres.git"
+branch = "REL_19_STABLE"
+sha = "2359968b449a0fd53cfc04d4a644ae02370adec6"
+version = "19"
+paths = ["src/backend/parser", "src/backend/utils/adt", "src/include/nodes", "contrib/pg_trgm"]

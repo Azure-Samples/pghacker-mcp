@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 pghacker-core = { path = "crates/pghacker-core" }
+pghacker-api = { path = "crates/pghacker-api" }
 pghacker-mail = { path = "crates/pghacker-mail" }
 pghacker-code = { path = "crates/pghacker-code" }
 pghacker-codesearch = { path = "crates/pghacker-codesearch" }

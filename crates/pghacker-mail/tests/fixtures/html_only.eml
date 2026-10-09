@@ -1,0 +1,9 @@
+From: bob@example.org
+Subject: HTML only
+Message-ID: <html-1@example.org>
+Date: Wed, 3 Jun 2026 13:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/html; charset=windows-1252
+Content-Transfer-Encoding: quoted-printable
+
+<html><body><p>It=92s =93quoted=94.</p><p>Second&nbsp;paragraph</p></body></html>

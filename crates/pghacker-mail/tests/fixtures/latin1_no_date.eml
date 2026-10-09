@@ -1,0 +1,9 @@
+From pgsql-hackers-owner+archive@lists.example.org Wed Jun 03 12:00:00 2026
+From: =?iso-8859-1?q?Andr=E9_Exemple?= <andre@example.org>
+Subject: =?iso-8859-1?q?Caf=E9_cr=E8me?=
+Message-ID: <latin1-1@example.org>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: 8bit
+
+Bonjour, un café crème.

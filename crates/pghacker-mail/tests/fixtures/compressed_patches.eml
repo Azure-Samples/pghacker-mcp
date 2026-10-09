@@ -1,0 +1,51 @@
+From: Carol Example <carol@example.org>
+Subject: Compressed patches
+Message-ID: <archives-1@example.org>
+Date: Thu, 4 Jun 2026 08:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="B"
+
+--B
+Content-Type: text/plain; charset=utf-8
+
+Patches attached, compressed.
+
+--B
+Content-Type: application/gzip; name="v4-0001-Rename.patch.gz"
+Content-Disposition: attachment; filename="v4-0001-Rename.patch.gz"
+Content-Transfer-Encoding: base64
+
+H4sIAAAAAAAC/32OMQ6AIBAE+3vF9eeBEGNDw0+MoJArRGMofL4Sa51it9hksoukhMxZKs467qWe
+EvSRp3rmTbeY9kNFDN8bSFnWC82LUvYFTd+PwwDM/GcGIvq1e49sOovUwntgKc9VB9Q6OMDW0cEN
+wfIQU8kAAAA=
+
+--B
+Content-Type: application/x-compressed-tar; name="series.tgz"
+Content-Disposition: attachment; filename="series.tgz"
+Content-Transfer-Encoding: base64
+
+H4sIAAAAAAAC/+3UT0vDMBzG8ZzzKn73mDbJWj30UsF586IvYPTfag62JYniyzftQGTglDkH4vM5
+JKWFpBC+8Z2znU9fcqmU0vLWOh+SqQrNIzuZuLK6zLJljvZntdL6/Xl5r43JFSPFzuDZh8rF7dn/
+1NrtlqTsbaAqbcYhOFunU78Jrn9K52EzTklD9effuB3a7pX0TpKYHdLLoXMp5aGVuRDi4OplSVJf
+GBLzUJZc2iH+asHFPNcFp3luCs7gGP5j/0Y+dPEk2hNfAEf0v7rK0T/6/27/Lfr/Wf/36+ubu/Uv
+7fFV/0pne/0rrQ36P4dhjDXRct8jIQAAAAAAAAAAAAAAAACAP+wNGNKXowAoAAA=
+
+--B
+Content-Type: text/plain; charset=utf-8; name="notes.txt"
+Content-Disposition: attachment; filename="notes.txt"
+
+Just notes, no diff here.
+--B
+Content-Type: application/octet-stream; name="=?UTF-8?B?djEtMDAwMS1lbmNvZGVkLW5hbWUucGF0Y2g=?="
+Content-Disposition: attachment; filename="=?UTF-8?B?djEtMDAwMS1lbmNvZGVkLW5hbWUucGF0Y2g=?="
+
+diff --git a/contrib/pg_trgm/trgm_op.c b/contrib/pg_trgm/trgm_op.c
+index 1111111..2222222 100644
+--- a/contrib/pg_trgm/trgm_op.c
++++ b/contrib/pg_trgm/trgm_op.c
+@@ -1,2 +1,2 @@
+-int a;
++int b;
+ int c;
+
+--B--

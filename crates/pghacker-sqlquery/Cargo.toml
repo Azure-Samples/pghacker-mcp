@@ -9,4 +9,15 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+deadpool-postgres.workspace = true
+futures-util.workspace = true
 pghacker-core.workspace = true
+schemars.workspace = true
+serde.workspace = true
+sqlparser.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

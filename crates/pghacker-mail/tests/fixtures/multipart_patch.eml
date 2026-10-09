@@ -1,0 +1,86 @@
+From pgsql-hackers-owner+archive@lists.example.org Tue Jun 02 08:31:00 2026
+Received: from mail.example.org by lists.example.org;
+	Tue, 02 Jun 2026 08:31:00 +0000
+From: "Alice Example" <Alice@Example.org>
+To: pgsql-hackers <pgsql-hackers@lists.example.org>
+Subject: Re: [PATCH v3] Fix the frobnicator in
+ src/backend/utils/adt/frob.c
+Date: Tue, 2 Jun 2026 10:30:00 +0200
+Message-ID:
+ <CAB+x=y/z@mail.example.org>
+In-Reply-To: <parent-2@example.org> (Bob Example's message of "Mon, 1 Jun 2026")
+References: <root-1@example.org>
+	<parent-2@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUNDARY"
+
+--BOUNDARY
+Content-Type: text/plain; charset="UTF-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hi Bob,
+
+On Mon, Jun 1, 2026 at 9:00 AM Bob Example <bob@example.org> wrote:
+> Could you rebase the patch?
+
+Here is v3, rebased. The caf=C3=A9 test passes now; see commit 1a2b3c4d and
+https://commitfest.postgresql.org/58/6123/ for the entry. This should be
+back-patched to v17.
+
+--=20
+Alice
+
+--BOUNDARY
+Content-Type: text/x-patch; charset="US-ASCII"; name="v3-0001-Fix-the-frobnicator.patch"
+Content-Disposition: attachment; filename="v3-0001-Fix-the-frobnicator.patch"
+Content-Transfer-Encoding: base64
+
+RnJvbSA4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIE1vbiBTZXAgMTcg
+MDA6MDA6MDAgMjAwMQpGcm9tOiBBbGljZSBFeGFtcGxlIDxhbGljZUBleGFtcGxlLm9yZz4KRGF0
+ZTogVHVlLCAyIEp1biAyMDI2IDA5OjAwOjAwICswMjAwClN1YmplY3Q6IFtQQVRDSCB2MyAxLzJd
+IEZpeCB0aGUgZnJvYm5pY2F0b3IKCk5lZ2F0aXZlIGlucHV0IHJldHVybmVkIHRoZSB3cm9uZyBz
+aWduLgotLS0KIHNyYy9iYWNrZW5kL3V0aWxzL2FkdC9mcm9iLmMgfCAzICsrLQogc3JjL2luY2x1
+ZGUvdXRpbHMvZnJvYi5oICAgICB8IDEgKwogMiBmaWxlcyBjaGFuZ2VkLCAzIGluc2VydGlvbnMo
+KyksIDEgZGVsZXRpb24oLSkKCmRpZmYgLS1naXQgYS9zcmMvYmFja2VuZC91dGlscy9hZHQvZnJv
+Yi5jIGIvc3JjL2JhY2tlbmQvdXRpbHMvYWR0L2Zyb2IuYwppbmRleCAzMzMzMzMzLi40NDQ0NDQ0
+IDEwMDY0NAotLS0gYS9zcmMvYmFja2VuZC91dGlscy9hZHQvZnJvYi5jCisrKyBiL3NyYy9iYWNr
+ZW5kL3V0aWxzL2FkdC9mcm9iLmMKQEAgLTEwLDQgKzEwLDUgQEAgZnJvYihpbnQgeCkKIHsKLQly
+ZXR1cm4geDsKKwlpZiAoeCA8IDApCisJCXJldHVybiAteDsKIAlyZXR1cm4geDsKIH0KZGlmZiAt
+LWdpdCBhL3NyYy9pbmNsdWRlL3V0aWxzL2Zyb2IuaCBiL3NyYy9pbmNsdWRlL3V0aWxzL2Zyb2Iu
+aAppbmRleCA1NTU1NTU1Li42NjY2NjY2IDEwMDY0NAotLS0gYS9zcmMvaW5jbHVkZS91dGlscy9m
+cm9iLmgKKysrIGIvc3JjL2luY2x1ZGUvdXRpbHMvZnJvYi5oCkBAIC0xLDIgKzEsMyBAQAogI2lm
+bmRlZiBGUk9CX0gKKyNkZWZpbmUgRlJPQl9ICiAjZW5kaWYKLS0gCjIuNDMuMAoK
+
+--BOUNDARY
+Content-Type: application/octet-stream; name="v3-0002-Add-tests.patch"
+Content-Disposition: attachment; filename="v3-0002-Add-tests.patch"
+Content-Transfer-Encoding: 7bit
+
+From 0123456789abcdef0123456789abcdef01234567 Mon Sep 17 00:00:00 2001
+From: Alice Example <alice@example.org>
+Date: Tue, 2 Jun 2026 10:00:00 +0200
+Subject: [PATCH v3 2/2] Add tests
+
+---
+ src/test/regress/sql/frob.sql | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/test/regress/sql/frob.sql b/src/test/regress/sql/frob.sql
+index 1111111..2222222 100644
+--- a/src/test/regress/sql/frob.sql
++++ b/src/test/regress/sql/frob.sql
+@@ -1,1 +1,3 @@
+ SELECT 1;
++SELECT frob(1);
++SELECT frob(2);
+-- 
+2.43.0
+
+--BOUNDARY
+Content-Type: application/pgp-signature; name="signature.asc"
+Content-Disposition: attachment; filename="signature.asc"
+
+-----BEGIN PGP SIGNATURE-----
+iQEzBAEBCAAdFiEEexample
+-----END PGP SIGNATURE-----
+--BOUNDARY--

@@ -24,3 +24,7 @@ ALTER ROLE pgh_reader SET default_transaction_read_only = on;
 ALTER ROLE pgh_reader SET statement_timeout = '5s';
 ALTER ROLE pgh_reader SET idle_in_transaction_session_timeout = '30s';
 ALTER ROLE pgh_reader CONNECTION LIMIT 64;
+-- Filtered vector searches keep scanning the HNSW graph until LIMIT is filled.
+ALTER ROLE pgh_reader SET hnsw.iterative_scan = 'strict_order';
+ALTER ROLE pgh_reader SET hnsw.ef_search = 100;
+ALTER ROLE pgh_indexer SET hnsw.iterative_scan = 'strict_order';
