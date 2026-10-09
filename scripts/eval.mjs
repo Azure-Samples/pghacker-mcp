@@ -44,9 +44,11 @@ async function messages(ids) {
   return new Map(list.map((m) => [m.id, m]));
 }
 
-const JUDGE = `You grade answers about PostgreSQL's history against a gold answer written by an expert.
-An answer is correct when it states the gold answer's key facts (it may add correct detail, and
-may phrase them differently) and contradicts none of them. Reply with only a JSON object:
+const JUDGE = `You grade answers about PostgreSQL's history and code against a gold answer written by an expert.
+The gold answer states the key facts first; anything after "Supporting detail:" is context. An answer is
+correct when it gives the key facts and contradicts none of the gold answer's facts, supporting detail
+included. It may phrase them differently and leave out supporting detail. Details the gold answer doesn't
+mention count against it only if they contradict the gold answer. Reply with only a JSON object:
 {"correct": true|false, "score": 0.0-1.0, "missing": "key facts missing or wrong", "reason": "one sentence"}`;
 
 async function judge(client, question, answer) {
@@ -70,10 +72,12 @@ async function evaluate(client, question) {
   try {
     reply = await session.sendAndWait(question.question, timeout);
   } catch (error) {
-    return { id: question.id, pass: false, error: error.message, session: session.sessionId };
+    return { id: question.id, kind: question.kind, question: question.question, pass: false, error: error.message, session: session.sessionId };
   }
   const parsed = lastJsonBlock(reply);
-  if (!parsed) return { id: question.id, pass: false, error: "no JSON answer block", reply, session: session.sessionId };
+  if (!parsed) {
+    return { id: question.id, kind: question.kind, question: question.question, pass: false, error: "no JSON answer block", reply, session: session.sessionId };
+  }
   const citations = Array.isArray(parsed.citations) ? parsed.citations : [];
   const goldIds = (question.gold_citations ?? []).map((c) => c.message_id);
   const found = await messages([...new Set([...citations.map((c) => c.message_id), ...goldIds])]);
@@ -147,7 +151,7 @@ const lines = [
   "",
   "| Question | Kind | Correct | Citations valid | On a gold thread | Seconds |",
   "| --- | --- | --- | --- | --- | --- |",
-  ...results.map((r) => `| ${r.id} | ${r.kind ?? ""} | ${r.correct ? "yes" : "no"} | ${r.citations_valid ? "yes" : "no"} | ${r.on_gold_thread ? "yes" : "no"} | ${r.seconds ?? ""} |`),
+  ...results.map((r) => `| ${r.id}: ${String(r.question ?? "").replaceAll("|", "\\|")} | ${r.kind ?? ""} | ${r.correct ? "yes" : "no"} | ${r.citations_valid ? "yes" : "no"} | ${r.on_gold_thread ? "yes" : "no"} | ${r.seconds ?? ""} |`),
   "",
 ];
 writeFileSync(path.join(config.root, "eval", "RESULTS.md"), lines.join("\n"));

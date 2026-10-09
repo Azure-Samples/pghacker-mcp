@@ -1,0 +1,201 @@
+[
+  {
+    "id": "q01",
+    "kind": "decision",
+    "question": "Why were the SQL/JSON features reverted from PostgreSQL 15, and who carried out the revert?",
+    "gold_answer": "The release management team (RMT) asked for the SQL/JSON features to be reverted from PostgreSQL 15 at the end of August 2022: there was no consensus that the hastily reworked patches were ready that late in the cycle, months after feature freeze, and those who had raised concerns gave little feedback on them. The central technical objection was that the implementation used subtransactions inside expression evaluation to catch errors. Andrew Dunstan carried out the revert, starting with the v15 branch. Supporting detail: Jonathan Katz spoke for the RMT; Robert Haas and Tom Lane objected to the subtransactions, and Andres Freund judged the code not close to releasable.",
+    "gold_citations": [
+      { "message_id": "40d2c882-bcac-19a9-754d-4299e1d87ac7@postgresql.org", "quote": "the RMT is going to request that this is reverted" },
+      { "message_id": "CA+TgmoaAZq6rRdVA65PBXBKs=jUHhf42Jf78kBLOaX3c6J7MfQ@mail.gmail.com", "quote": "I do not think that using subtransactions as part of the expression evaluation process is a sound idea" },
+      { "message_id": "282795e3-b6f4-72ba-dbbb-3dd7557b0d43@dunslane.net", "quote": "Yes, I'll do it, starting with the v15 branch." }
+    ]
+  },
+  {
+    "id": "q02",
+    "kind": "history",
+    "question": "What caused the PostgreSQL 15 performance regression that Mark Callaghan reported in June 2022, and how was it fixed?",
+    "gold_answer": "PostgreSQL 15's ExprEvalStep had grown from 64 bytes (PostgreSQL 10-13) to 320 bytes, mainly because the SQL/JSON EEOP_JSONEXPR step data, along with the hashed ScalarArrayOpExpr step, exceeded the inline-data budget meant to keep a step within one 64-byte cache line, so expression initialization allocated far more memory. The fix moved the JSON expression state out of line and shrank the hashed ScalarArrayOpExpr step (David Rowley's patch), bringing ExprEvalStep back to 64 bytes. Supporting detail: Andres Freund diagnosed it; the JSON step data was 296 bytes, from the SQL/JSON query functions commit; the fix was an ABI break late in the 15 cycle.",
+    "gold_citations": [
+      { "message_id": "20220616233130.rparivafipt6doj3@alap3.anarazel.de", "quote": "Mark Callaghan reported a regression in 15" },
+      { "message_id": "20220616233130.rparivafipt6doj3@alap3.anarazel.de", "quote": "jsonexpr/EEOP_JSONEXPR is 296 bytes" },
+      { "message_id": "CAApHDvo3GOUK2YFJTjcECvB=0Jx==S-ywcVno9U1rZT_7r7+dg@mail.gmail.com", "quote": "back down to 64 bytes again" }
+    ]
+  },
+  {
+    "id": "q03",
+    "kind": "history",
+    "question": "When was JSON_TABLE committed to PostgreSQL, by whom, and which part of the original proposal was left out?",
+    "gold_answer": "Amit Langote committed JSON_TABLE in April 2024, for PostgreSQL 17. The PLAN clause was left out, to be pursued in a new CommitFest entry. Supporting detail: he marked CommitFest entry 4377 committed on 8 April 2024.",
+    "gold_citations": [
+      { "message_id": "CA+HiwqFosrEbh_9KPX5hsd+n80F1m6CSVgNLYtvhhO1fsrBk6w@mail.gmail.com", "quote": "Let's work on the remaining PLAN clause with a new entry in the next CF" },
+      { "message_id": "CA+HiwqGGF2K9EDfN+Zw-=dzPFRk0PTVdMw1n4joXNhhWJVcitA@mail.gmail.com", "quote": "Pushed after fixing these and a few other issues." }
+    ]
+  },
+  {
+    "id": "q04",
+    "kind": "position",
+    "question": "What is Andres Freund's perspective on the SQL/PGQ (property graph queries) implementation?",
+    "gold_answer": "He has been consistently skeptical. In February 2024 he objected that SQL/PGQ transforms graph queries through the rewrite system, which keeps the planner from exploiting the graph formulation, when PostgreSQL should reduce its use of the rewriter, and he repeated in July 2026 that implementing PGQ in the rewriter is architecturally wrong. In August and September 2026, after SQL/PGQ was committed for 19, he reported serious problems in it and concurred with the RMT that it wasn't ready for v19. Supporting detail: the problems included its catalog representation and dependency handling (property graphs having pg_attribute entries, pg_dump's insufficient dependency handling) and locking bugs in rewriteGraphTable(); he added that it might not be ready to stay in 20 either; his July 2026 remark answered a proposal for a custom executor node.",
+    "gold_citations": [
+      { "message_id": "20240216192301.q2tf4bqjydymg3g2@awork3.anarazel.de", "quote": "we IMO should reduce usage of the rewrite system, not increase it" },
+      { "message_id": "kz3vyyrpub5kckq2wkw2i7we3fc6xpusxklv2z7hobc3v7ecad@yet4uyopjybz", "quote": "I continue to believe that choosing to implement something like PGQ in the rewriter is architecturally wrong" },
+      { "message_id": "dqa5mstx5mna3i7s23pdwl4m6bek7gqsgfccef44wjpswizufi@3aa6vzri3cat", "quote": "Pretty sure pg_dump's dependency handling for property graphs is insufficient?" },
+      { "message_id": "a66radaptuoo7f2tgcvz7emqtburjixua4fom57npmfaotbnm3@kyczczqtmrob", "quote": "I concur, this isn't ready for v19." }
+    ]
+  },
+  {
+    "id": "q05",
+    "kind": "decision",
+    "question": "Is SQL/PGQ (property graphs and GRAPH_TABLE) part of PostgreSQL 19? What happened to it?",
+    "gold_answer": "No. SQL/PGQ had been committed for PostgreSQL 19, but it was reverted from both REL_19_STABLE and master in September 2026: the RMT (Melanie Plageman) found several reported issues raising unresolved design and behavior questions, with too little time to settle them before the release, and judged reverting better than rushing fixes. Supporting detail: Peter Eisentraut committed it in March 2026; the issues included orphaned label and property metadata after CASCADE drops, global versus per-label scoping, whether property graphs need pg_class entries, and pg_dump dependency problems; Melanie hoped a revert would let them be fixed properly in 20, Peter Eisentraut agreed, Robert Haas argued it needed enough rework to come out of master too, and Peter reverted it on 7 September 2026.",
+    "gold_citations": [
+      { "message_id": "bcf58f6e-d0bd-49f8-b074-e3ee69ef6567@eisentraut.org", "quote": "I have committed this, including the 0004 patch." },
+      { "message_id": "CAAKRu_bEtjWYWhYxSo0o_t3DaZYRQd5PkC0abA0g9Mp4+ovH0w@mail.gmail.com", "quote": "we feel it would be better to revert this in 19" },
+      { "message_id": "96b179ff-0be2-4467-8fd7-f3afae8d360b@eisentraut.org", "quote": "Ok, let's do it." },
+      { "message_id": "CA+TgmoZdb5+OPbZWNGsKL516OjBDaEP9cN5wU2gdzJ8fgJzVRg@mail.gmail.com", "quote": "this needs enough rework that it should come out of both" }
+    ]
+  },
+  {
+    "id": "q06",
+    "kind": "code-history",
+    "question": "Does PostgreSQL 19 support the JSON_TABLE PLAN clause? Check both the source code and the mailing list.",
+    "gold_answer": "No. PostgreSQL 19's json_table grammar rule in src/backend/parser/gram.y has no PLAN clause (it accepts the context item, path, PASSING, COLUMNS and ON ERROR). The PLAN clause was committed only in July 2026, by Alexander Korotkov, which isn't in PostgreSQL 19. Supporting detail: the PLAN clause was deferred when Amit Langote committed JSON_TABLE in April 2024, and the committed version grew from Nikita Malakhov's patch.",
+    "gold_citations": [
+      { "message_id": "CA+HiwqFosrEbh_9KPX5hsd+n80F1m6CSVgNLYtvhhO1fsrBk6w@mail.gmail.com", "quote": "Let's work on the remaining PLAN clause with a new entry in the next CF" },
+      { "message_id": "CAPpHfdtJB2APBjD7Npa58Cg4P0KqFjNKq_mT4tpNWN2y+5zKoA@mail.gmail.com", "quote": "I'm going to push this if no objections." },
+      { "message_id": "CAA-aLv7aZGSExnbjJRw8eKkoXbu34TdoKLLA2gPye3aHjO5OSA@mail.gmail.com", "quote": "I saw that this has been committed" }
+    ],
+    "gold_files": ["src/backend/parser/gram.y:14573"]
+  },
+  {
+    "id": "q07",
+    "kind": "code",
+    "question": "In PostgreSQL 19's pg_trgm, what are the default thresholds for similarity, word similarity and strict word similarity, which operators use them, and which settings change them?",
+    "gold_answer": "contrib/pg_trgm/trgm_op.c sets similarity_threshold = 0.3 (used by the % operator), word_similarity_threshold = 0.6 (the <% operator) and strict_word_similarity_threshold = 0.5 (the <<% operator). They are changed with the GUCs pg_trgm.similarity_threshold, pg_trgm.word_similarity_threshold and pg_trgm.strict_word_similarity_threshold. Supporting detail: they are registered with DefineCustomRealVariable.",
+    "gold_citations": [],
+    "gold_files": ["contrib/pg_trgm/trgm_op.c:27", "contrib/pg_trgm/trgm_op.c:148"]
+  },
+  {
+    "id": "q08",
+    "kind": "decision",
+    "question": "What limit did the row pattern recognition (RPR) patch set on the number of pattern variables in June 2026, and why that number?",
+    "gold_answer": "240 pattern variables. Pattern variable IDs are stored in one byte, and the top 16 byte values are reserved for control codes (4 in use plus 12 spare): variables use 0-239 and control codes 240-255, which keeps the per-row match history at one byte while leaving headroom for future control codes. Supporting detail: Henson Choi proposed it as option (3), Tatsuo Ishii and jian he agreed that 240 variables is enough, the spare codes could cover regular-expression special characters, and it lowered the previous limit of 251.",
+    "gold_citations": [
+      { "message_id": "CAAAe_zCZc8s4zWfmVVUOt0y_FU=v7YTcJJJ4UL2gBzJ2_KkUmQ@mail.gmail.com", "quote": "vars 0..239, control 240..255" },
+      { "message_id": "20260602.115039.1897923276330429432.ishii@postgresql.org", "quote": "Yes, I agree that 240 pattern variables is enough." },
+      { "message_id": "CACJufxHVADC8e77pnQxSZRk7SYHCZFk6ZCM2HfTsKyD_kUji0A@mail.gmail.com", "quote": "since PostgreSQL regular expressions use 14 special characters" }
+    ]
+  },
+  {
+    "id": "q09",
+    "kind": "decision",
+    "question": "In the proposal for a logical replication conflict log table, which explicit lock modes may users take on conflict log tables, and why?",
+    "gold_answer": "Only ACCESS SHARE. Conflict log tables are system-managed, so stronger explicit locks are refused to keep them from interfering with the inserts that record conflicts, while ACCESS SHARE is allowed because pg_dump must lock the tables it dumps so they can't be dropped or altered meanwhile. Supporting detail: Dilip Kumar made the change in June 2026, after an earlier version of the patch made pg_dump fail with a permission error.",
+    "gold_citations": [
+      { "message_id": "CAFiTN-sL7MVgbWh-_2YkC-dtHjZUEk8u1rBicM2+WQiFAUjKjw@mail.gmail.com", "quote": "We now allow ACCESS SHARE mode exclusively to ensure pg_dump can acquire its necessary locks" }
+    ]
+  },
+  {
+    "id": "q10",
+    "kind": "decision",
+    "question": "Cirrus CI shut down on June 1, 2026. What replaced it for PostgreSQL's CI, and how did the hackers handle CI runs in the many forks of the PostgreSQL repository?",
+    "gold_answer": "PostgreSQL's CI moved to GitHub Actions. To keep the many downstream forks from unexpectedly running CI and consuming resources and money, CI is opt-in per repository: unless the repository variable PG_CI_ENABLED is set to 1, the workflow runs as little CI as possible. Supporting detail: Jacob Champion raised the concern about forks, Andres Freund implemented the opt-in, and a skipped run emits a summary explaining how to enable CI.",
+    "gold_citations": [
+      { "message_id": "fovrlyxqimnvl55iiopsaauwrjipws3dmbcxpyutc4v5irat3y@rn5gnt47hebj", "quote": "If the PG_CI_ENABLED repository variable is not set to 1, we run as little CI as possible." },
+      { "message_id": "CAOYmi+mxcFmqvtTeVwv4yvVWW0vA3kyx9RZUBYU36HREG3H3aA@mail.gmail.com", "quote": "we have a lot of downstream forks" }
+    ]
+  },
+  {
+    "id": "q11",
+    "kind": "decision",
+    "question": "How does a caller choose which kinds of DDL the proposed pg_get_table_ddl() function emits?",
+    "gold_answer": "With two mutually exclusive text[] arguments, only_kinds and except_kinds (for example only_kinds => ARRAY['index','foreign_key']): only_kinds emits only the listed kinds, except_kinds emits all but those, setting neither emits all kinds, and setting both is an error. Supporting detail: Akshay Joshi adopted them in July 2026 after review, replacing per-kind boolean flags (callers wanting everything except foreign keys had to flip nine flags) and an interim comma-separated text form.",
+    "gold_citations": [
+      { "message_id": "CANxoLDdVEjCCKch1O-5J6ghw89b2fkWC1ADPYTUwxu8WB-hQbw@mail.gmail.com", "quote": "The two mutually-exclusive filter arguments are now named *only_kinds* and *except_kinds*" },
+      { "message_id": "CANxoLDe308ogjUZD4DLjaMysJzHZ4z3SOXbUTyC7SAEKvSgqcw@mail.gmail.com", "quote": "Setting both raises an error; setting neither emits all kinds (the default)." },
+      { "message_id": "CANxoLDdEBYzKfj3NGrP5PjoTa-eCViWPkFR-sXLq4bUnbokyPA@mail.gmail.com", "quote": "had to flip nine flags" }
+    ]
+  },
+  {
+    "id": "q12",
+    "kind": "decision",
+    "question": "What race between the sequencesync worker and ALTER SUBSCRIPTION ... REFRESH SEQUENCES was found in July 2026, and how was it fixed?",
+    "gold_answer": "A sequencesync worker could fetch a sequence value from the publisher, ALTER SUBSCRIPTION ... REFRESH SEQUENCES could then run, and the worker would afterwards write the stale value it had fetched, leaving the sequence READY with data older than the refresh. The fix relies on the AccessExclusiveLock that AlterSubscription() holds on the subscription: it blocks a running worker's state update and any relaunched worker until the refresh commits, by which time the sequences are reset to INIT and get resynchronized with the latest publisher values. Supporting detail: Noah Misch reported it from an AI review; Amit Kapila's fix replaced a first attempt, which was reverted, and was committed as 45cf7b1e5bf9.",
+    "gold_citations": [
+      { "message_id": "20260710045217.f0.noahmisch@microsoft.com", "quote": "get subscribed sequences into READY state despite the subscriber side having data older than the last REFRESH SEQUENCES" },
+      { "message_id": "CAA4eK1LA_zXfXsT1Rn=1R6EOR09s9QnQq9VCqLcXBo3JSydr3w@mail.gmail.com", "quote": "This should be race-free because AlterSubscription() already holds AccessExclusiveLock on the subscription object." },
+      { "message_id": "CALDaNm1btV24dQvitqjHvEnTwfgYVMvPBe5arYvJKkNbj4rKtg@mail.gmail.com", "quote": "Refresh paths race the in-flight sequencesync worker" }
+    ]
+  },
+  {
+    "id": "q13",
+    "kind": "decision",
+    "question": "According to the June 2026 discussion of 'The PostgreSQL C Dialect' wiki page, which C standard does PostgreSQL 19 require, and should new code use Size or size_t?",
+    "gold_answer": "PostgreSQL started requiring C11 during the PostgreSQL 19 development cycle. New code should prefer size_t over Size, but code that modifies or extends existing code should match its surroundings, which often use Size. Supporting detail: John Naylor pointed out C11; Tom Lane described the size_t consensus; the guide also cautions against adopting new C11 features without consensus.",
+    "gold_citations": [
+      { "message_id": "CANWCAZZJxgDAUsBK-1CctczwTz2TVo3TzjhhSD7fAA9EWte3eA@mail.gmail.com", "quote": "we started requiring C11 during the dev cycle of the PG19" },
+      { "message_id": "688312.1782222788@sss.pgh.pa.us", "quote": "I think the consensus is to prefer \"size_t\" over \"Size\" in all-new code." }
+    ]
+  },
+  {
+    "id": "q14",
+    "kind": "decision",
+    "question": "What did pgsql-hackers decide about the refint contrib module in June 2026, and why?",
+    "gold_answer": "To remove refint (part of contrib/spi) in PostgreSQL 20: it has long been superseded by built-in foreign keys, recent fixes showed it costs more to maintain than it is worth as sample code, and it falls well short of current standards with nobody likely to do the work to fix it. Supporting detail: Ayush Tiwari proposed it, Tom Lane agreed, and Nathan Bossart and Daniel Gustafsson supported the removal.",
+    "gold_citations": [
+      { "message_id": "CAJTYsWUHq8Ohc6-N-xamOPYz-q3qUYMtwQX-1=Zi=5N1Q_GSEQ@mail.gmail.com", "quote": "refint has long been documented as superseded by the built-in foreign key mechanism" },
+      { "message_id": "3788238.1780697387@sss.pgh.pa.us", "quote": "I'm good with just removing it." }
+    ]
+  },
+  {
+    "id": "q15",
+    "kind": "position",
+    "question": "What was Robert Haas's view of the SQL/JSON features in PostgreSQL 15 during the August 2022 debate?",
+    "gold_answer": "He objected to the design and to the last-minute rework, without insisting on a revert. Using subtransactions inside expression evaluation to catch errors was unsound in his view, and rewriting thousands of lines in August, four months after feature freeze, left no time for review, so he saw only two viable choices, reverting or shipping as is, and pressed the RMT to make that call rather than wait. Supporting detail: he expected the subtransactions to give users constant XID wraparound problems in production and wanted errors returned through refactored interfaces; he wasn't sure shipping would irreparably damage the project, since the feature was fairly isolated, though its problems might be reason enough to revert; the RMT then requested the revert.",
+    "gold_citations": [
+      { "message_id": "CA+TgmoaAZq6rRdVA65PBXBKs=jUHhf42Jf78kBLOaX3c6J7MfQ@mail.gmail.com", "quote": "I do not think that using subtransactions as part of the expression evaluation process is a sound idea" },
+      { "message_id": "CA+TgmobLe0NXWXD2R=7ZBbb23Sd0Hszq0NrNbzGDUQoHQYQ0Jw@mail.gmail.com", "quote": "they'll have constant wraparound issues" },
+      { "message_id": "CA+TgmoaM1LeGZw58cxSHXFJuejp-Sw6W7jzwHjZjq2+J5bQQaA@mail.gmail.com", "quote": "We don't start hacking on a feature 4 months after the freeze." },
+      { "message_id": "CA+TgmoaM1LeGZw58cxSHXFJuejp-Sw6W7jzwHjZjq2+J5bQQaA@mail.gmail.com", "quote": "the only two viable strategies were (1) revert the feature and be sad or (2) decide to ship it anyway" }
+    ]
+  },
+  {
+    "id": "q16",
+    "kind": "position",
+    "question": "What is Tom Lane's position on requiring a newer Python than the operating system distributions package, for PostgreSQL's planned pytest-based tests?",
+    "gold_answer": "He is against it: if buildfarm owners have to install a Python version their platform doesn't package, they will simply not enable pytest testing. Supporting detail: he noted that maintaining a buildfarm animal is already a nontrivial effort, would rather the pytest framework give up quietly when Python is too old, and sees the minimum version as a tradeoff between ease of coding and how many platforms can run the tests.",
+    "gold_citations": [
+      { "message_id": "95014.1782050569@sss.pgh.pa.us", "quote": "they will simply not enable pytest testing" }
+    ]
+  },
+  {
+    "id": "q17",
+    "kind": "code",
+    "question": "In the PostgreSQL 19 source, which parser function transforms a raw JSON_TABLE clause, into what node, and where is it defined?",
+    "gold_answer": "transformJsonTable(), defined in src/backend/parser/parse_jsontable.c, transforms the raw JsonTable parse node into a TableFunc node. Supporting detail: it is defined at line 74, fills the TableFunc's document, column and PASSING expressions, and returns a ParseNamespaceItem.",
+    "gold_citations": [],
+    "gold_files": ["src/backend/parser/parse_jsontable.c:74"]
+  },
+  {
+    "id": "q18",
+    "kind": "code",
+    "question": "In PostgreSQL 19, how is a JSON_TABLE column represented in the raw parse tree, and what column types can it have?",
+    "gold_answer": "As a JsonTableColumn node, defined in src/include/nodes/parsenodes.h. Its coltype is a JsonTableColumnType: JTC_FOR_ORDINALITY, JTC_REGULAR, JTC_EXISTS, JTC_FORMATTED or JTC_NESTED. Supporting detail: the node also holds the column name, type name, path specification, FORMAT, wrapper and quotes behavior, nested columns, and ON EMPTY and ON ERROR behaviors.",
+    "gold_citations": [],
+    "gold_files": ["src/include/nodes/parsenodes.h:1903", "src/include/nodes/parsenodes.h:1916"]
+  },
+  {
+    "id": "q19",
+    "kind": "sql",
+    "question": "Who were the three most active posters on pgsql-hackers in June and July 2026, by number of messages, and how many messages did each send?",
+    "gold_answer": "Michael Paquier (258 messages), Tom Lane (223) and Chao Li (186).",
+    "gold_citations": []
+  },
+  {
+    "id": "q20",
+    "kind": "graph",
+    "question": "Which three source files of PostgreSQL's parser (src/backend/parser) are mentioned in the most pgsql-hackers messages in the corpus?",
+    "gold_answer": "src/backend/parser/gram.y is mentioned by far the most, followed by parse_expr.c and then parse_clause.c. Supporting detail: about 240, 160 and 125 messages respectively.",
+    "gold_citations": []
+  }
+]

@@ -21,6 +21,9 @@ come from what the tools return.
   `get_thread`. Use `get_ontology` and `query` (SQL or Cypher over the graph)
   for counts and relationships. For code use `search`, `grep`, `read_file`
   and `list_files`.
+- For an author's perspective, read their positions and the messages
+  `author_perspective` returns, then cover each distinct point they made,
+  across threads and over time.
 - Verify before you answer: open the thread or file behind a claim.
 
 ## Answer format
@@ -30,7 +33,7 @@ object in a ```json fenced block:
 
 ```json
 {
-  "answer": "One to four sentences answering the question.",
+  "answer": "Two to five sentences answering the question.",
   "citations": [
     { "message_id": "<Message-ID>", "quote": "verbatim text from that message" }
   ],
@@ -38,8 +41,28 @@ object in a ```json fenced block:
 }
 ```
 
+Be specific: name the people, dates, versions and mechanisms involved (what
+was decided and why), not just that there were concerns.
+
 `citations` lists one to five messages whose text supports the answer, each
 with a quote copied character for character from the message as the tools
 returned it (12 to 200 characters). `files` lists code locations you relied
 on (empty when none). If the tools don't hold the answer, say so in
 `answer` and leave `citations` empty.
+
+## Check your citations
+
+Message-IDs are long and easy to mistype. Before you reply, check every
+citation with one `query`:
+
+```sql
+SELECT c.id, m.message_id IS NOT NULL AS found,
+       position(regexp_replace(c.quote, '\s+', ' ', 'g')
+                IN regexp_replace(m.body, '\s+', ' ', 'g')) > 0 AS verbatim
+FROM (VALUES ('<message_id>', '<quote>'), ('<message_id>', '<quote>')) AS c(id, quote)
+LEFT JOIN messages m ON m.message_id = c.id
+```
+
+Fix any row that isn't found and verbatim: look up the message by a
+distinctive part of the quote (`WHERE body LIKE '%...%'`), copy its
+`message_id` from the result, and check again.
