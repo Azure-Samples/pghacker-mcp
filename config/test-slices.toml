@@ -56,6 +56,14 @@ message_id = "CAFC+b6pQxA0-YV8B-8KFub_bix_wdhA+oHrv7S1rYb2tQjjPzg@mail.gmail.com
 topic = "extend JSON_TABLE top level path expression"
 message_id = "CACJufxFvUppPZTSfdFof4aKBSYhgAdLhEJUiJPitBj+vcTh+Xg@mail.gmail.com"
 
+[[mail.seed_threads]]
+topic = "PGQ catalog representation and pg_dump support (SQL/PGQ reverted from 19)"
+message_id = "CAAKRu_bEtjWYWhYxSo0o_t3DaZYRQd5PkC0abA0g9Mp4+ovH0w@mail.gmail.com"
+
+[[mail.seed_threads]]
+topic = "[SQL/PGQ] Native executor for Graph query (after the revert)"
+message_id = "CAAAe_zAr4JsHX95RicJ5cVZbF9gosmrX0fNBgtMvMm6sgjuoVQ@mail.gmail.com"
+
 # The PG19 code subset with the SQL/JSON and SQL/PGQ parser and executor code.
 [code]
 repo_url = "https://github.com/postgres/postgres.git"

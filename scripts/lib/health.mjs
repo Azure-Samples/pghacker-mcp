@@ -1,5 +1,14 @@
 import { LOCAL_HOST } from "./config.mjs";
 
+/** The agents the app's plugin defines, which the portal must offer. */
+export const APP_AGENTS = ["pghacker-crawler", "pghacker-dedup", "pghacker-eval", "pghacker-extract"];
+
+/** An agent's short name, whatever form the portal lists it in. */
+export function agentName(agent) {
+  const name = typeof agent === "string" ? agent : agent?.name ?? agent?.id ?? "";
+  return String(name).split(/[/:]/).pop();
+}
+
 async function getJson(base, route, timeout, fetchImpl) {
   const response = await fetchImpl(`${base}${route}`, { signal: AbortSignal.timeout(timeout) });
   let data;
@@ -21,8 +30,9 @@ export async function checkPortal(config, { timeout = 90_000, fetchImpl = fetch 
   if (bootstrap.ok !== true || bootstrap.mode !== "local" || bootstrap.workerCount !== 0) {
     throw new Error("Portal bootstrap must report local mode without additional portal-managed workers.");
   }
-  if (!Array.isArray(bootstrap.creatableAgents) || bootstrap.creatableAgents.length !== 0) {
-    throw new Error("The blank starter must not expose an app-specific agent roster.");
+  const roster = Array.isArray(bootstrap.creatableAgents) ? bootstrap.creatableAgents.map(agentName).sort() : null;
+  if (!roster || roster.join(",") !== APP_AGENTS.join(",")) {
+    throw new Error(`The portal must offer exactly the app's agents (${APP_AGENTS.join(", ")}), not ${roster?.join(", ") || "none"}.`);
   }
 
   const [health, auth, portal, registry] = await Promise.all([
@@ -35,7 +45,7 @@ export async function checkPortal(config, { timeout = 90_000, fetchImpl = fetch 
     throw new Error("Portal health must report a started local runtime, not just HTTP 200.");
   }
   if (auth.provider !== "none" || auth.enabled !== false) {
-    throw new Error("The localhost-only starter must advertise disabled sign-in.");
+    throw new Error("The localhost-only app must advertise disabled sign-in.");
   }
   if (portal.ok !== true || portal.portal?.branding?.title !== "pghacker-mcp"
     || portal.portal?.branding?.pageTitle !== "pghacker-mcp") {

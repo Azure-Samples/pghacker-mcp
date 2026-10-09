@@ -37,7 +37,7 @@ Tables in schema `pghacker` are authoritative. Messages and extracts support thr
 | --- | --- |
 | **Mail** | `AUTHORED` Author → Message, `REPLIES_TO` Message → Message, `IN_THREAD` Message → Thread |
 | **Anchors** | `MENTIONS` Message → File, Commit, CommitFestEntry or Release; `PART_OF` File → Subsystem |
-| **Extracts** | `DISCUSSES` Thread → Feature, `DECIDES` Decision → Feature, `TARGETS` Feature → Release, `IMPLEMENTS` File → Feature, `HOLDS` Author → Position, `ON` Position → Feature or Decision, `EVIDENCED_BY` extract → Message |
+| **Extracts** | `DISCUSSES` Thread → Feature, `DECIDES` Decision → Feature, `TARGETS` Feature → Release, `IMPLEMENTS` File → Feature, `HOLDS` Author → Position, `ABOUT` Position → Feature or Decision, `EVIDENCED_BY` extract → Message |
 | **git** | Wave 2: `MODIFIES` Commit → File, `DISCUSSED_IN` Commit → Thread |
 
 **Anchors.** PostgreSQL has no pull requests: a PR ID maps to a CommitFest entry or patch series, a comment ID to a Message-ID and quote, and a file ID to `REL_19_STABLE@<sha>:<path>`.
@@ -46,7 +46,7 @@ Tables in schema `pghacker` are authoritative. Messages and extracts support thr
 
 Deterministic code handles verbatim facts and models only judgments; the agent-built v2 graph needed 127 recovery batches for two months of mail. Crawlers call idempotent indexer tools:
 
-- **Sources:** `add_source`, `remove_source` and `list_sources` pick mailing lists and PostgreSQL versions (branch, pinned SHA, paths). Async workers retrieve them (monthly mbox, flat thread pages, git), thread mail, match authors by email, record patches, chunk and embed, re-fetching the current month hourly. Waves 1–2 retrieve only the test slices.
+- **Sources:** `add_source`, `remove_source` and `list_sources` pick mailing lists and PostgreSQL versions (branch, pinned SHA, paths). Async workers retrieve them (monthly mbox, flat thread pages, git), thread mail, match authors by email, record patches, chunk and embed; from wave 3 they re-fetch the current month hourly. Emails only match identities: they never reach the graph or tool output. Waves 1–2 retrieve only the test slices.
 - **Progress:** `ingest_status` reports what each source has retrieved, parsed and extracted.
 - **Extraction:** `next_extraction_batch` leases unextracted threads with messages, authors and anchors. Before submitting, the model deduplicates: `match_extracts` finds existing features and decisions like each draft, and the model reuses one or declares a new one. `submit_extracts` rejects unreviewed near-duplicates, citations outside the thread and inexact quotes.
 - **Repair:** `merge_authors` and `merge_extracts` make logged, reversible merges.

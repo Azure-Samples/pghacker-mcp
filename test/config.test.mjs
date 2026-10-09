@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { resolvePortalConfigFromPluginDirs } from "pilotswarm/host";
 import {
-  APP_ROOT, initialEnv, initializeEnv, parseLocalConfig, portalEnvironment, projectName, readLocalConfig,
+  APP_ROOT, ensureRolePasswords, initialEnv, initializeEnv, parseLocalConfig, portalEnvironment, projectName,
+  readLocalConfig, serviceEnvironments,
 } from "../scripts/lib/config.mjs";
 import { workerOptions } from "../scripts/lib/worker.mjs";
 
@@ -146,4 +147,68 @@ test("the app-owned worker uses the public management-agent opt-out", () => {
   assert.equal(options.disableManagementAgents, true);
   assert.equal(options.githubToken, undefined);
   assert.deepEqual(options.pluginDirs, [path.join(config.root, "plugin")]);
+});
+
+test("the roles need real passwords and every listener its own port", () => {
+  const text = initialEnv(password);
+  assert.throws(() => parseLocalConfig(text.replace(/PGH_READER_PASSWORD=.*/, "PGH_READER_PASSWORD=short")), /PGH_READER_PASSWORD/);
+  assert.throws(() => parseLocalConfig(text.replace(/PGH_INDEXER_PASSWORD=.*\n/, "")), /PGH_INDEXER_PASSWORD/);
+  assert.throws(() => parseLocalConfig(`${text}PGHACKER_MCP_PORT=3001\n`), /different ports/);
+  const config = parseLocalConfig(text);
+  assert.equal(config.indexerPort, 3101);
+  assert.equal(config.mcpPort, 3102);
+});
+
+test("setup adds role passwords to an .env from before them, once", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pghacker-roles-"));
+  try {
+    const legacy = initialEnv(password).split("\n").filter((line) => !line.includes("PGH_") && !line.includes("pghacker roles")).join("\n");
+    writeFileSync(path.join(root, ".env"), legacy, { mode: 0o600 });
+    assert.throws(() => readLocalConfig(root), /PGH_INDEXER_PASSWORD/);
+    assert.equal(ensureRolePasswords(root), true);
+    const config = readLocalConfig(root);
+    assert.equal(config.values.PGH_INDEXER_PASSWORD.length, 64);
+    assert.notEqual(config.values.PGH_INDEXER_PASSWORD, config.values.PGH_READER_PASSWORD);
+    assert.equal(ensureRolePasswords(root), false);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("each process gets only the credentials it needs", () => {
+  const config = parseLocalConfig(`${initialEnv(password)}HORIZON_EMBED_URL=https://embed.example/embeddings\nHORIZON_EMBED_API_KEY=unit-test-key\n`);
+  const services = serviceEnvironments(config, { PATH: "/test/path", DATABASE_URL: "postgresql://remote.example/x" });
+  const role = (url) => decodeURIComponent(new URL(url).username);
+  assert.equal(role(services.bootstrap.PGHACKER_ADMIN_DATABASE_URL), "pghacker");
+  assert.equal(role(services.indexer.PGHACKER_INDEXER_DATABASE_URL), "pgh_indexer");
+  assert.equal(role(services.mcp.PGHACKER_READER_DATABASE_URL), "pgh_reader");
+  assert.equal(new URL(services.mcp.PGHACKER_READER_DATABASE_URL).hostname, "127.0.0.1");
+  for (const key of ["PGHACKER_ADMIN_DATABASE_URL", "DATABASE_URL", "PGHACKER_READER_DATABASE_URL", "PGH_READER_PASSWORD"]) {
+    assert.equal(key in services.indexer, false, key);
+  }
+  for (const key of ["PGHACKER_ADMIN_DATABASE_URL", "DATABASE_URL", "PGHACKER_INDEXER_DATABASE_URL", "PGH_INDEXER_PASSWORD"]) {
+    assert.equal(key in services.mcp, false, key);
+  }
+  assert.equal(services.indexer.HORIZON_EMBED_API_KEY, "unit-test-key");
+  assert.equal(services.mcp.HORIZON_EMBED_URL, "https://embed.example/embeddings");
+  assert.equal(services.indexer.PATH, "/test/path");
+  const portal = portalEnvironment(config, {});
+  assert.equal(portal.PILOTSWARM_WORKER_CONCURRENCY, "8");
+  assert.equal(portalEnvironment(parseLocalConfig(`${initialEnv(password)}PILOTSWARM_WORKER_CONCURRENCY=12\n`), {}).PILOTSWARM_WORKER_CONCURRENCY, "12");
+  assert.equal(portal.PGHACKER_MCP_URL, "http://127.0.0.1:3102/mcp");
+  assert.equal(portal.PGHACKER_INDEXER_MCP_URL, "http://127.0.0.1:3101/mcp");
+  for (const key of ["HORIZON_EMBED_API_KEY", "PGH_INDEXER_PASSWORD", "PGH_READER_PASSWORD"]) {
+    assert.equal(key in portal, false, key);
+  }
+});
+
+test("the plugin's agents load with the MCP servers they name", async () => {
+  const { loadAgentFiles } = await import("pilotswarm-sdk");
+  const agents = Object.fromEntries(loadAgentFiles(path.join(APP_ROOT, "plugin", "agents")).map((agent) => [agent.name, agent]));
+  assert.deepEqual(Object.keys(agents).sort(), ["pghacker-crawler", "pghacker-dedup", "pghacker-eval", "pghacker-extract"]);
+  assert.deepEqual(agents["pghacker-extract"].mcpServers, ["pghacker-indexer"]);
+  assert.deepEqual(agents["pghacker-eval"].mcpServers, ["pghacker-mcp"]);
+  const catalog = JSON.parse(readFileSync(path.join(APP_ROOT, "plugin", ".mcp.json"), "utf8"));
+  assert.equal(catalog["pghacker-mcp"].url, "${PGHACKER_MCP_URL}");
+  assert.equal(catalog["pghacker-indexer"].url, "${PGHACKER_INDEXER_MCP_URL}");
 });

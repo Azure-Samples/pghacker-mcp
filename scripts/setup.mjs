@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { APP_ROOT, initializeEnv, readLocalConfig } from "./lib/config.mjs";
+import { APP_ROOT, ensureRolePasswords, initializeEnv, readLocalConfig } from "./lib/config.mjs";
 import { PILOTSWARM_VERSION, RELEASE_ASSETS, restoreRelease } from "./lib/release.mjs";
 
 try {
@@ -9,8 +9,13 @@ try {
     throw new Error("Node.js 24 or later is required.");
   }
   const created = initializeEnv();
-  readLocalConfig();
-  console.log(`[setup] ${created ? "Created private .env with a random database password." : "Preserved existing .env."}`);
+  const roles = !created && ensureRolePasswords();
+  const config = readLocalConfig();
+  console.log(`[setup] ${created ? "Created private .env with random database passwords." : "Preserved existing .env."}`);
+  if (roles) console.log("[setup] Added passwords for the pgh_indexer and pgh_reader roles to .env.");
+  if (!config.values.HORIZON_EMBED_URL) {
+    console.log("[setup] Semantic search needs an embeddings endpoint: set HORIZON_EMBED_URL, HORIZON_EMBED_MODEL, HORIZON_EMBED_DIM=1536 and HORIZON_EMBED_API_KEY in .env (see README).");
+  }
 
   const directory = await restoreRelease(APP_ROOT);
   const manifest = JSON.parse(readFileSync(path.join(APP_ROOT, "package.json"), "utf8"));
@@ -30,6 +35,13 @@ try {
   console.log(`[setup] Verified PilotSwarm ${PILOTSWARM_VERSION} packages and license.`);
   const command = existsSync(path.join(APP_ROOT, "package-lock.json")) ? "ci" : "install";
   execFileSync("npm", [command, "--no-audit", "--no-fund"], { cwd: APP_ROOT, stdio: "inherit" });
+  try {
+    execFileSync("cargo", ["--version"], { stdio: "ignore" });
+  } catch {
+    throw new Error("Rust is required: install it from https://rustup.rs (the toolchain in rust-toolchain.toml).");
+  }
+  console.log("[setup] Building pghacker-indexer and pghacker-mcp.");
+  execFileSync("cargo", ["build", "--release", "--locked", "-p", "pghacker-indexer", "-p", "pghacker-mcp"], { cwd: APP_ROOT, stdio: "inherit" });
   console.log("[setup] Ready. Run npm start.");
 } catch (error) {
   console.error(`[setup] ${error.message}`);

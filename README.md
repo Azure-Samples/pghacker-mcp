@@ -1,67 +1,121 @@
 # pghacker-mcp
 
-A blank, local browser application layered on [PilotSwarm](https://github.com/microsoft/PilotSwarm) **0.8.2**. It uses the shipped portal and one app-owned SDK worker, with only an app branding plugin. No pghacker-specific agents, PostgreSQL tools, MCP integrations, or demo sessions are added.
+pghacker-mcp gives AI agents cited answers about PostgreSQL's design history and source code. It is a [PilotSwarm](https://github.com/microsoft/PilotSwarm) **0.8.2** app with three parts (see [docs/design.md](docs/design.md)):
+
+- **pghacker-mcp**: a public, stateless MCP server in async Rust. It serves the pgsql-hackers corpus and the PostgreSQL source through a read-only database role.
+- **pghacker-indexer**: an internal async Rust service. Its workers retrieve sources (monthly mbox archives, seed threads, git), parse, thread, embed and project them into an Apache AGE graph. Its MCP tools serve the crawler sessions.
+- **Crawler sessions**: PilotSwarm agents in `plugin/` that extract features, decisions and author positions, deduplicate them, and submit them with verbatim citations.
+
+Wave 1 runs everything locally on test slices of the data:
+- two months of pgsql-hackers (June–July 2026);
+- whole threads on SQL/PGQ and SQL/JSON;
+- a PG19 code subset (`src/backend/parser`, `src/backend/utils/adt`, `src/include/nodes`, `contrib/pg_trgm`).
 
 ## Run locally
 
-Requires **Node.js 24+**, npm, and a running local Docker engine with Docker Compose. The helper scripts target macOS/Linux and use standard `tar` and `ps` commands. Setup needs access to GitHub Releases and the npm registry.
+Requires **Node.js 24+**, npm, **Rust** (the toolchain in `rust-toolchain.toml`), and a local Docker engine with Docker Compose. The scripts target macOS and Linux.
 
 ```bash
 npm run setup
 npm start
 ```
 
-Open **http://127.0.0.1:3001**.
-
-Setup downloads the three matching PilotSwarm release tarballs, verifies their pinned SHA-256 checksums, preserves the release license, and installs dependencies. Subsequent setup uses `npm ci` with the existing lockfile. Do not install name-only `pilotswarm` packages from the npm registry.
-
-Setup also creates an ignored `.env` with a random database password and owner-only permissions. Existing `.env` files are preserved and validated. `.env.example` documents the settings; its placeholder password is intentionally unusable.
-
-Startup launches a dedicated PostgreSQL 17 container and waits for its health check, then starts the SDK worker and prebuilt portal with `plugin/plugin.json`. The database is PilotSwarm runtime infrastructure, **not** the deferred PostgreSQL/MCP product integration.
-
-The worker uses PilotSwarm's supported `disableManagementAgents: true` option so the initial workspace stays empty and startup does not run management-agent model calls. `WORKERS=0` prevents the portal from adding its own workers; the launcher owns the single SDK worker and stops it with the portal.
-
 | Service | Address |
 | --- | --- |
-| Browser portal | `127.0.0.1:3001` |
-| Runtime PostgreSQL | `127.0.0.1:55433` |
+| Browser portal | `http://127.0.0.1:3001` |
+| pghacker-mcp (MCP) | `http://127.0.0.1:3102/mcp` |
+| pghacker-indexer (MCP) | `http://127.0.0.1:3101/mcp` |
+| PostgreSQL 17 + AGE, pgvector, pg_trgm, pg_textsearch | `127.0.0.1:55433` |
 
-Both services are restricted to loopback. Sign-in is disabled and local visitors have admin access: **do not expose this starter through port forwarding, a reverse proxy, or a public/LAN listener**. Production authentication and deployment are out of scope.
+**Setup** downloads and verifies the PilotSwarm release tarballs, installs dependencies, and builds the two Rust binaries. It also creates an ignored `.env` (owner-only permissions) with random passwords for:
+- PilotSwarm's database;
+- `pgh_indexer`, which writes schema `pghacker` and the graph `pghacker_graph`;
+- `pgh_reader`, which pghacker-mcp uses: read-only, with a 5-second statement timeout.
 
-Compose projects and data volumes are namespaced by the worktree path. Startup fails on port conflicts rather than stopping unrelated services. To select different local ports, edit `PORTAL_PORT`, or both `POSTGRES_PORT` and the matching port in `DATABASE_URL`, in `.env`.
+An existing `.env` is kept, and missing role passwords are added to it.
 
-## Model access
+**`npm start`** runs these steps in order:
+1. Starts PostgreSQL. The image in `db/Dockerfile` adds the PGDG builds of AGE 1.7, pgvector 0.8 and pg_textsearch 1.5.
+2. Rebuilds the binaries if needed (`cargo build --release --locked`).
+3. Bootstraps the roles, extensions, schema and graph, and runs the migrations.
+4. Starts and supervises both services, restarting either one if it exits. Logs go to `.runtime/logs`.
+5. Starts the PilotSwarm worker and portal.
 
-The blank shell can start without making a model request. To run agents, configure a usable provider through **Admin Console -> Model Providers**, including provider credentials and defaults.
+Each process gets only the credentials it needs: the indexer gets `pgh_indexer`, pghacker-mcp gets `pgh_reader`, and the portal gets only the two MCP URLs.
 
-For optional GitHub Copilot bootstrap, supply `GITHUB_TOKEN` or `GH_TOKEN` in your shell. A GitHub account with the appropriate Copilot access is required; a token that can read public repositories is not proof of model access.
+Everything listens on loopback only, and sign-in is disabled: **don't expose it**. `npm run stop` stops the portal, the services and PostgreSQL; the data volume is kept. `npm run db:reset` (with the app stopped) drops and recreates schema `pghacker` and the graph, and leaves PilotSwarm's data alone.
+
+### Configuration
+
+| Setting (`.env`) | Purpose |
+| --- | --- |
+| `HORIZON_EMBED_URL`, `HORIZON_EMBED_MODEL`, `HORIZON_EMBED_DIM=1536`, `HORIZON_EMBED_API_KEY` (`_API_KEY_HEADER`, `_BEARER`) | Embeddings for semantic and hybrid search, configured the same way as PilotSwarm's embedder. Example: an Azure OpenAI `text-embedding-3-small` deployment's `/embeddings?api-version=2024-10-21` URL. Without them, search uses full text only. |
+| `GITHUB_TOKEN` (or in the shell) | GitHub Copilot models for the agents. `config/model_providers.json` lists them, with `github-copilot:gpt-6-luna` as the default. |
+| `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Service ports (3101, 3102). |
+
+`config/test-slices.toml` chooses the months, seed threads and code paths that wave 1 retrieves.
+
+## Tools
+
+**pghacker-mcp**:
+
+| Area | Tools |
+| --- | --- |
+| Mail | `search_threads`, `get_thread`, `search_extracts`, `author_perspective`, `search_authors`, `get_author`. The search tools take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (default). |
+| SQL and graph | `get_ontology` describes the data. `query` runs one read-only SQL statement, including Cypher on `pghacker_graph`, and returns CSV. |
+| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the loaded source. |
+
+**pghacker-indexer**:
+
+| Area | Tools |
+| --- | --- |
+| Sources and progress | `add_source`, `remove_source`, `list_sources`, `ingest_status` |
+| Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
+| Repair | `find_duplicates`, `merge_authors`, `merge_extracts`, `undo_merge` |
+
+Results cite Message-IDs, verbatim quotes and file paths. Email addresses are used only to match authors: they live in a table the reader can't access, and bodies are stored with addresses redacted.
+
+## Build the corpus
+
+With the app running:
+
+1. Add the sources. Ask a `pghacker-crawler` session in the portal, or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}` and `{kind: postgres_version, name: "19"}`.
+2. Watch the progress with `ingest_status`. Workers download the mbox months and seed threads (2 requests/s, cached in `.runtime/cache`), fetch the pinned PG19 commit with gix, embed chunks, resolve file anchors and sync the graph.
+3. Extract:
 
 ```bash
-# With an authenticated GitHub CLI and Copilot access:
-GITHUB_TOKEN="$(gh auth token)" npm start
+npm run crawl -- --pilot                          # 10 threads in one pghacker-extract session, for review
+npm run crawl -- --concurrency 8                  # then the rest, 8 sessions at a time
+npm run crawl -- --dedup                          # a pghacker-dedup session merges duplicates
+npm run crawl -- --supervisor                     # or let the pghacker-crawler agent run the pilot
 ```
 
-An optional `GITHUB_TOKEN` in the ignored `.env` takes precedence over shell tokens. Never commit credentials. The launcher does not import ambient remote database, Azure storage, plugin, worker-count, or authentication settings.
-
-## Stop and restart
-
-Press **Ctrl+C** in the starting terminal to stop the portal. To stop both the portal and its dedicated PostgreSQL container, including a portal running in the background:
-
-```bash
-npm run stop
-```
-
-The stop command verifies the recorded process identity before signalling its specific PID. It never kills a process just because it occupies a port. PostgreSQL's data volume is preserved; `npm start` restarts the app against the same data.
-
-Keep the generated `.env`: its password must continue to match the existing database volume. Changing database users/passwords in `.env` does not migrate an initialized PostgreSQL database. No destructive reset command is provided.
+The worker runs `PILOTSWARM_WORKER_CONCURRENCY` session turns at once (8 by default; set it in `.env`), so keep `--concurrency` at or below it.
 
 ## Checks
 
 ```bash
-npm test
-npm run smoke  # requires the app to be running
+npm test                 # launcher, configuration, readiness and evaluation helpers
+npm run rust:check       # rustfmt, clippy -D warnings, and the Rust tests (they create temporary databases)
+npm run smoke            # with the app running: both MCP servers, the portal, the worker and the agents
+npm run eval             # with the corpus built: the 20-question evaluation (eval/questions.json)
 ```
 
-Tests cover release integrity, configuration preservation, local isolation, branding, readiness, and safe process handling. The smoke check requires a genuinely started local runtime, one ready app-owned worker in the registry, no extra portal-managed workers, disabled sign-in, and `pghacker-mcp` branding. It does not create sessions or send paid model requests.
+The code-search exactness replay lives in `crates/pghacker-replay`. Its PG19 replay compares `search` and `grep` with ripgrep and GNU grep. Its study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`.
 
-The portal is prebuilt in the release package; this repository does not need a separate frontend build. Downloaded releases, `.env`, dependencies, and app-local state under `.runtime/` are ignored by Git.
+## Repository
+
+| Path | Contents |
+| --- | --- |
+| `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing |
+| `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
+| `crates/pghacker-code` | Git snapshot loader (gix), one row per line |
+| `crates/pghacker-codesearch` | pg_trgm code search, the grep translator, `read_file`, `list_files` |
+| `crates/pghacker-sqlquery` | The read-only `query` tool |
+| `crates/pghacker-api` | Mail and graph tools |
+| `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
+| `crates/pghacker-replay` | The exactness replay harness |
+| `migrations/`, `db/` | Schema and the PostgreSQL image |
+| `plugin/` | Branding, agents and the MCP catalog |
+| `scripts/` | The launcher, crawl and evaluation drivers |
+| `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18 (adds `bind_text`) |

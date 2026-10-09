@@ -1,0 +1,12 @@
+{
+  "pghacker-indexer": {
+    "type": "http",
+    "url": "${PGHACKER_INDEXER_MCP_URL}",
+    "tools": ["*"]
+  },
+  "pghacker-mcp": {
+    "type": "http",
+    "url": "${PGHACKER_MCP_URL}",
+    "tools": ["*"]
+  }
+}

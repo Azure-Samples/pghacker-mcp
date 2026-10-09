@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { checkPortal } from "../scripts/lib/health.mjs";
+import { APP_AGENTS, checkPortal } from "../scripts/lib/health.mjs";
 
 const config = { portalPort: 3001, project: "pghacker-mcp-unit-test" };
 const replies = {
-  "/api/v1/bootstrap": { ok: true, mode: "local", workerCount: 0, creatableAgents: [] },
+  "/api/v1/bootstrap": { ok: true, mode: "local", workerCount: 0, creatableAgents: APP_AGENTS.map((name) => ({ name })) },
   "/api/v1/health": { ok: true, started: true, mode: "local", apiVersion: "v1" },
   "/api/v1/auth/config": { provider: "none", enabled: false },
   "/api/portal-config": { ok: true, portal: { branding: { title: "pghacker-mcp", pageTitle: "pghacker-mcp" } } },
@@ -40,13 +40,20 @@ test("HTTP 200 is not readiness when the runtime has not started", async () => {
   }), /not just HTTP 200/);
 });
 
-test("the actual worker count and blank agent roster are checked", async () => {
+test("the actual worker count and the app's agent roster are checked", async () => {
   await assert.rejects(checkPortal(config, {
     fetchImpl: fakeFetch({ "/api/v1/bootstrap": { ...replies["/api/v1/bootstrap"], workerCount: 4 } }),
   }), /additional portal-managed workers/);
-  await assert.rejects(checkPortal(config, {
-    fetchImpl: fakeFetch({ "/api/v1/bootstrap": { ...replies["/api/v1/bootstrap"], creatableAgents: [{ name: "demo" }] } }),
-  }), /agent roster/);
+  for (const creatableAgents of [[], [{ name: "demo" }], APP_AGENTS.slice(1).map((name) => ({ name })),
+    [...APP_AGENTS, "generic-crawler"].map((name) => ({ name }))]) {
+    await assert.rejects(checkPortal(config, {
+      fetchImpl: fakeFetch({ "/api/v1/bootstrap": { ...replies["/api/v1/bootstrap"], creatableAgents } }),
+    }), /exactly the app's agents/);
+  }
+  const namespaced = APP_AGENTS.map((name) => ({ name: `pghacker-mcp:${name}` }));
+  await checkPortal(config, {
+    fetchImpl: fakeFetch({ "/api/v1/bootstrap": { ...replies["/api/v1/bootstrap"], creatableAgents: namespaced } }),
+  });
 });
 
 test("the app-owned worker must actually be registered, ready, and recently alive", async () => {

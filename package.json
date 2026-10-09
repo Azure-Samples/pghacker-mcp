@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A blank local browser application built on PilotSwarm.",
+  "description": "pghacker-mcp: cited answers about PostgreSQL's design history and code, as a PilotSwarm app.",
   "engines": {
     "node": ">=24"
   },
@@ -12,7 +12,11 @@
     "start": "node scripts/start.mjs",
     "stop": "node scripts/stop.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "db:reset": "node scripts/db-reset.mjs",
+    "crawl": "node scripts/crawl.mjs",
+    "eval": "node scripts/eval.mjs",
+    "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"
   },
   "dependencies": {
     "pilotswarm": "file:dist-tarballs/pilotswarm-0.8.2.tgz",

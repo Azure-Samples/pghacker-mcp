@@ -1,7 +1,7 @@
 {
   "name": "pghacker-mcp",
-  "version": "0.1.0",
-  "description": "Blank pghacker-mcp application.",
+  "version": "0.2.0",
+  "description": "pghacker-mcp: crawler, extraction, deduplication and evaluation agents over the pghacker-indexer and pghacker-mcp services.",
   "portal": {
     "branding": {
       "title": "pghacker-mcp",

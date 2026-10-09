@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
@@ -30,7 +30,9 @@ export function projectName(root = APP_ROOT) {
   return `${APP_NAME}-${suffix}`;
 }
 
-export function initialEnv(password = randomBytes(32).toString("hex")) {
+const secret = () => randomBytes(32).toString("hex");
+
+export function initialEnv(password = secret(), rolePasswords = { indexer: secret(), reader: secret() }) {
   return [
     `POSTGRES_USER=pghacker`,
     `POSTGRES_DB=pghacker_mcp`,
@@ -41,7 +43,26 @@ export function initialEnv(password = randomBytes(32).toString("hex")) {
     "PORTAL_PORT=3001",
     ...Object.entries(LOCAL_SETTINGS).map(([key, value]) => `${key}=${value}`),
     "",
+    ...roleLines(rolePasswords),
+    "",
   ].join("\n");
+}
+
+function roleLines({ indexer, reader }) {
+  return [
+    "# pghacker roles: pgh_indexer writes schema pghacker and the graph; pgh_reader serves pghacker-mcp.",
+    `PGH_INDEXER_PASSWORD=${indexer}`,
+    `PGH_READER_PASSWORD=${reader}`,
+  ];
+}
+
+/** Adds role passwords to an .env from before they existed; returns whether it did. */
+export function ensureRolePasswords(root = APP_ROOT) {
+  const file = path.join(root, ".env");
+  const values = parseEnv(readFileSync(file, "utf8"));
+  if (values.PGH_INDEXER_PASSWORD && values.PGH_READER_PASSWORD) return false;
+  appendFileSync(file, `\n${roleLines({ indexer: secret(), reader: secret() }).join("\n")}\n`, { mode: 0o600 });
+  return true;
 }
 
 export function initializeEnv(root = APP_ROOT) {
@@ -79,6 +100,15 @@ export function parseLocalConfig(text, root = APP_ROOT) {
   const postgresPort = portNumber(values, "POSTGRES_PORT");
   const portalPort = portNumber(values, "PORTAL_PORT");
   if (postgresPort === portalPort) throw new Error("PostgreSQL and the portal need different ports.");
+  const indexerPort = values.PGHACKER_INDEXER_PORT ? portNumber(values, "PGHACKER_INDEXER_PORT") : 3101;
+  const mcpPort = values.PGHACKER_MCP_PORT ? portNumber(values, "PGHACKER_MCP_PORT") : 3102;
+  if (new Set([postgresPort, portalPort, indexerPort, mcpPort]).size !== 4) {
+    throw new Error("PostgreSQL, the portal, pghacker-indexer and pghacker-mcp need different ports.");
+  }
+  for (const name of ["PGH_INDEXER_PASSWORD", "PGH_READER_PASSWORD"]) {
+    const value = required(values, name);
+    if (value.length < 16) throw new Error(`${name} must be a real local password of at least 16 characters.`);
+  }
 
   const postgresUser = required(values, "POSTGRES_USER");
   const postgresDatabase = required(values, "POSTGRES_DB");
@@ -118,6 +148,8 @@ export function parseLocalConfig(text, root = APP_ROOT) {
     databaseUrl,
     postgresPort,
     portalPort,
+    indexerPort,
+    mcpPort,
     values,
   };
 }
@@ -150,9 +182,82 @@ export function portalEnvironment(config, inherited = process.env) {
     ARTIFACT_DIR: path.join(config.runtimeDir, "artifacts"),
     PILOTSWARM_EXPORT_DIR: path.join(config.runtimeDir, "exports"),
     PILOTSWARM_LOG_DIR: path.join(config.runtimeDir, "logs"),
+    PS_MODEL_PROVIDERS_PATH: path.join(config.root, "config", "model_providers.json"),
+    // PilotSwarm runs 2 session turns at a time by default; crawls run 8 extractors.
+    PILOTSWARM_WORKER_CONCURRENCY: concurrency(config.values.PILOTSWARM_WORKER_CONCURRENCY),
+    PILOTSWARM_ORCHESTRATION_CONCURRENCY: concurrency(config.values.PILOTSWARM_ORCHESTRATION_CONCURRENCY),
   };
   const token = config.values.GITHUB_TOKEN || config.values.GH_TOKEN
     || inherited.GITHUB_TOKEN || inherited.GH_TOKEN;
   if (token) env.GITHUB_TOKEN = token;
+  env.PGHACKER_INDEXER_MCP_URL = serviceUrl(config.indexerPort);
+  env.PGHACKER_MCP_URL = serviceUrl(config.mcpPort);
   return env;
+}
+
+function concurrency(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 64 ? String(n) : "8";
+}
+
+export function serviceUrl(port) {
+  return `http://${LOCAL_HOST}:${port}/mcp`;
+}
+
+/** A role's URL on this app's database. */
+export function roleDatabaseUrl(config, role, password) {
+  const url = new URL(config.databaseUrl);
+  url.username = role;
+  url.password = password;
+  return url.toString();
+}
+
+const EMBED_KEYS = [
+  "HORIZON_EMBED_URL", "HORIZON_EMBED_MODEL", "HORIZON_EMBED_DIM",
+  "HORIZON_EMBED_API_KEY", "HORIZON_EMBED_API_KEY_HEADER", "HORIZON_EMBED_BEARER",
+];
+
+function embedEnvironment(config, inherited) {
+  return Object.fromEntries(EMBED_KEYS
+    .map((key) => [key, config.values[key] ?? inherited[key]])
+    .filter(([, value]) => value !== undefined && value !== ""));
+}
+
+/**
+ * The environments of the Rust services, each with only what it needs:
+ * bootstrap gets the administrator's URL; the indexer pgh_indexer's; pghacker-mcp pgh_reader's.
+ */
+export function serviceEnvironments(config, inherited = process.env) {
+  const base = {
+    ...platformEnvironment(inherited),
+    RUST_LOG: inherited.RUST_LOG || "info,tokio_postgres=warn,rmcp=warn",
+  };
+  const indexerUrl = roleDatabaseUrl(config, "pgh_indexer", config.values.PGH_INDEXER_PASSWORD);
+  const readerUrl = roleDatabaseUrl(config, "pgh_reader", config.values.PGH_READER_PASSWORD);
+  const embed = embedEnvironment(config, inherited);
+  const runtime = (name) => path.join(config.runtimeDir, name);
+  return {
+    bootstrap: {
+      ...base,
+      PGHACKER_ADMIN_DATABASE_URL: config.databaseUrl,
+      PGHACKER_INDEXER_DATABASE_URL: indexerUrl,
+      PGH_INDEXER_PASSWORD: config.values.PGH_INDEXER_PASSWORD,
+      PGH_READER_PASSWORD: config.values.PGH_READER_PASSWORD,
+    },
+    indexer: {
+      ...base,
+      ...embed,
+      PGHACKER_INDEXER_DATABASE_URL: indexerUrl,
+      PGHACKER_INDEXER_ADDR: `${LOCAL_HOST}:${config.indexerPort}`,
+      PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),
+      PGHACKER_CACHE_DIR: runtime("cache"),
+      PGHACKER_GIT_DIR: runtime("git"),
+    },
+    mcp: {
+      ...base,
+      ...embed,
+      PGHACKER_READER_DATABASE_URL: readerUrl,
+      PGHACKER_MCP_ADDR: `${LOCAL_HOST}:${config.mcpPort}`,
+    },
+  };
 }
