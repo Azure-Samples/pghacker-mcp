@@ -2,7 +2,8 @@
 // takes the identity an authenticating proxy (here oauth2-proxy) puts on each
 // request. Its prebuilt SPA has no browser half for it, though (it knows only
 // none, entra and dev), so behind a proxy it stops at 'Unsupported portal auth
-// provider "proxy"'. Upstream main is the same. The patch adds that half.
+// provider "proxy"'. Upstream main is the same (microsoft/PilotSwarm#154). The
+// patch adds that half.
 //
 // The anchor is minified code, so the patch is pinned to the bundle's checksum
 // and refuses any other bundle: re-check it when upgrading PilotSwarm.
