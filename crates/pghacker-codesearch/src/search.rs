@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::GenericClient;
@@ -293,6 +293,7 @@ pub(crate) async fn find_lines(
     files: &[usize],
     whole: bool,
     patterns: &Patterns<'_>,
+    budget: &Budget,
 ) -> Result<Found> {
     if files.is_empty() {
         return Ok(Found {
@@ -305,29 +306,38 @@ pub(crate) async fn find_lines(
     let by_id: HashMap<i32, usize> = files.iter().map(|&k| (table.files[k].id, k)).collect();
     let mut require = vec![&patterns.query.filter];
     require.extend(patterns.also.iter().map(|c| &c.filter));
+    let scope_lines = files
+        .iter()
+        .map(|&k| table.files[k].line_count.max(0) as u64)
+        .sum();
+    let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
         snapshot_id: snapshot.id,
         file_ids: if whole { None } else { Some(&ids) },
         require,
         reject: patterns.not.map(|n| vec![&n.filter]).unwrap_or_default(),
         cap: MAX_CANDIDATES,
+        scope_first,
     };
-    let found = engine::candidates(client, &q).await?;
-    let mut hits: Vec<Hit> = found
-        .rows
-        .into_iter()
-        .filter_map(|row| {
-            let k = *by_id.get(&row.file_id)?;
-            patterns
-                .is_match(&row.line)
-                .then_some((k, row.line_no, row.line))
-        })
-        .collect();
+    let found = engine::candidates(client, &q, budget).await?;
+    let mut timed_out = found.timed_out;
+    let mut hits = Vec::new();
+    for row in found.rows {
+        if budget.exceeded() {
+            timed_out = true;
+            break;
+        }
+        if let Some(&k) = by_id.get(&row.file_id)
+            && patterns.is_match(&row.line)
+        {
+            hits.push((k, row.line_no, row.line));
+        }
+    }
     hits.sort_unstable_by_key(|h| (h.0, h.1));
     Ok(Found {
         hits,
         capped: found.capped,
-        timed_out: found.timed_out,
+        timed_out,
     })
 }
 
@@ -643,7 +653,7 @@ async fn search_inner(
         also: &plan.also,
         not: plan.not.as_ref(),
     };
-    let found = find_lines(client, snapshot, &table, &files, whole, &patterns).await?;
+    let found = find_lines(client, snapshot, &table, &files, whole, &patterns, budget).await?;
     let mut notes: BTreeMap<&'static str, ()> = BTreeMap::new();
     let hits = found.hits;
     let total_lines = hits.len() as u64;
@@ -719,7 +729,8 @@ async fn search_inner(
                         )
                     })
                     .collect();
-                context_lines = engine::line_ranges(client, &engine::merge_ranges(ranges)).await?;
+                context_lines =
+                    engine::line_ranges(client, &engine::merge_ranges(ranges), budget).await?;
             }
             for (f, n, text) in page {
                 let id = table.files[*f].id;
@@ -755,6 +766,10 @@ async fn search_inner(
                 ordered.sort_by_key(|h| (file_rank[&h.0], h.1));
             }
             for (f, n, line) in ordered {
+                if budget.exceeded() {
+                    result.budget_exceeded = true;
+                    break;
+                }
                 for (s, e) in plan.query.matcher.matches(line) {
                     parts.push((*f, *n, line[s..e].to_owned()));
                 }
@@ -785,6 +800,10 @@ async fn search_inner(
             let mut counts: HashMap<String, u64> = HashMap::new();
             let mut total = 0;
             for (_, _, line) in &hits {
+                if budget.exceeded() {
+                    result.budget_exceeded = true;
+                    break;
+                }
                 for (s, e) in plan.query.matcher.matches(line) {
                     *counts.entry(line[s..e].to_owned()).or_default() += 1;
                     total += 1;
@@ -803,14 +822,22 @@ async fn search_inner(
         }
     }
     result.returned = (result.lines.len() + result.files.len() + result.matches.len()) as u32;
-    if total_lines == 0 && !plan.every_line && !budget.exceeded() {
-        result.similar = similar_names(client, &table, &files, whole, snapshot, args).await?;
+    if total_lines == 0 && !plan.every_line && result.complete && !budget.exceeded() {
+        let (similar, timed_out) =
+            similar_names(client, &table, &files, whole, snapshot, args, budget).await?;
+        result.similar = similar;
+        result.budget_exceeded |= timed_out;
     }
     if found.capped {
         notes.insert(
             "more than 200,000 candidate lines: narrow the search for exact totals",
             (),
         );
+    }
+    result.budget_exceeded |= budget.exceeded();
+    result.complete &= !result.budget_exceeded;
+    if result.budget_exceeded {
+        notes.insert("time budget exhausted: totals are lower bounds", ());
     }
     result.notes = notes.into_keys().map(str::to_owned).collect();
     result.elapsed_ms = budget.elapsed_ms();
@@ -840,17 +867,28 @@ async fn complement(
     let offset = args.offset as usize;
     let context = args.context.min(MAX_CONTEXT) as i32;
     let mut matched: HashMap<usize, Vec<i32>> = HashMap::new();
-    let (mut capped, mut timed_out) = (false, false);
     if let Some(not) = &plan.not {
         let patterns = Patterns {
             query: not,
             also: &[],
             not: None,
         };
-        let found =
-            find_lines(client, snapshot, table, scope.files, scope.whole, &patterns).await?;
-        capped = found.capped;
-        timed_out = found.timed_out;
+        let found = find_lines(
+            client,
+            snapshot,
+            table,
+            scope.files,
+            scope.whole,
+            &patterns,
+            budget,
+        )
+        .await?;
+        if found.capped || found.timed_out {
+            bail!(
+                "cannot compute inverted results from an incomplete search: \
+                 the time budget or 200,000 candidate-line cap was reached; narrow the search"
+            );
+        }
         for (k, n, _) in found.hits {
             matched.entry(k).or_default().push(n);
         }
@@ -876,8 +914,8 @@ async fn complement(
         offset: args.offset,
         returned: 0,
         cut: false,
-        budget_exceeded: timed_out,
-        complete: !timed_out && !capped,
+        budget_exceeded: false,
+        complete: true,
         lines: Vec::new(),
         files: Vec::new(),
         matches: Vec::new(),
@@ -926,7 +964,7 @@ async fn complement(
                 )
             })
             .collect();
-        let text = engine::line_ranges(client, &engine::merge_ranges(ranges)).await?;
+        let text = engine::line_ranges(client, &engine::merge_ranges(ranges), budget).await?;
         for (k, n) in page {
             let id = table.files[k].id;
             let last = table.files[k].line_count;
@@ -953,11 +991,10 @@ async fn complement(
         }
     }
     result.returned = (result.lines.len() + result.files.len()) as u32;
-    if capped {
-        notes.insert(
-            "more than 200,000 candidate lines: narrow the search for exact totals",
-            (),
-        );
+    result.budget_exceeded = budget.exceeded();
+    result.complete = !result.budget_exceeded;
+    if result.budget_exceeded {
+        notes.insert("time budget exhausted: totals are lower bounds", ());
     }
     result.notes = notes.into_keys().map(str::to_owned).collect();
     result.elapsed_ms = budget.elapsed_ms();
@@ -973,7 +1010,8 @@ async fn similar_names(
     whole: bool,
     snapshot: &Snapshot,
     args: &SearchArgs,
-) -> Result<Option<Similar>> {
+    budget: &Budget,
+) -> Result<(Option<Similar>, bool)> {
     let names: Vec<String> = args
         .query
         .to_vec()
@@ -990,7 +1028,7 @@ async fn similar_names(
         .take(3)
         .collect();
     if names.is_empty() {
-        return Ok(None);
+        return Ok((None, false));
     }
     let ids: Vec<i32> = files.iter().map(|&k| table.files[k].id).collect();
     let scope = if whole {
@@ -999,6 +1037,7 @@ async fn similar_names(
         "l.file_id = ANY($1::int4[])"
     };
     let mut similar = Similar::default();
+    let mut timed_out = false;
     for name in &names {
         let Some(id) = pattern::identifier_pattern(name) else {
             continue;
@@ -1008,21 +1047,31 @@ async fn similar_names(
              regexp_matches(l.line, $2, 'gi') m WHERE {scope} AND l.line ~* $2 \
              GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5"
         );
+        if !budget.apply(client).await? {
+            timed_out = true;
+            break;
+        }
         let rows = if whole {
             client.query(spell_sql.as_str(), &[&snapshot.id, &id]).await
         } else {
             client.query(spell_sql.as_str(), &[&ids, &id]).await
         };
-        if let Ok(rows) = rows {
-            for row in rows {
-                let spelling: String = row.get(0);
-                if spelling != *name {
-                    similar.spellings.push(NameCount {
-                        name: spelling,
-                        lines: row.get::<_, i64>(1) as u64,
-                        similarity: None,
-                    });
-                }
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) if engine::is_timeout(&error) => {
+                timed_out = true;
+                break;
+            }
+            Err(error) => return Err(error).context("cannot find alternative name spellings"),
+        };
+        for row in rows {
+            let spelling: String = row.get(0);
+            if spelling != *name {
+                similar.spellings.push(NameCount {
+                    name: spelling,
+                    lines: row.get::<_, i64>(1) as u64,
+                    similarity: None,
+                });
             }
         }
         let word = name.trim();
@@ -1032,25 +1081,38 @@ async fn similar_names(
               FROM code_lines l WHERE {scope} AND l.line %> $2) x \
              WHERE similarity(w, $2) >= 0.5 AND w <> $2 GROUP BY w ORDER BY 2 DESC, 3 DESC, 1 LIMIT 5"
         );
+        if !budget.apply(client).await? {
+            timed_out = true;
+            break;
+        }
         let rows = if whole {
             client.query(sim_sql.as_str(), &[&snapshot.id, &word]).await
         } else {
             client.query(sim_sql.as_str(), &[&ids, &word]).await
         };
-        if let Ok(rows) = rows {
-            for row in rows {
-                let w: String = row.get(0);
-                if !similar.names.iter().any(|n| n.name == w) {
-                    similar.names.push(NameCount {
-                        name: w,
-                        lines: row.get::<_, i64>(2) as u64,
-                        similarity: Some(row.get(1)),
-                    });
-                }
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(error) if engine::is_timeout(&error) => {
+                timed_out = true;
+                break;
+            }
+            Err(error) => return Err(error).context("cannot find similar names"),
+        };
+        for row in rows {
+            let w: String = row.get(0);
+            if !similar.names.iter().any(|n| n.name == w) {
+                similar.names.push(NameCount {
+                    name: w,
+                    lines: row.get::<_, i64>(2) as u64,
+                    similarity: Some(row.get(1)),
+                });
             }
         }
     }
-    Ok((!similar.spellings.is_empty() || !similar.names.is_empty()).then_some(similar))
+    Ok((
+        (!similar.spellings.is_empty() || !similar.names.is_empty()).then_some(similar),
+        timed_out,
+    ))
 }
 
 #[cfg(test)]

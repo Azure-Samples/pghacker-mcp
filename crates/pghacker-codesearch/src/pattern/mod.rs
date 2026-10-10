@@ -85,6 +85,36 @@ impl Filter {
             Filter::Any { exact, .. } | Filter::All { exact } => *exact,
         }
     }
+
+    /// An index hint, not a matching rule: every alternative has at least
+    /// four internal trigrams. Short terms are cheaper to scan in scope than
+    /// to enumerate from an index shared by all snapshots.
+    pub fn has_index_literal(&self) -> bool {
+        let Filter::Any { conds, .. } = self else {
+            return false;
+        };
+        !conds.is_empty()
+            && conds.iter().all(|cond| {
+                let literal = match cond.op {
+                    Op::Like | Op::ILike => Some(cond.pattern.clone()),
+                    Op::Re | Op::ReI => cond
+                        .literal
+                        .clone()
+                        .or_else(|| are::required_literal(&cond.pattern)),
+                };
+                literal.is_some_and(|literal| {
+                    let mut run = 0;
+                    literal.chars().any(|c| {
+                        run = if c.is_ascii_alphanumeric() {
+                            run + 1
+                        } else {
+                            0
+                        };
+                        run >= 6
+                    })
+                })
+            })
+    }
 }
 
 /// A pattern list and how to read it.
@@ -354,6 +384,34 @@ mod tests {
             panic!()
         };
         assert_eq!(conds[0].literal, None);
+    }
+
+    #[test]
+    fn index_hints_need_a_literal_in_every_alternative() {
+        for (patterns, dialect, expected) in [
+            (vec!["for (".into()], Dialect::Fixed, false),
+            (vec!["while (".into()], Dialect::Fixed, false),
+            (vec![r"^\s*for\s*\(".into()], Dialect::Rust, false),
+            (vec![r"\bBufferAlloc\(".into()], Dialect::Rust, true),
+            (vec![r"\d+".into()], Dialect::Rust, false),
+            (
+                vec!["makeNode".into(), "for (".into()],
+                Dialect::Fixed,
+                false,
+            ),
+            (
+                vec!["makeNode".into(), "BufferAlloc".into()],
+                Dialect::Fixed,
+                true,
+            ),
+        ] {
+            let c = compile(&spec(&patterns, dialect)).unwrap();
+            assert_eq!(c.filter.has_index_literal(), expected, "{patterns:?}");
+        }
+        let patterns = vec!["makeNode".into()];
+        let mut s = spec(&patterns, Dialect::Fixed);
+        s.word = true;
+        assert!(compile(&s).unwrap().filter.has_index_literal());
     }
 
     #[test]

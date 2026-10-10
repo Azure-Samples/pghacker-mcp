@@ -80,6 +80,67 @@ Everything listens on loopback only, and sign-in is disabled: **don't expose it*
 
 Results cite Message-IDs, verbatim quotes and file paths. Email addresses are used only to match authors: they live in a table the reader can't access, and bodies are stored with addresses redacted.
 
+### Code-search budgets and large archives
+
+`search` and `grep` restrict their scans to the selected snapshot and paths.
+Small scopes (at most 200,000 lines) and short or unindexable patterns use
+file-first scans through `(file_id, line_no)`. Larger scopes with a required
+literal of at least six consecutive ASCII letters or digits in every
+alternative can use the trigram index. This is a performance hint only:
+the exact Rust matcher still verifies the candidates.
+
+The trigram index is shared by **all loaded snapshots**. A common term such
+as `for` can have millions of postings even when one version and a small
+folder are selected. File-first scans avoid enumerating those unrelated
+postings, but a full snapshot still requires reading its own lines.
+Partitioning or a snapshot-scoped index would be needed to remove that
+remaining large-archive tradeoff.
+
+The time budget is shared by candidate retrieval, verification, counts,
+context and name suggestions: 4 seconds by default, at most 10 seconds.
+`search` exposes `budget_ms`; the MCP `grep` tool uses the 4-second default.
+The 200,000-candidate cap remains. `limit` pages the results **after** totals
+are computed; it does not make a broad count cheap. Check `complete` before
+using `search` totals; incomplete totals are lower bounds. Inverted counts
+that cannot be established fail, and incomplete `grep` searches fail
+without emitting a fabricated `0` or running a pipeline over partial data.
+Single regex evaluations and in-memory pipeline stages cannot be interrupted
+mid-operation, but exhaustion is checked before results are returned.
+
+The read-only `query` tool keeps its separate 5-second SQL timeout and does
+not rewrite arbitrary SQL. For a scoped code count, keep the text predicate
+outside a file-first scan so PostgreSQL cannot move it into a global trigram
+bitmap scan. Replace `123` below with the wanted `code_snapshots.id`:
+
+```sql
+WITH files AS MATERIALIZED (
+    SELECT id, path FROM code_files WHERE snapshot_id = 123
+)
+SELECT count(*)
+FROM (
+    SELECT line FROM code_lines
+    WHERE file_id = ANY(ARRAY(
+        SELECT id FROM files WHERE path LIKE 'src/backend/access/heap/%'
+    ))
+    OFFSET 0
+) scoped
+WHERE scoped.line LIKE '%for (%';
+```
+
+An isolated, synthetic multi-snapshot profile is available with the local
+test database configured:
+
+```bash
+cargo run --locked -p pghacker-codesearch --example profile_search
+```
+
+The full PG19 loop cases can also be compared with GNU grep (requires
+Docker and downloads the pinned source into the ignored `.runtime` cache):
+
+```bash
+cargo run --locked -p pghacker-replay --example profile_full
+```
+
 ## Build the corpus
 
 With the app running:

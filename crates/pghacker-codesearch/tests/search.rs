@@ -286,6 +286,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         require: vec![&compiled.filter],
         reject: vec![],
         cap: 1000,
+        scope_first: false,
     };
     let (sql, params) = pghacker_codesearch::engine::line_sql(&q);
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -298,5 +299,163 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
     assert!(plan.contains("code_lines_trgm"), "{plan}");
     let result = search(&reader, &snapshot, &SearchArgs::new("json_lex_string")).await?;
     assert_eq!(result.total_lines, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
+    use pghacker_codesearch::engine::{Budget, LineQuery, candidates, line_sql};
+    use pghacker_codesearch::pattern::{Dialect, PatternSpec, Semantics, compile};
+
+    let db = TestDb::create().await?;
+    let indexer = db.indexer().await?;
+    let snapshot = common::load(
+        &indexer,
+        "postgres",
+        "19",
+        &[(
+            "src/backend/access/heap/loops.c",
+            Some("for (a) {}\n\tfor\t(b) {}\nwhile (c) {}\n// for (d) for (e)\nformat();\n"),
+        )],
+    )
+    .await?;
+    common::load(
+        &indexer,
+        "postgres",
+        "18",
+        &[("src/backend/access/heap/other.c", Some(""))],
+    )
+    .await?;
+    indexer
+        .batch_execute(
+            "INSERT INTO code_lines (file_id, line_no, line)
+             SELECT currval('code_files_id_seq'), n, 'for (int i = 0; i < 10; i++) {}'
+             FROM generate_series(1, 50000) n",
+        )
+        .await?;
+    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
+    let reader = db.reader().await?;
+    let compiled = compile(&PatternSpec {
+        patterns: &[r"\bfor\s*\(".into()],
+        dialect: Dialect::Rust,
+        ignore_case: false,
+        word: false,
+        line: false,
+        semantics: Semantics::LeftmostFirst,
+    })
+    .map_err(anyhow::Error::msg)?;
+    let q = LineQuery {
+        snapshot_id: snapshot.id,
+        file_ids: None,
+        require: vec![&compiled.filter],
+        reject: vec![],
+        cap: 100,
+        scope_first: true,
+    };
+    let (sql, params) = line_sql(&q);
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|p| p.as_ref() as _).collect();
+    let plan: serde_json::Value = reader
+        .query_one(format!("EXPLAIN (FORMAT JSON) {sql}").as_str(), &refs)
+        .await?
+        .get(0);
+    let plan = plan.to_string();
+    assert!(!plan.contains("code_lines_trgm"), "{plan}");
+    let rows = candidates(&reader, &q, &Budget::new(None)).await?;
+    assert_eq!(rows.rows.len(), 3);
+    assert!(!rows.capped && !rows.timed_out);
+
+    let mut args = SearchArgs::new("for (");
+    args.paths = "src/backend/access/heap".into();
+    args.output = OutputMode::Counts;
+    args.group_by = GroupBy::Match;
+    let result = search(&reader, &snapshot, &args).await?;
+    assert_eq!((result.total_lines, result.total_matches), (2, Some(3)));
+    assert_eq!(
+        (result.matches[0].text.as_str(), result.matches[0].count),
+        ("for (", 3)
+    );
+    assert!(result.complete && !result.budget_exceeded);
+    args.query = vec!["for (".into(), "while (".into()].into();
+    let result = search(&reader, &snapshot, &args).await?;
+    assert_eq!((result.total_lines, result.total_matches), (3, Some(4)));
+    assert!(result.complete && !result.budget_exceeded);
+    args.query = r"^\s*for\s*\(".into();
+    args.match_mode = MatchMode::Regex;
+    let result = search(&reader, &snapshot, &args).await?;
+    assert_eq!((result.total_lines, result.total_matches), (2, Some(2)));
+    assert!(result.complete);
+    Ok(())
+}
+
+#[tokio::test]
+async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result<()> {
+    use pghacker_codesearch::grep::{Limits, run};
+    use pghacker_codesearch::snapshot::FileTable;
+
+    let db = TestDb::create().await?;
+    let indexer = db.indexer().await?;
+    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let reader = db.reader().await?;
+    FileTable::load(&reader, &snapshot).await?;
+    reader
+        .batch_execute("SET statement_timeout = '1739ms'")
+        .await?;
+    let blocker = db.admin().await?;
+    blocker
+        .batch_execute("BEGIN; LOCK TABLE pghacker.code_lines IN ACCESS EXCLUSIVE MODE")
+        .await?;
+    let budget = pghacker_codesearch::engine::Budget::new(Some(500));
+    let old = pghacker_codesearch::engine::set_timeout(&reader, budget.remaining_ms()).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    let q = pghacker_codesearch::engine::LineQuery {
+        snapshot_id: snapshot.id,
+        file_ids: None,
+        require: vec![],
+        reject: vec![],
+        cap: 1,
+        scope_first: true,
+    };
+    let candidates = pghacker_codesearch::engine::candidates(&reader, &q, &budget).await?;
+    assert!(candidates.timed_out);
+    assert!(budget.elapsed_ms() < 750, "{}ms", budget.elapsed_ms());
+    pghacker_codesearch::engine::restore_timeout(&reader, &old).await;
+    let mut args = SearchArgs::new("makeNode");
+    args.budget_ms = Some(80);
+    let result = search(&reader, &snapshot, &args).await?;
+    assert!(result.budget_exceeded && !result.complete);
+    assert_eq!(result.total_lines, 0);
+    assert!(
+        result
+            .notes
+            .iter()
+            .any(|note| note.contains("lower bounds"))
+    );
+    args.query = "".into();
+    args.not = "makeNode".into();
+    let error = search(&reader, &snapshot, &args).await.unwrap_err();
+    assert!(error.to_string().contains("inverted results"), "{error:#}");
+    let output = run(
+        &reader,
+        &snapshot,
+        "grep -r makeNode src 2>/dev/null | wc -l || echo none",
+        Limits {
+            budget_ms: 80,
+            ..Limits::default()
+        },
+    )
+    .await?;
+    assert!(output.incomplete);
+    assert_eq!(output.status, 2);
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+    let timeout: String = reader
+        .query_one("SHOW statement_timeout", &[])
+        .await?
+        .get(0);
+    assert_eq!(timeout, "1739ms");
+    let one: i32 = reader.query_one("SELECT 1", &[]).await?.get(0);
+    assert_eq!(one, 1);
+    blocker.batch_execute("ROLLBACK").await?;
     Ok(())
 }

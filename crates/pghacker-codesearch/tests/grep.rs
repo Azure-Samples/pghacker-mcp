@@ -23,6 +23,63 @@ const GRAM_15: &str = "        JsonTable *n = makeNode(JsonTable);";
 const NODES_11: &str = "#define makeNode(_type_) ((_type_ *) newNode(sizeof(_type_), T_##_type_))";
 
 #[tokio::test]
+async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
+    use pghacker_codesearch::engine::MAX_CANDIDATES;
+
+    let db = TestDb::create().await?;
+    let indexer = db.indexer().await?;
+    let snapshot = common::load(&indexer, "postgres", "19", &[("src/loops.c", Some(""))]).await?;
+    let count = MAX_CANDIDATES as i32 + 2;
+    indexer
+        .execute(
+            "UPDATE code_files SET line_count = $1 WHERE snapshot_id = $2",
+            &[&count, &snapshot.id],
+        )
+        .await?;
+    indexer
+        .execute(
+            "INSERT INTO code_lines (file_id, line_no, line)
+             SELECT currval('code_files_id_seq'), n, 'for (int i = 0; i < 10; i++) {}'
+             FROM generate_series(1, $1::int) n",
+            &[&count],
+        )
+        .await?;
+    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
+    let reader = db.reader().await?;
+    for command in [
+        "grep -rF 'for (' src | wc -l",
+        "grep -rF 'for (' src | sort | uniq -c",
+        "grep -rvc 'for (' src | wc -l || echo none",
+    ] {
+        let output = run(&reader, &snapshot, command, Limits::default()).await?;
+        assert!(output.incomplete, "{command}");
+        assert_eq!(output.status, 2, "{command}");
+        assert!(output.stdout.is_empty(), "{command}");
+        assert!(output.stderr[0].contains("no result or count"), "{command}");
+    }
+    let error = grep(
+        &reader,
+        &snapshot,
+        &GrepArgs {
+            command: "grep -rF 'for (' src | wc -l".into(),
+            version: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("search stopped early"),
+        "{error:#}"
+    );
+    let (selected, incomplete) =
+        pghacker_codesearch::grep::select(&reader, &snapshot, "grep -rv 'for (' src", 10_000)
+            .await?;
+    assert!(incomplete);
+    assert!(selected.iter().all(|file| file.lines.is_empty()));
+    Ok(())
+}
+
+#[tokio::test]
 async fn grep_prints_like_gnu_grep() -> Result<()> {
     let db = TestDb::create().await?;
     let indexer = db.indexer().await?;

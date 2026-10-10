@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::{TryStreamExt, pin_mut};
 use tokio_postgres::GenericClient;
 use tokio_postgres::error::SqlState;
@@ -51,6 +51,14 @@ impl Budget {
     pub fn exceeded(&self) -> bool {
         self.start.elapsed() >= self.limit
     }
+
+    pub async fn apply(&self, client: &impl GenericClient) -> Result<bool> {
+        if self.exceeded() {
+            return Ok(false);
+        }
+        set_timeout(client, self.remaining_ms()).await?;
+        Ok(true)
+    }
 }
 
 /// Sets the session's statement_timeout, returning the previous value.
@@ -69,9 +77,12 @@ pub async fn set_timeout(client: &impl GenericClient, ms: u64) -> Result<String>
 /// Restores statement_timeout; a failure (in an aborted transaction) is
 /// left for the caller's rollback to undo.
 pub async fn restore_timeout(client: &impl GenericClient, old: &str) {
-    let _ = client
+    if let Err(error) = client
         .execute("SELECT set_config('statement_timeout', $1, false)", &[&old])
-        .await;
+        .await
+    {
+        tracing::warn!(%error, "cannot restore code search's statement_timeout");
+    }
 }
 
 /// Whether `error` is a cancellation by statement_timeout.
@@ -87,6 +98,13 @@ pub struct LineQuery<'a> {
     pub require: Vec<&'a Filter>,
     pub reject: Vec<&'a Filter>,
     pub cap: usize,
+    /// Scan the selected files before applying text predicates, rather than
+    /// reading common postings from the global trigram index.
+    pub scope_first: bool,
+}
+
+pub fn scope_first(lines: u64, require: &[&Filter]) -> bool {
+    lines <= MAX_CANDIDATES as u64 || !require.iter().any(|filter| filter.has_index_literal())
 }
 
 /// A candidate line.
@@ -111,19 +129,33 @@ type Param = Box<dyn ToSql + Sync + Send>;
 /// The query's SQL and parameters.
 pub fn line_sql(q: &LineQuery<'_>) -> (String, Vec<Param>) {
     let mut params: Vec<Param> = Vec::new();
-    let mut sql = String::from("SELECT l.file_id, l.line_no, l.line FROM code_lines l WHERE ");
-    match q.file_ids {
+    let scope = match q.file_ids {
         Some(ids) => {
             params.push(Box::new(ids.to_vec()));
-            sql.push_str("l.file_id = ANY($1::int4[])");
+            "unnest($1::int4[]) AS f(id)"
         }
         None => {
             params.push(Box::new(q.snapshot_id));
-            sql.push_str(
-                "l.file_id = ANY(ARRAY(SELECT id FROM code_files WHERE snapshot_id = $1))",
-            );
+            "(SELECT id FROM code_files WHERE snapshot_id = $1) AS f"
         }
-    }
+    };
+    let mut sql = if q.scope_first {
+        // Fence the file lookup before applying text filters. The InitPlan
+        // array also avoids estimating thousands of file IDs as most of the
+        // entire archive, which can turn a scoped lookup into a global scan.
+        format!(
+            "SELECT l.file_id, l.line_no, l.line FROM \
+             (SELECT file_id, line_no, line FROM code_lines \
+              WHERE file_id = ANY(ARRAY(SELECT id FROM {scope})) OFFSET 0) AS l WHERE true"
+        )
+    } else {
+        let scope = if q.file_ids.is_some() {
+            "l.file_id = ANY($1::int4[])"
+        } else {
+            "l.file_id = ANY(ARRAY(SELECT id FROM code_files WHERE snapshot_id = $1))"
+        };
+        format!("SELECT l.file_id, l.line_no, l.line FROM code_lines l WHERE {scope}")
+    };
     let ors = |conds: &[crate::pattern::Cond], params: &mut Vec<Param>| -> String {
         let parts: Vec<String> = conds
             .iter()
@@ -167,9 +199,17 @@ pub fn line_sql(q: &LineQuery<'_>) -> (String, Vec<Param>) {
 }
 
 /// Reads candidate lines, streaming, until the cap or the statement timeout.
-pub async fn candidates(client: &impl GenericClient, q: &LineQuery<'_>) -> Result<Candidates> {
+pub async fn candidates(
+    client: &impl GenericClient,
+    q: &LineQuery<'_>,
+    budget: &Budget,
+) -> Result<Candidates> {
     let (sql, params) = line_sql(q);
     let mut out = Candidates::default();
+    if !budget.apply(client).await? {
+        out.timed_out = true;
+        return Ok(out);
+    }
     let stream = match client
         .query_raw(
             sql.as_str(),
@@ -190,6 +230,10 @@ pub async fn candidates(client: &impl GenericClient, q: &LineQuery<'_>) -> Resul
             Ok(Some(row)) => {
                 if out.rows.len() == q.cap {
                     out.capped = true;
+                    break;
+                }
+                if budget.exceeded() {
+                    out.timed_out = true;
                     break;
                 }
                 out.rows.push(Row {
@@ -213,10 +257,14 @@ pub async fn candidates(client: &impl GenericClient, q: &LineQuery<'_>) -> Resul
 pub async fn line_ranges(
     client: &impl GenericClient,
     ranges: &[(i32, i32, i32)],
+    budget: &Budget,
 ) -> Result<HashMap<(i32, i32), String>> {
     let mut out = HashMap::new();
     if ranges.is_empty() {
         return Ok(out);
+    }
+    if !budget.apply(client).await? {
+        bail!("the code-search time budget ran out before reading context; narrow the search");
     }
     let ids: Vec<i32> = ranges.iter().map(|r| r.0).collect();
     let los: Vec<i32> = ranges.iter().map(|r| r.1).collect();
@@ -294,6 +342,7 @@ mod tests {
             require: vec![&positive],
             reject: vec![&negative, &inexact],
             cap: 10,
+            scope_first: false,
         };
         let (sql, params) = line_sql(&q);
         assert_eq!(
@@ -303,6 +352,52 @@ mod tests {
              AND NOT (l.line LIKE $4::text) LIMIT 11"
         );
         assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn scopes_short_patterns_before_filtering() {
+        let weak = Filter::Any {
+            conds: vec![Cond {
+                op: Op::Like,
+                pattern: "%for (%".into(),
+                literal: None,
+            }],
+            exact: true,
+        };
+        let strong = Filter::Any {
+            conds: vec![Cond {
+                op: Op::Like,
+                pattern: "%makeNode%".into(),
+                literal: None,
+            }],
+            exact: true,
+        };
+        assert!(scope_first(10, &[&strong]));
+        assert!(scope_first(1_000_000, &[&weak]));
+        assert!(scope_first(1_000_000, &[&Filter::All { exact: false }]));
+        assert!(!scope_first(1_000_000, &[&weak, &strong]));
+        let mut q = LineQuery {
+            snapshot_id: 7,
+            file_ids: None,
+            require: vec![&weak],
+            reject: vec![],
+            cap: 10,
+            scope_first: true,
+        };
+        let (sql, params) = line_sql(&q);
+        assert_eq!(
+            sql,
+            "SELECT l.file_id, l.line_no, l.line FROM \
+             (SELECT file_id, line_no, line FROM code_lines \
+              WHERE file_id = ANY(ARRAY(SELECT id FROM \
+                  (SELECT id FROM code_files WHERE snapshot_id = $1) AS f)) OFFSET 0) AS l WHERE true \
+             AND (l.line LIKE $2::text) LIMIT 11"
+        );
+        assert_eq!(params.len(), 2);
+        let ids = [3, 5];
+        q.file_ids = Some(&ids);
+        let (sql, _) = line_sql(&q);
+        assert!(sql.contains("ANY(ARRAY(SELECT id FROM unnest($1::int4[]) AS f(id)))"));
     }
 
     #[test]

@@ -81,6 +81,9 @@ pub async fn grep(
     args: &GrepArgs,
 ) -> Result<String> {
     let out = run(client, snapshot, &args.command, Limits::default()).await?;
+    if out.incomplete {
+        bail!("{}", out.stderr.join("\n"));
+    }
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     for line in &out.stderr {
         text.push_str(line);
@@ -98,7 +101,7 @@ pub async fn run(
 ) -> Result<Output> {
     let budget = Budget::new(Some(limits.budget_ms));
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
-    let result = run_inner(client, snapshot, command, limits).await;
+    let result = run_inner(client, snapshot, command, limits, &budget).await;
     engine::restore_timeout(client, &old).await;
     result
 }
@@ -125,12 +128,12 @@ pub async fn select(
         let compiled = compile(&opts)?;
         let selection = selection(
             client,
-            snapshot,
-            &table,
+            (snapshot, &table),
             &opts,
             &compiled,
             &prepared,
             Need::Numbers,
+            &budget,
         )
         .await?;
         let searched = prepared
@@ -142,7 +145,7 @@ pub async fn select(
                 lines: selection.selected(item.file),
             })
             .collect();
-        Ok((searched, selection.incomplete))
+        Ok((searched, selection.incomplete || budget.exceeded()))
     }
     .await;
     engine::restore_timeout(client, &old).await;
@@ -500,13 +503,14 @@ enum Need {
 
 async fn selection(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
-    table: &FileTable,
+    source: (&Snapshot, &FileTable),
     opts: &Options,
     compiled: &Compiled,
     prepared: &Prepared,
     need: Need,
+    budget: &Budget,
 ) -> Result<Selection> {
+    let (snapshot, table) = source;
     let need_lines = need == Need::Texts;
     let mut files: Vec<usize> = prepared.items.iter().map(|i| i.file).collect();
     files.sort_unstable();
@@ -524,24 +528,35 @@ async fn selection(
         return Ok(sel);
     }
     let invert_lines = opts.invert && need_lines;
+    let require = if invert_lines {
+        vec![]
+    } else {
+        vec![&compiled.filter]
+    };
+    let scope_lines = files
+        .iter()
+        .map(|&k| table.files[k].line_count.max(0) as u64)
+        .sum();
+    let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
         snapshot_id: snapshot.id,
         file_ids: Some(&ids),
-        require: if invert_lines {
-            vec![]
-        } else {
-            vec![&compiled.filter]
-        },
+        require,
         reject: if invert_lines {
             vec![&compiled.filter]
         } else {
             vec![]
         },
         cap: MAX_CANDIDATES,
+        scope_first,
     };
-    let found = engine::candidates(client, &q).await?;
+    let found = engine::candidates(client, &q, budget).await?;
     sel.incomplete = found.capped || found.timed_out;
     for row in found.rows {
+        if budget.exceeded() {
+            sel.incomplete = true;
+            break;
+        }
         let Some(&k) = by_id.get(&row.file_id) else {
             continue;
         };
@@ -565,17 +580,29 @@ async fn selection(
     }
     sel.invert_counts = opts.invert && !need_lines;
     if opts.invert && need == Need::Numbers {
+        if sel.incomplete {
+            return Ok(sel);
+        }
         // The selected lines are the complement of the matching ones.
         sel.invert_counts = false;
         for &k in &files {
             let matching = sel.matched_lines.entry(k).or_default();
             matching.sort_unstable();
-            let lines: Vec<(i32, String)> = (1..=table.files[k].line_count)
-                .filter(|n| matching.binary_search(n).is_err())
-                .map(|n| (n, String::new()))
-                .collect();
+            let mut lines = Vec::new();
+            for n in 1..=table.files[k].line_count {
+                if budget.exceeded() {
+                    sel.incomplete = true;
+                    break;
+                }
+                if matching.binary_search(&n).is_err() {
+                    lines.push((n, String::new()));
+                }
+            }
             if !lines.is_empty() {
                 sel.lines.insert(k, lines);
+            }
+            if sel.incomplete {
+                break;
             }
         }
     }
@@ -587,6 +614,7 @@ async fn run_inner(
     snapshot: &Snapshot,
     command: &str,
     limits: Limits,
+    budget: &Budget,
 ) -> Result<Output> {
     let table = FileTable::load(client, snapshot).await?;
     let script = shell::parse(command).map_err(|e| anyhow!(e))?;
@@ -625,7 +653,19 @@ async fn run_inner(
     } else {
         prepared
     };
-    let sel = selection(client, snapshot, &table, &opts, &compiled, &prepared, need).await?;
+    let sel = selection(
+        client,
+        (snapshot, &table),
+        &opts,
+        &compiled,
+        &prepared,
+        need,
+        budget,
+    )
+    .await?;
+    if sel.incomplete {
+        return Ok(incomplete_output());
+    }
 
     // Context lines, when the printed lines need them.
     let mut extra: HashMap<(usize, i32), String> = HashMap::new();
@@ -642,7 +682,9 @@ async fn run_inner(
         }
         let id_to_file: HashMap<i32, usize> =
             sel.lines.keys().map(|&k| (table.files[k].id, k)).collect();
-        for ((id, n), text) in engine::line_ranges(client, &engine::merge_ranges(ranges)).await? {
+        for ((id, n), text) in
+            engine::line_ranges(client, &engine::merge_ranges(ranges), budget).await?
+        {
             extra.insert((id_to_file[&id], n), text);
         }
     }
@@ -668,6 +710,9 @@ async fn run_inner(
         if opts.mode == Mode::Quiet && found > 0 {
             break;
         }
+        if budget.exceeded() {
+            return Ok(incomplete_output());
+        }
     }
     let selected_any = printer.selected > 0;
     let listed = printer.listed;
@@ -683,13 +728,6 @@ async fn run_inner(
         status = 2;
     }
     let mut stderr = prepared.stderr.clone();
-    if sel.incomplete {
-        stderr.push(
-            "grep: (pghacker) the search stopped early, at the time budget or at 200,000 \
-             candidate lines: narrow it"
-                .into(),
-        );
-    }
     if first.stderr_to_stdout() {
         let mut merged: Vec<u8> = stderr
             .iter()
@@ -702,9 +740,15 @@ async fn run_inner(
         stderr.clear();
     }
     for words in later {
+        if budget.exceeded() {
+            return Ok(incomplete_output());
+        }
         let (out, code) = run_stage(&words, &stdout)?;
         stdout = out;
         status = code;
+    }
+    if budget.exceeded() {
+        return Ok(incomplete_output());
     }
     if status != 0
         && let Some(fallback) = &script.fallback
@@ -744,6 +788,19 @@ async fn run_inner(
         status,
         incomplete: sel.incomplete,
     })
+}
+
+fn incomplete_output() -> Output {
+    Output {
+        stderr: vec![
+            "grep: (pghacker) the search stopped early, at the time budget or at 200,000 \
+             candidate lines; no result or count was returned: narrow the search"
+                .into(),
+        ],
+        status: 2,
+        incomplete: true,
+        ..Output::default()
+    }
 }
 
 const STAGES: &str = "head, tail, wc, sort, uniq, cut, cat and grep";
