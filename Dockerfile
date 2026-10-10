@@ -23,13 +23,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && install -D -m 0755 -t /out target/release/pghacker-indexer target/release/pghacker-mcp
 
 # PilotSwarm's release tarballs, checked against scripts/lib/release.mjs's
-# checksums, and the app's Node dependencies.
+# checksums, and the app's Node dependencies. The portal's SPA is patched to
+# sign in through oauth2-proxy (scripts/lib/portal-spa.mjs).
 FROM ${NODE_IMAGE} AS node
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY scripts/lib/release.mjs scripts/lib/release.mjs
+COPY scripts/lib/portal-spa.mjs scripts/lib/portal-spa.mjs
 RUN node --input-type=module -e "import { restoreRelease } from './scripts/lib/release.mjs'; await restoreRelease('/app');" \
     && npm ci --omit=dev --no-audit --no-fund \
+    && node --input-type=module -e "import { patchPortalSpa } from './scripts/lib/portal-spa.mjs'; patchPortalSpa('/app/node_modules/pilotswarm');" \
     && npm cache clean --force
 
 # oauth2-proxy, checked against its release's checksums.
