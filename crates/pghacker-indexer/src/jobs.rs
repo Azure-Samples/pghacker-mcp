@@ -113,26 +113,30 @@ pub async fn wake(client: &impl GenericClient, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Claims the next due job, if any; of `kinds` only, when given.
+/// Claims the next due job, if any: of `kinds` only, when given, and never of
+/// `except`.
 pub async fn claim(
     client: &impl GenericClient,
     node: &str,
     kinds: Option<&[&str]>,
+    except: &[&str],
 ) -> Result<Option<Job>> {
     let kinds: Option<Vec<String>> =
         kinds.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect());
+    let except: Vec<String> = except.iter().map(|kind| (*kind).to_owned()).collect();
     let row = client
         .query_opt(
             "UPDATE jobs SET state = 'running', locked_by = $1, locked_at = now(), attempts = attempts + 1
              WHERE id = (
                  SELECT id FROM jobs
                  WHERE state = 'queued' AND run_after <= now() AND ($2::text[] IS NULL OR kind = ANY ($2))
+                     AND kind <> ALL ($3)
                  ORDER BY priority DESC, run_after, id
                  FOR UPDATE SKIP LOCKED
                  LIMIT 1
              )
              RETURNING id, source_id, kind, key, payload, attempts, max_attempts",
-            &[&node, &kinds],
+            &[&node, &kinds, &except],
         )
         .await?;
     Ok(row.map(|row| Job {
@@ -400,8 +404,7 @@ async fn after_ingest(indexer: &Indexer) -> Result<()> {
 }
 
 /// Runs `workers` workers until `shutdown` is cancelled; each finishes its
-/// current job first. Worker 0 runs only the recurring jobs, so embedding,
-/// anchors and the graph keep up while the others download.
+/// current job first. Each worker claims the jobs of its [`lane`].
 pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) -> Result<()> {
     {
         let client = indexer
@@ -421,9 +424,9 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
         let indexer = indexer.clone();
         let shutdown = shutdown.clone();
         let node = format!("{node}/{worker}");
-        let recurring_only = worker == 0 && workers > 1;
+        let (kinds, except) = lane(worker, workers);
         handles.push(tokio::spawn(async move {
-            worker_loop(indexer, node, recurring_only, shutdown).await
+            worker_loop(indexer, node, kinds, except, shutdown).await
         }));
     }
     for handle in handles {
@@ -440,16 +443,37 @@ const RECURRING_KINDS: &[&str] = &[
     kind::MAIL_REFRESH,
 ];
 
+const NOT_CODE: &[&str] = &[kind::CODE_SNAPSHOT];
+
+/// The job kinds worker `worker` of `workers` claims: only these, when given,
+/// and never those. Worker 0 runs only the recurring jobs, so embedding,
+/// anchors and the graph keep up while the others download. With three or
+/// more workers, worker 1 runs anything and the rest anything but code
+/// snapshots, so neither source starves the other: a batch of snapshots loads
+/// one at a time while mail keeps coming in, and a mail backfill still leaves
+/// a worker for code.
+pub fn lane(
+    worker: usize,
+    workers: usize,
+) -> (Option<&'static [&'static str]>, &'static [&'static str]) {
+    match worker {
+        0 if workers > 1 => (Some(RECURRING_KINDS), &[]),
+        1 => (None, &[]),
+        _ if workers > 2 => (None, NOT_CODE),
+        _ => (None, &[]),
+    }
+}
+
 async fn worker_loop(
     indexer: Indexer,
     node: String,
-    recurring_only: bool,
+    kinds: Option<&'static [&'static str]>,
+    except: &'static [&'static str],
     shutdown: CancellationToken,
 ) {
-    let kinds = recurring_only.then_some(RECURRING_KINDS);
     while !shutdown.is_cancelled() {
         let claimed = match indexer.pool.get().await {
-            Ok(client) => claim(&**client, &node, kinds).await,
+            Ok(client) => claim(&**client, &node, kinds, except).await,
             Err(error) => Err(error.into()),
         };
         match claimed {

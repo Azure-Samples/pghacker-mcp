@@ -19,6 +19,55 @@ fn at(path: &str, line: u32) -> (String, u32) {
     (path.to_owned(), line)
 }
 
+async fn resolved(reader: &tokio_postgres::Client, version: Option<&str>) -> Result<String> {
+    Ok(resolve_snapshot(reader, "postgres", version).await?.git_ref)
+}
+
+#[tokio::test]
+async fn versions_resolve_to_their_latest_snapshot() -> Result<()> {
+    let db = TestDb::create().await?;
+    // Loaded in another order than committed, as a batch of tags loads.
+    db.indexer()
+        .await?
+        .batch_execute(
+            "INSERT INTO code_snapshots (repo, ref, sha, version, paths, state, loaded_at, committed_at) VALUES
+               ('postgres', 'REL_18_STABLE', '18a0000000', '18', '{}', 'ready', now() - interval '3 hours', '2026-09-01'),
+               ('postgres', 'REL_18_6', '18b0000000', '18', '{}', 'ready', now(), '2026-08-10'),
+               ('postgres', 'REL_18_3', '18c0000000', '18', '{}', 'ready', now() - interval '1 hour', '2026-02-12'),
+               ('postgres', 'REL_19_STABLE', '19a0000000', '19', '{}', 'ready', now() - interval '5 hours', '2026-09-30'),
+               ('postgres', 'REL_19_0', '19b0000000', '19', '{}', 'ready', now() - interval '2 hours', '2026-09-20'),
+               ('postgres', 'master', 'ffa0000000', 'master', '{}', 'ready', now() - interval '4 hours', '2026-10-09'),
+               ('postgres', 'REL9_6_STABLE', '96a0000000', '9', '{}', 'ready', now(), '2021-11-09'),
+               ('postgres', 'REL9_6_24', '96b0000000', '9', '{}', 'ready', now(), '2021-11-08'),
+               ('postgres', 'REL9_0_23', '90a0000000', '9', '{}', 'ready', now(), '2015-10-05')",
+        )
+        .await?;
+    let reader = db.reader().await?;
+
+    // A major version is its latest snapshot: the branch head, whenever it loaded.
+    assert_eq!(resolved(&reader, Some("18")).await?, "REL_18_STABLE");
+    assert_eq!(resolved(&reader, Some("PG18")).await?, "REL_18_STABLE");
+    assert_eq!(resolved(&reader, Some("9")).await?, "REL9_6_STABLE");
+    // No version: the newest numbered release line, not master.
+    assert_eq!(resolved(&reader, None).await?, "REL_19_STABLE");
+    // Every other snapshot by release, ref or SHA.
+    assert_eq!(resolved(&reader, Some("18.3")).await?, "REL_18_3");
+    assert_eq!(resolved(&reader, Some("REL_18_6")).await?, "REL_18_6");
+    assert_eq!(resolved(&reader, Some("rel_19_0")).await?, "REL_19_0");
+    assert_eq!(resolved(&reader, Some("18b0000")).await?, "REL_18_6");
+    assert_eq!(resolved(&reader, Some("master")).await?, "master");
+    assert_eq!(resolved(&reader, Some("9.6")).await?, "REL9_6_STABLE");
+    assert_eq!(resolved(&reader, Some("9.6.24")).await?, "REL9_6_24");
+    assert_eq!(resolved(&reader, Some("9.0")).await?, "REL9_0_23");
+
+    let error = resolved(&reader, Some("18.5"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("versions: 19, 18, 9, master"), "{error}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn text_and_regex_searches() -> Result<()> {
     let db = TestDb::create().await?;

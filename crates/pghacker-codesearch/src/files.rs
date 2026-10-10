@@ -27,7 +27,9 @@ pub struct ReadFileArgs {
     /// The last line to read. Default: as many as fit (2000 lines, 200 KB).
     #[serde(default)]
     pub end_line: Option<u32>,
-    /// PostgreSQL version, such as 19. Default: the newest loaded.
+    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a
+    /// release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default:
+    /// the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }
@@ -68,7 +70,9 @@ pub struct ListFilesArgs {
     /// Entries to return: default 500, at most 5000.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// PostgreSQL version, such as 19. Default: the newest loaded.
+    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a
+    /// release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default:
+    /// the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }

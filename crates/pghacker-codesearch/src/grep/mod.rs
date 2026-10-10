@@ -31,7 +31,9 @@ pub const MAX_OUTPUT: usize = 1 << 20;
 pub struct GrepArgs {
     /// A grep command line, run at the source root, such as `grep -rn "makeNode(" src/backend | head -20`.
     pub command: String,
-    /// PostgreSQL version, such as 19. Default: the newest loaded.
+    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a
+    /// release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default:
+    /// the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }

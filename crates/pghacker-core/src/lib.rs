@@ -1,8 +1,10 @@
 //! Shared by pghacker-indexer and pghacker-mcp: configuration from the
 //! environment, PostgreSQL pools, the bootstrap and migrations of schema
 //! `pghacker` and graph `pghacker_graph`, the embeddings client, search modes,
-//! citation checks and the MCP server plumbing.
+//! citation checks, which code snapshot is the latest, and the MCP server
+//! plumbing.
 
+pub mod code;
 pub mod config;
 pub mod db;
 pub mod embed;

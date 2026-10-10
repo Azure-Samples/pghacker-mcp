@@ -59,6 +59,54 @@ fn args<T: serde::de::DeserializeOwned>(value: Value) -> T {
 }
 
 #[tokio::test]
+async fn code_snapshots_keep_to_one_lane() {
+    let db = TestDb::create().await.unwrap();
+    let client = db.indexer().await.unwrap();
+    let payload = json!({});
+    for (kind, key, priority) in [
+        (jobs::kind::CODE_SNAPSHOT, "postgres/a", 3),
+        (jobs::kind::CODE_SNAPSHOT, "postgres/b", 3),
+        (jobs::kind::MBOX_MONTH, "pgsql-hackers/2026-10", 1),
+    ] {
+        assert!(
+            jobs::enqueue(&client, None, kind, key, &payload, priority)
+                .await
+                .unwrap()
+        );
+    }
+    // Snapshots outrank mail, but only worker 1 takes them.
+    let (kinds, except) = jobs::lane(2, 5);
+    let mail = jobs::claim(&client, "w2", kinds, except)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mail.kind, jobs::kind::MBOX_MONTH);
+    assert!(
+        jobs::claim(&client, "w3", kinds, except)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (kinds, except) = jobs::lane(1, 5);
+    let code = jobs::claim(&client, "w1", kinds, except)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(code.kind, jobs::kind::CODE_SNAPSHOT);
+
+    assert!(
+        jobs::lane(0, 5)
+            .0
+            .unwrap()
+            .contains(&jobs::kind::MAIL_REFRESH)
+    );
+    assert!(jobs::lane(4, 5).1.contains(&jobs::kind::CODE_SNAPSHOT));
+    // Fewer workers than lanes: whatever is left runs anything.
+    assert_eq!(jobs::lane(0, 1), (None, &[] as &[&str]));
+    assert_eq!(jobs::lane(1, 2), (None, &[] as &[&str]));
+}
+
+#[tokio::test]
 async fn jobs_are_idempotent_claimed_once_and_retried() {
     let db = TestDb::create().await.unwrap();
     let client = db.indexer().await.unwrap();
@@ -79,13 +127,21 @@ async fn jobs_are_idempotent_claimed_once_and_retried() {
             .unwrap()
     );
     let other = db.indexer().await.unwrap();
-    let first = jobs::claim(&client, "n1", None).await.unwrap().unwrap();
-    let second = jobs::claim(&other, "n2", None).await.unwrap().unwrap();
+    let first = jobs::claim(&client, "n1", None, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let second = jobs::claim(&other, "n2", None, &[]).await.unwrap().unwrap();
     assert_eq!(first.key, "b", "higher priority first");
     assert_eq!(second.key, "a");
-    assert!(jobs::claim(&client, "n1", None).await.unwrap().is_none());
     assert!(
-        jobs::claim(&client, "n1", Some(&["other"]))
+        jobs::claim(&client, "n1", None, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        jobs::claim(&client, "n1", Some(&["other"]), &[])
             .await
             .unwrap()
             .is_none()

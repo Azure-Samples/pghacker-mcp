@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
+use pghacker_core::code::{LATEST_FIRST, newest_first, release_line};
 use serde::Serialize;
 use tokio_postgres::GenericClient;
 
@@ -20,8 +21,13 @@ pub struct Snapshot {
     pub sha: String,
 }
 
-/// The newest ready snapshot of `repo`, or of the given version (such as
-/// `19`, `PG19`, `REL_19_STABLE` or a SHA prefix).
+/// The snapshot of `repo` that a code tool reads. `version` names a major
+/// version (`19`, `PG19`, `9`), a release (`18.3`, `9.6.24`) or a release
+/// line before 10 (`9.6`), a ref (`REL_18_3`, `REL_19_STABLE`, `master`) or a
+/// commit SHA prefix. Of the snapshots it names, the latest wins: the newest
+/// commit, so a release branch's head before its releases. Without one, the
+/// latest of the newest numbered release line. Every loaded snapshot stays
+/// readable by its ref or SHA.
 pub async fn resolve_snapshot(
     client: &impl GenericClient,
     repo: &str,
@@ -29,9 +35,10 @@ pub async fn resolve_snapshot(
 ) -> Result<Snapshot> {
     let rows = client
         .query(
-            "SELECT id, repo, version, ref, sha FROM code_snapshots \
-             WHERE repo = $1 AND state = 'ready' \
-             ORDER BY loaded_at DESC NULLS LAST, id DESC",
+            &format!(
+                "SELECT id, repo, version, ref, sha FROM code_snapshots \
+                 WHERE repo = $1 AND state = 'ready' ORDER BY {LATEST_FIRST}"
+            ),
             &[&repo],
         )
         .await
@@ -48,30 +55,82 @@ pub async fn resolve_snapshot(
         .collect();
     let wanted = version.map(str::trim).filter(|v| !v.is_empty());
     let found = match wanted {
-        None => snapshots.first(),
-        Some(v) => {
-            let norm = normalize_version(v);
-            snapshots.iter().find(|s| {
-                s.version.as_deref().map(normalize_version).as_deref() == Some(norm.as_str())
-                    || s.git_ref.eq_ignore_ascii_case(v)
-                    || (v.len() >= 7 && s.sha.starts_with(&v.to_ascii_lowercase()))
-            })
-        }
+        None => latest_release(&snapshots),
+        Some(v) => named(&snapshots, v),
     };
     if let Some(snapshot) = found {
         return Ok(snapshot.clone());
     }
-    let available: Vec<String> = snapshots
+    let mut versions: Vec<&str> = snapshots
         .iter()
-        .map(|s| s.version.clone().unwrap_or_else(|| s.git_ref.clone()))
+        .filter_map(|s| s.version.as_deref())
         .collect();
+    versions.sort_by(|a, b| newest_first(a, b));
+    versions.dedup();
     match wanted {
-        Some(v) if !available.is_empty() => bail!(
-            "no loaded snapshot of {repo} for version {v}; available: {}",
-            available.join(", ")
+        Some(v) if !versions.is_empty() => bail!(
+            "no loaded snapshot of {repo} for version {v}; versions: {} (or a release such as 18.3, \
+             a ref such as REL_18_STABLE, or a commit SHA)",
+            versions.join(", ")
         ),
         _ => bail!("no loaded snapshot of {repo}"),
     }
+}
+
+/// The latest snapshot of the newest numbered release line, or the latest of
+/// all when none is numbered. `snapshots` are latest first.
+fn latest_release(snapshots: &[Snapshot]) -> Option<&Snapshot> {
+    let line = |s: &Snapshot| s.version.as_deref().and_then(release_line);
+    match snapshots.iter().filter_map(line).max() {
+        Some(newest) => snapshots.iter().find(|s| line(s) == Some(newest)),
+        None => snapshots.first(),
+    }
+}
+
+/// The latest snapshot that `v` names: a ref, a release or release line, a
+/// commit SHA prefix, then a major version. `snapshots` are latest first.
+fn named<'a>(snapshots: &'a [Snapshot], v: &str) -> Option<&'a Snapshot> {
+    let with_ref = |name: &str| {
+        snapshots
+            .iter()
+            .find(|s| s.git_ref.eq_ignore_ascii_case(name))
+    };
+    if let Some(found) = with_ref(v) {
+        return Some(found);
+    }
+    let norm = normalize_version(v);
+    let parts: Vec<&str> = norm.split('.').collect();
+    if parts.len() > 1
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        let major: u32 = parts[0].parse().ok()?;
+        return match (major >= 10, parts.len()) {
+            // 18.3 is the release REL_18_3.
+            (true, 2) => with_ref(&format!("REL_{}_{}", parts[0], parts[1])),
+            // 9.6.24 is the release REL9_6_24.
+            (false, 3) => with_ref(&format!("REL{}_{}_{}", parts[0], parts[1], parts[2])),
+            // 9.6 is a release line: its branch head, or its newest release.
+            (false, 2) => {
+                let line = format!("REL{}_{}", parts[0], parts[1]);
+                snapshots.iter().find(|s| {
+                    let r = s.git_ref.to_ascii_uppercase();
+                    r == line || r.starts_with(&format!("{line}_"))
+                })
+            }
+            _ => None,
+        };
+    }
+    let lower = v.to_ascii_lowercase();
+    if v.len() >= 7
+        && let Some(found) = snapshots.iter().find(|s| s.sha.starts_with(&lower))
+    {
+        return Some(found);
+    }
+    snapshots
+        .iter()
+        .find(|s| s.version.as_deref().map(normalize_version).as_deref() == Some(norm.as_str()))
 }
 
 /// `PG19`, `pg 19`, `v19` and `REL_19_STABLE` all mean `19`.

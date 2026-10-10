@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
+use pghacker_core::code::{LATEST_FIRST, newest_first};
 use pghacker_core::{EDGE_LABELS, GRAPH, VERTEX_LABELS};
 
 /// Each vertex label's properties.
@@ -103,21 +104,44 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
             &[],
         )
         .await?;
-    let snapshots: Vec<Value> = client
+    // One entry per version, newest first: its default snapshot, the latest
+    // (the newest commit), and the refs of the others, which stay readable.
+    let mut code: Vec<(String, Option<String>, Value, Vec<String>)> = Vec::new();
+    for row in client
         .query(
-            "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
-             FROM code_snapshots WHERE state = 'ready' ORDER BY id",
+            &format!(
+                "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
+                 FROM code_snapshots WHERE state = 'ready' ORDER BY {LATEST_FIRST}"
+            ),
             &[],
         )
         .await?
-        .iter()
-        .map(|row| json!({ "repo": row.get::<_, String>(0), "version": row.get::<_, Option<String>>(1),
-                           "ref": row.get::<_, String>(2), "sha": row.get::<_, String>(3),
-                           "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
-                           "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
-                           "lines": row.get::<_, i64>(6),
-                           "note": "The branch as of committed_at: for a release branch, what that release contains. \
-                                    Work committed to master after the branch point goes to a later release." }))
+    {
+        let (repo, version, git_ref): (String, Option<String>, String) =
+            (row.get(0), row.get(1), row.get(2));
+        match code
+            .iter_mut()
+            .find(|(r, v, ..)| *r == repo && *v == version)
+        {
+            Some((.., others)) => others.push(git_ref),
+            None => {
+                let latest = json!({ "ref": git_ref, "sha": row.get::<_, String>(3),
+                                     "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
+                                     "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
+                                     "lines": row.get::<_, i64>(6) });
+                code.push((repo, version, latest, Vec::new()));
+            }
+        }
+    }
+    code.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| newest_first(a.1.as_deref().unwrap_or(""), b.1.as_deref().unwrap_or("")))
+    });
+    let code: Vec<Value> = code
+        .into_iter()
+        .map(|(repo, version, latest, others)| {
+            json!({ "repo": repo, "version": version, "default": latest, "other_refs": others })
+        })
         .collect();
     Ok(json!({
         "graph": {
@@ -163,7 +187,11 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
                 "positions": coverage.get::<_, i64>(9),
             },
             "embeddings": { "chunks_embedded": coverage.get::<_, i64>(10), "chunks": coverage.get::<_, i64>(11) },
-            "code": snapshots,
+            "code": code,
+            "code_note": "A snapshot is the tree as of committed_at: for a release branch, what that release contains; \
+                          work committed to master after the branch point goes to a later release. The code tools read \
+                          a version's default, its latest snapshot; name a release (18.3), a ref from other_refs or a \
+                          commit SHA as the version to read another, and no version for the newest release line.",
         },
     }))
 }

@@ -28,7 +28,10 @@ flowchart LR
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads) and any branch, tag or commit of PostgreSQL.
+    - A list added without months, `follow` included, queues the whole archive.
+    - Every code snapshot is kept. The code tools read a version's latest (its newest commit: the branch head, else its newest release), or the newest release line when no version is given; any other snapshot is readable by release (`18.3`), ref or commit SHA.
   - `follow` retrieves a list's current month again every hour.
+  - The indexer's job workers have lanes. Worker 0 runs the recurring jobs, worker 1 runs anything, and the rest never take code snapshots, so a batch of snapshots loads one at a time while mail keeps flowing.
   - The crawl scheduler keeps extraction sessions busy as long as threads wait, as fast as Foundry allows: it starts 8, adds one a minute while saturated, halves on a 429, and stops at `crawl_max_sessions`. It runs deduplication as extracts arrive.
   - There are no caps on scope or spend. Every thread of whatever users add gets extracted by `gpt-6-luna`.
 

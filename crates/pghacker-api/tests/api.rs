@@ -353,8 +353,10 @@ async fn describes_the_ontology() {
         .await
         .unwrap()
         .batch_execute(
-            "INSERT INTO code_snapshots (repo, ref, sha, version, state, committed_at)
-             VALUES ('postgres', 'REL_19_STABLE', 'abc', '19', 'ready', '2026-09-30 12:00:00+00')",
+            "INSERT INTO code_snapshots (repo, ref, sha, version, state, committed_at) VALUES
+               ('postgres', 'REL_19_0', 'abd', '19', 'ready', '2026-09-20 12:00:00+00'),
+               ('postgres', 'REL_19_STABLE', 'abc', '19', 'ready', '2026-09-30 12:00:00+00'),
+               ('postgres', 'REL_18_6', 'abe', '18', 'ready', '2026-08-10 12:00:00+00')",
         )
         .await
         .unwrap();
@@ -363,9 +365,20 @@ async fn describes_the_ontology() {
         Ok(out) => out,
         Err(error) => panic!("{error:?}"),
     };
-    let code = &out["loaded"]["code"][0];
-    assert_eq!(code["ref"], "REL_19_STABLE");
-    assert_eq!(code["committed_at"], "2026-09-30T12:00:00Z");
+    // One entry per version, newest first, defaulting to its latest snapshot.
+    let code = &out["loaded"]["code"];
+    assert_eq!(code.as_array().unwrap().len(), 2);
+    assert_eq!(code[0]["version"], "19");
+    assert_eq!(code[0]["default"]["ref"], "REL_19_STABLE");
+    assert_eq!(code[0]["default"]["committed_at"], "2026-09-30T12:00:00Z");
+    assert_eq!(code[0]["other_refs"], serde_json::json!(["REL_19_0"]));
+    assert_eq!(code[1]["default"]["ref"], "REL_18_6");
+    assert!(
+        out["loaded"]["code_note"]
+            .as_str()
+            .unwrap()
+            .contains("other_refs")
+    );
     let tables: Vec<&str> = out["tables"]
         .as_array()
         .unwrap()
