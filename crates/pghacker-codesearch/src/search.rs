@@ -155,9 +155,7 @@ pub struct SearchArgs {
     /// Time limit in milliseconds: default 4000, at most 10000.
     #[serde(default)]
     pub budget_ms: Option<u32>,
-    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a
-    /// release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default:
-    /// the newest release line.
+    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }
