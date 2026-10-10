@@ -1,6 +1,7 @@
 //! The MCP plumbing over HTTP, as clients use it: a legacy client's
 //! initialize then tools/list and tools/call without a session, structured
-//! results, tool errors, unknown tools and Host validation.
+//! results, tool errors, unknown tools, Host validation, and ping from
+//! clients of either protocol.
 
 use std::sync::Arc;
 
@@ -83,6 +84,86 @@ async fn rpc(client: &reqwest::Client, base: &str, body: Value) -> (u16, Value) 
         status,
         serde_json::from_str(&json).unwrap_or(Value::String(text)),
     )
+}
+
+/// A request as a 2026-07-28 client sends it: no initialize, the version and
+/// the method in headers, the version and capabilities in `_meta`.
+async fn rpc_2026(
+    client: &reqwest::Client,
+    base: &str,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Value {
+    let mut params = params;
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let response = client
+        .post(format!("{base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", method)
+        .json(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        .send()
+        .await
+        .unwrap();
+    let text = response.text().await.unwrap();
+    serde_json::from_str(&text).unwrap_or(Value::String(text))
+}
+
+#[tokio::test]
+async fn ping_is_answered_whichever_protocol_the_client_speaks() {
+    let base = serve(None).await;
+    let client = reqwest::Client::new();
+
+    let (_, legacy) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }),
+    )
+    .await;
+    assert_eq!(legacy["result"], json!({}), "{legacy}");
+
+    // The 2026-07-28 protocol removed ping, but its clients may still send it.
+    let current = rpc_2026(&client, &base, 2, "ping", json!({})).await;
+    assert_eq!(
+        current["result"],
+        json!({ "resultType": "complete" }),
+        "{current}"
+    );
+
+    // Only ping: other requests reach rmcp as they are.
+    let listed = rpc_2026(&client, &base, 3, "tools/list", json!({})).await;
+    assert_eq!(
+        listed["result"]["tools"].as_array().map(Vec::len),
+        Some(2),
+        "{listed}"
+    );
+    let removed = rpc_2026(
+        &client,
+        &base,
+        4,
+        "logging/setLevel",
+        json!({ "level": "info" }),
+    )
+    .await;
+    assert_eq!(removed["error"]["code"], -32601, "{removed}");
+
+    // rmcp still checks the ping it answers.
+    let response = client
+        .post(format!("{base}/mcp"))
+        .header("host", "evil.example")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "ping")
+        .json(&json!({ "jsonrpc": "2.0", "id": 5, "method": "ping" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_client_error(), "{}", response.status());
 }
 
 #[tokio::test]

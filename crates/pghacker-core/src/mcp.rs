@@ -4,13 +4,20 @@
 //!
 //! The service is stateless: no sessions, any replica serves any request. It
 //! serves clients of the 2026-07-28 protocol, which send per-request
-//! metadata, and earlier clients, which send `initialize` first.
+//! metadata, and earlier clients, which send `initialize` first. Both may
+//! ping ([`answer_ping`]).
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::Request;
+use axum::http::header::CONTENT_LENGTH;
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rmcp::handler::server::common::schema_for_type;
 use rmcp::model::{
@@ -25,7 +32,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// A tool: its name, its description for agents, what it does to data, and
 /// its arguments' schema.
@@ -211,10 +218,74 @@ pub fn service<T: Tools>(
     )
 }
 
+/// The largest ping read; a ping is a few hundred bytes.
+const PING_BYTES: usize = 64 * 1024;
+
+/// Answers `ping` from clients of the 2026-07-28 protocol. That protocol
+/// removed it, so rmcp refuses it ("method not found" as HTTP 404, and a
+/// warning in the log), but such clients ping anyway. Their pings name
+/// themselves in `Mcp-Method`. Each goes to rmcp as an earlier client's ping,
+/// which rmcp answers after its usual checks (Host, media types), and the
+/// answer comes back in the 2026-07-28 shape. Every other request, earlier
+/// clients' pings among them, passes through as it is.
+pub async fn answer_ping(request: Request, next: Next) -> Response {
+    let headers = request.headers();
+    let ping = headers
+        .get("mcp-method")
+        .is_some_and(|method| method == "ping")
+        && headers
+            .get("mcp-protocol-version")
+            .and_then(|version| version.to_str().ok())
+            .is_some_and(|version| version >= "2026-07-28");
+    if !ping {
+        return next.run(request).await;
+    }
+
+    let (mut parts, body) = request.into_parts();
+    let Ok(bytes) = to_bytes(body, PING_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let id = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .filter(|message| message["method"] == "ping")
+        .map(|message| message["id"].clone());
+    let Some(id) = id else {
+        // Not a ping after all: rmcp judges it as it was sent.
+        return next
+            .run(Request::from_parts(parts, Body::from(bytes)))
+            .await;
+    };
+    parts.headers.remove("mcp-method");
+    parts.headers.insert(
+        "mcp-protocol-version",
+        HeaderValue::from_static("2025-11-25"),
+    );
+    parts.headers.remove(CONTENT_LENGTH);
+    let legacy = json!({ "jsonrpc": "2.0", "id": id, "method": "ping" });
+    let response = next
+        .run(Request::from_parts(parts, Body::from(legacy.to_string())))
+        .await;
+
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, PING_BYTES).await else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(mut answer) if answer["result"] == json!({}) => {
+            answer["result"] = json!({ "resultType": "complete" });
+            parts.headers.remove(CONTENT_LENGTH);
+            Response::from_parts(parts, Body::from(answer.to_string()))
+        }
+        // rmcp's refusal (of a Host it doesn't allow, say), as it is.
+        _ => Response::from_parts(parts, Body::from(bytes)),
+    }
+}
+
 /// `/mcp` and `/healthz`.
 pub fn router<T: Tools>(server: McpServer<T>, allowed_hosts: Option<Vec<String>>) -> Router {
     Router::new()
         .route_service("/mcp", service(server, allowed_hosts))
+        .route_layer(middleware::from_fn(answer_ping))
         .route("/healthz", get(|| async { "ok" }))
 }
 
