@@ -23,3 +23,11 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# A performance-tuning program, not an API example: it compares wide searches
+# and pipeline counts on the full PG19 tree with GNU grep. Cargo builds it as an
+# example.
+[[example]]
+name = "profile_full"
+path = "perf_tuning/profile_full.rs"
+doc-scrape-examples = false

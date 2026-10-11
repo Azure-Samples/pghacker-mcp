@@ -127,15 +127,18 @@ FROM (
 WHERE scoped.line LIKE '%for (%';
 ```
 
-An isolated, synthetic multi-snapshot profile is available with the local
-test database configured:
+Two performance-tuning programs, in their crates' `perf_tuning/` folders, run
+through Cargo as examples. `crates/pghacker-codesearch/perf_tuning/profile_search.rs`
+profiles common loop searches on an isolated, synthetic multi-snapshot
+database, with the local test database configured:
 
 ```bash
 cargo run --locked -p pghacker-codesearch --example profile_search
 ```
 
-The full PG19 loop cases can also be compared with GNU grep (requires
-Docker and downloads the pinned source into the ignored `.runtime` cache):
+`crates/pghacker-replay/perf_tuning/profile_full.rs` compares the full PG19
+loop cases with GNU grep (requires Docker and downloads the pinned source into
+the ignored `.runtime` cache):
 
 ```bash
 cargo run --locked -p pghacker-replay --example profile_full
