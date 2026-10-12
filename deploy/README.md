@@ -122,7 +122,7 @@ You need the Azure CLI, signed in (`az login`) with Owner on the subscription, T
      - callback `terraform output -raw oauth_callback_url`
    - Some organizations restrict OAuth Apps. Until an org owner approves this one, GitHub hides org and team membership from it, and every sign-in fails with a 500 (the logs say `user is missing required organization`).
      - To ask for approval, open `https://github.com/settings/connections/applications/<client ID>` and click **Request** next to your organization.
-     - Until then, `github_users` (a list of logins) lets those users in. It doesn't follow the team, so empty it once the app is approved.
+     - Until then, `github_users` (a list of logins) lets those users in. It doesn't follow the team: once the app is approved, keep only the logins that aren't on the team.
    - Store its credentials (TERRAFORM.md, "Key Vault secrets"):
 
    ```sh
