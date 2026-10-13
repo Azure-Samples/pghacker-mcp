@@ -18,7 +18,7 @@ import { psql, psqlJson, run, verifiedUrl } from "./lib/psql.mjs";
 // (unless --replace, which empties it and the graph), loads the rows as
 // pgh_indexer with the foreign keys dropped, adds them back, releases
 // leases and running jobs, analyzes, checks every table's row count, and
-// wakes the graph sync, which rebuilds the graph when the app runs.
+// asks for a full graph sync, which rebuilds the graph when the app runs.
 const { values: options } = parseArgs({
   options: {
     seed: { type: "string", default: "/seed" },
@@ -93,8 +93,11 @@ try {
   log("Adding the foreign keys back.");
   await psql(urls.indexer, scripts.add);
 
-  log("Releasing leases and running jobs, and waking the graph sync.");
+  // The load's rows were captured as graph changes; a full sync covers them.
+  log("Releasing leases and running jobs, and asking for a full graph sync.");
   await psql(urls.indexer, `BEGIN;
+    TRUNCATE pghacker.graph_changes;
+    SELECT pghacker.graph_request_full('corpus restore');
     UPDATE pghacker.extraction_leases SET released_at = now() WHERE released_at IS NULL;
     UPDATE pghacker.jobs SET state = 'queued', locked_by = NULL, locked_at = NULL, run_after = now() WHERE state = 'running';
     UPDATE pghacker.jobs SET run_after = now() WHERE key = 'recurring' AND state = 'queued';

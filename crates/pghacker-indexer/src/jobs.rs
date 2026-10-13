@@ -27,11 +27,14 @@ pub mod kind {
 pub const RECURRING: &[(&str, Duration)] = &[
     (kind::EMBED, Duration::from_secs(20)),
     (kind::RESOLVE_ANCHORS, Duration::from_secs(60)),
-    (kind::GRAPH_SYNC, Duration::from_secs(60)),
+    (kind::GRAPH_SYNC, Duration::from_secs(30)),
     (kind::REPAIR_STATS, Duration::from_secs(120)),
     // Followed lists' current months, hourly.
     (kind::MAIL_REFRESH, Duration::from_secs(3600)),
 ];
+
+/// How long a graph sync job applies batches of changes before it yields.
+const GRAPH_SYNC_BUDGET: Duration = Duration::from_secs(10);
 
 /// Attempts of an ingest job whose messages partly failed (a deadlock with a
 /// concurrent ingest, say) before it settles for what it stored.
@@ -340,10 +343,22 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
         }
         kind::GRAPH_SYNC => {
             let mut client = indexer.pool.get().await?;
-            let stats = crate::graph::sync(&mut client).await?;
+            let report = crate::graph::run(
+                &mut client,
+                GRAPH_SYNC_BUDGET,
+                indexer.settings.graph_reconcile_every,
+            )
+            .await?;
+            // Changes still waiting, including those committed while it ran:
+            // run again at once.
+            let after = if report.more {
+                Duration::ZERO
+            } else {
+                recurring_interval(kind::GRAPH_SYNC)
+            };
             Ok(Outcome::Again {
-                after: recurring_interval(kind::GRAPH_SYNC),
-                result: serde_json::to_value(stats)?,
+                after,
+                result: serde_json::to_value(report)?,
             })
         }
         kind::REPAIR_STATS => {

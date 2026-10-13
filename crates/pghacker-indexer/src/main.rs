@@ -1,6 +1,6 @@
 //! pghacker-indexer's command line: `bootstrap` (as the database's
-//! administrator), `serve` (workers and the MCP server), `status` and the
-//! local-only `reset`.
+//! administrator), `serve` (workers and the MCP server), `status`,
+//! `graph-reconcile` and the local-only `reset`.
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -10,7 +10,7 @@ use pghacker_core::config::Env;
 use pghacker_core::mcp::{McpServer, router, serve, shutdown_signal};
 use pghacker_core::{db, migrate, telemetry};
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, jobs, status, tools};
+use pghacker_indexer::{Indexer, graph, jobs, status, tools};
 
 #[derive(Parser)]
 #[command(name = "pghacker-indexer", version, about)]
@@ -29,6 +29,9 @@ enum Command {
     Serve,
     /// Prints ingest_status.
     Status,
+    /// Asks for a full graph sync, which recomputes the whole graph from the
+    /// tables and repairs any difference; the graph sync job runs it next.
+    GraphReconcile,
     /// Drops schema pghacker and the graph, then bootstraps again. Local only.
     Reset {
         #[arg(long)]
@@ -50,6 +53,14 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&status::ingest_status(&indexer).await?)?
             );
+            Ok(())
+        }
+        Command::GraphReconcile => {
+            let settings = Settings::from_env(&env)?;
+            let client = db::connect(&settings.database_url, "pghacker-indexer").await?;
+            graph::request_full(&client, "requested from the command line").await?;
+            jobs::wake(&client, jobs::kind::GRAPH_SYNC).await?;
+            println!("A full graph sync is requested; the graph sync job runs it next.");
             Ok(())
         }
         Command::Reset { yes } => {

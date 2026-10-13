@@ -131,19 +131,45 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
                     "loaded_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(8) })
         })
         .collect();
-    let graph: Value = client
+    // The counts that the sync keeps; until a full sync has written them,
+    // counted from the bookkeeping.
+    let kept: bool = client
+        .query_one("SELECT EXISTS (SELECT FROM graph_label_counts)", &[])
+        .await?
+        .get(0);
+    let graph_counts = client
+        .query_one(
+            if kept {
+                "SELECT (SELECT coalesce(jsonb_object_agg(label, count), '{}') FROM graph_label_counts
+                         WHERE kind = 'vertex' AND count > 0),
+                        (SELECT coalesce(jsonb_object_agg(label, count), '{}') FROM graph_label_counts
+                         WHERE kind = 'edge' AND count > 0)"
+            } else {
+                "SELECT (SELECT coalesce(jsonb_object_agg(label, n), '{}') FROM
+                         (SELECT label, count(*) AS n FROM graph_nodes GROUP BY label) x),
+                        (SELECT coalesce(jsonb_object_agg(label, n), '{}') FROM
+                         (SELECT label, count(*) AS n FROM graph_edges GROUP BY label) y)"
+            },
+            &[],
+        )
+        .await?;
+    let mut graph: Value = client
         .query_one(
             "SELECT jsonb_build_object(
-                 'nodes', (SELECT coalesce(jsonb_object_agg(label, n), '{}') FROM
-                           (SELECT label, count(*) AS n FROM graph_nodes GROUP BY label) x),
-                 'edges', (SELECT coalesce(jsonb_object_agg(label, n), '{}') FROM
-                           (SELECT label, count(*) AS n FROM graph_edges GROUP BY label) y),
                  'last_sync', (SELECT jsonb_build_object('at', finished_at, 'stats', stats)
-                               FROM graph_sync_runs ORDER BY id DESC LIMIT 1))",
+                               FROM graph_sync_runs ORDER BY id DESC LIMIT 1),
+                 'pending_changes', (SELECT count(*) FROM (SELECT FROM graph_changes LIMIT 1000000) x),
+                 'oldest_pending_at', (SELECT at FROM graph_changes ORDER BY id LIMIT 1),
+                 'full_sync', (SELECT jsonb_build_object(
+                                   'requested', full_requested > full_done, 'reason', full_reason,
+                                   'requested_at', full_requested_at, 'last_at', last_full_at)
+                               FROM graph_sync_state))",
             &[],
         )
         .await?
         .get(0);
+    graph["nodes"] = graph_counts.get(0);
+    graph["edges"] = graph_counts.get(1);
     let chunks: i64 = counts.get(4);
     let embedded: i64 = counts.get(5);
     Ok(json!({

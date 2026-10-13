@@ -161,6 +161,23 @@ the ignored `.runtime` cache):
 cargo run --locked -p pghacker-replay --example profile_full
 ```
 
+### How the graph follows the tables
+
+The indexer projects the tables into the AGE graph `pghacker_graph`. Triggers
+on the tables it projects record, in each writing transaction, the keys of the
+vertices and edges the change may affect (`graph_changes`). The `graph_sync`
+job applies them in batches of up to 1,000, each in its own short
+transaction. It recomputes just those vertices and edges from the tables, and
+the edges of any vertex that enters or leaves the graph, such as a reply whose
+parent arrives later. Writers only append to the log, so they never wait on
+the graph.
+
+A full sync recomputes the whole graph instead: once after the change capture
+is installed, after a `TRUNCATE` (as a corpus restore does), weekly as a
+reconcile that warns if it finds drift, and on request with
+`pghacker-indexer graph-reconcile`. `ingest_status` shows the label counts the
+sync keeps, the changes waiting and the last full sync.
+
 ## Build the corpus
 
 With the app running:

@@ -1,6 +1,7 @@
 //! The indexer's settings, from the environment the launcher builds.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 use pghacker_core::config::Env;
@@ -34,6 +35,9 @@ pub struct Settings {
     /// Whether downloads (months' mbox files, git clones) stay in the cache
     /// once loaded: `PGHACKER_KEEP_DOWNLOADS`, true by default.
     pub keep_downloads: bool,
+    /// How often a full graph sync reconciles the graph with the tables:
+    /// `PGHACKER_GRAPH_RECONCILE_HOURS`, 168 by default; 0 never does.
+    pub graph_reconcile_every: Option<Duration>,
 }
 
 impl Settings {
@@ -67,6 +71,10 @@ impl Settings {
                 }
             },
             keep_downloads: env.parse_or("PGHACKER_KEEP_DOWNLOADS", true)?,
+            graph_reconcile_every: match env.parse_or("PGHACKER_GRAPH_RECONCILE_HOURS", 168u64)? {
+                0 => None,
+                hours => Some(Duration::from_secs(hours * 3600)),
+            },
         })
     }
 }

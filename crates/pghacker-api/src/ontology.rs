@@ -1,6 +1,8 @@
 //! get_ontology: what's in the graph and the tables, how to query them, and
 //! what's loaded.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
@@ -50,13 +52,32 @@ const EDGE_ENDPOINTS: &[(&str, &str)] = &[
     ("DISCUSSED_IN", "Commit -> Thread (wave 2)"),
 ];
 
+/// A label's vertices or edges: as the graph sync counted them, or else
+/// counted now.
+async fn label_count(
+    client: &impl GenericClient,
+    kept: &HashMap<String, i64>,
+    label: &str,
+) -> Result<i64> {
+    if let Some(count) = kept.get(label) {
+        return Ok(*count);
+    }
+    Ok(client
+        .query_one(&format!("SELECT count(*) FROM {GRAPH}.\"{label}\""), &[])
+        .await?
+        .get(0))
+}
+
 pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
+    let kept: HashMap<String, i64> = client
+        .query("SELECT label, count FROM graph_label_counts", &[])
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
     let mut vertices = Vec::new();
     for label in VERTEX_LABELS {
-        let count: i64 = client
-            .query_one(&format!("SELECT count(*) FROM {GRAPH}.\"{label}\""), &[])
-            .await?
-            .get(0);
+        let count = label_count(client, &kept, label).await?;
         let properties = VERTEX_PROPERTIES
             .iter()
             .find(|(l, _)| l == label)
@@ -65,10 +86,7 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
     }
     let mut edges = Vec::new();
     for label in EDGE_LABELS {
-        let count: i64 = client
-            .query_one(&format!("SELECT count(*) FROM {GRAPH}.\"{label}\""), &[])
-            .await?
-            .get(0);
+        let count = label_count(client, &kept, label).await?;
         let endpoints = EDGE_ENDPOINTS
             .iter()
             .find(|(l, _)| l == label)
@@ -81,7 +99,7 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
              FROM information_schema.columns c
              WHERE c.table_schema = 'pghacker' AND c.column_name NOT IN ('embedding', 'search_text')
                AND has_table_privilege(current_user, format('%I.%I', c.table_schema, c.table_name), 'SELECT')
-               AND c.table_name NOT IN ('schema_migrations')
+               AND c.table_name NOT IN ('schema_migrations', 'graph_label_counts')
              GROUP BY c.table_name ORDER BY c.table_name",
             &[],
         )
