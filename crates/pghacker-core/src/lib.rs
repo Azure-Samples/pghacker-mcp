@@ -8,6 +8,7 @@ pub mod code;
 pub mod config;
 pub mod db;
 pub mod embed;
+pub mod graph_indexes;
 pub mod mcp;
 pub mod migrate;
 pub mod search;

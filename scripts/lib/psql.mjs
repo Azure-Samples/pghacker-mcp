@@ -1,6 +1,7 @@
 // psql, pg_restore and other commands for the Azure jobs (probe, restore),
 // whose image has postgresql-client-17.
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 /**
  * `url` verifying the server as the services do: libpq's `require` only
@@ -12,6 +13,9 @@ export function verifiedUrl(url) {
     parsed.searchParams.set("sslmode", "verify-full");
     parsed.searchParams.set("sslrootcert", "system");
   }
+  // libpq URIs percent-decode query values, but do not decode form-style '+'.
+  parsed.search = [...parsed.searchParams]
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
   return parsed.toString();
 }
 
@@ -46,4 +50,102 @@ export async function psql(url, sql, { timeoutMs = 600_000 } = {}) {
 export async function psqlJson(url, sql) {
   const text = await psql(url, sql);
   return text ? JSON.parse(text) : null;
+}
+
+/** A dedicated autocommit session; every query is sent as a separate statement. */
+export function psqlSession(url, { env = process.env } = {}) {
+  const child = spawn("psql", [
+    "--no-psqlrc", "--quiet", "--tuples-only", "--no-align",
+    "--set", "ON_ERROR_STOP=1", "--set", "AUTOCOMMIT=on",
+    "--set", "VERBOSITY=verbose", "--dbname", verifiedUrl(url),
+  ], { env: { ...env, PGCONNECT_TIMEOUT: "30" }, stdio: ["pipe", "pipe", "pipe"] });
+  let pending = null;
+  let buffer = "";
+  let stderr = "";
+  let failure = null;
+  let ended = false;
+  let resolveClosed;
+  const closed = new Promise((resolve) => { resolveClosed = resolve; });
+
+  function error(message) {
+    const parsed = new URL(url);
+    let detail = stderr.replaceAll(url, "<database URL>").replaceAll(verifiedUrl(url), "<database URL>");
+    if (parsed.password) {
+      detail = detail.replaceAll(parsed.password, "***").replaceAll(decodeURIComponent(parsed.password), "***");
+    }
+    const result = new Error(`${message}${detail ? `: ${detail.trim().slice(-4000)}` : ""}`);
+    result.sqlstate = /(?:ERROR|FATAL):\s+([0-9A-Z]{5}):/.exec(detail)?.[1] ?? null;
+    return result;
+  }
+
+  function fail(reason) {
+    failure = reason;
+    if (pending) {
+      clearTimeout(pending.timer);
+      pending.reject(reason);
+      pending = null;
+    }
+  }
+
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (text) => { stderr = (stderr + text).slice(-16000); });
+  child.stdout.on("data", (text) => {
+    buffer += text;
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).replace(/\r$/, "");
+      buffer = buffer.slice(newline + 1);
+      if (!pending) continue;
+      if (line === pending.marker) {
+        clearTimeout(pending.timer);
+        const { resolve, lines } = pending;
+        pending = null;
+        resolve(lines.join("\n").trim());
+      } else {
+        pending.lines.push(line);
+      }
+    }
+  });
+  child.once("error", (cause) => {
+    fail(new Error(`cannot start psql: ${cause.message}`, { cause }));
+  });
+  child.once("close", (code, signal) => {
+    ended = true;
+    if (code !== 0 || pending) fail(error(`psql session ended (code ${code}, signal ${signal})`));
+    resolveClosed();
+  });
+  child.stdin.on("error", (cause) => {
+    fail(new Error(`cannot write to psql: ${cause.message}`, { cause }));
+  });
+
+  return {
+    async query(sql, { timeoutMs = 0 } = {}) {
+      if (failure) throw failure;
+      if (ended) throw new Error("psql session is closed");
+      if (pending) throw new Error("psql session queries must be sequential");
+      if (!sql.trim()) throw new Error("psql statement is empty");
+      stderr = "";
+      return new Promise((resolve, reject) => {
+        const marker = `pgh_statement_${randomUUID().replaceAll("-", "")}`;
+        const timer = timeoutMs ? setTimeout(() => child.kill("SIGINT"), timeoutMs) : null;
+        pending = { marker, resolve, reject, lines: [], timer };
+        child.stdin.write(`${sql.trimEnd()}\n;\n\\echo ${marker}\n`);
+      });
+    },
+    async json(sql, options) {
+      return JSON.parse(await this.query(sql, options));
+    },
+    cancel() {
+      if (!ended) child.kill("SIGINT");
+    },
+    async close() {
+      if (!ended) {
+        if (pending) child.kill("SIGINT");
+        else child.stdin.end("\\q\n");
+      }
+      await closed;
+      if (failure) throw failure;
+    },
+  };
 }

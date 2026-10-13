@@ -81,27 +81,26 @@ DO $$
 DECLARE
     label text;
     graph_oid oid;
+    new_edges jsonb := '[]'::jsonb;
 BEGIN
     IF NOT EXISTS (SELECT FROM ag_catalog.ag_graph WHERE name = 'pghacker_graph') THEN
         PERFORM ag_catalog.create_graph('pghacker_graph');
     END IF;
     SELECT graphid INTO graph_oid FROM ag_catalog.ag_graph WHERE name = 'pghacker_graph';
-    FOREACH label IN ARRAY ARRAY[
-        'Author', 'Thread', 'Message', 'Feature', 'Decision', 'Position', 'Release',
-        'Subsystem', 'File', 'Commit', 'CommitFestEntry']
+    FOR label IN SELECT jsonb_array_elements_text(current_setting('pghacker.vertex_labels')::jsonb)
     LOOP
         IF NOT EXISTS (SELECT FROM ag_catalog.ag_label WHERE graph = graph_oid AND name = label) THEN
             PERFORM ag_catalog.create_vlabel('pghacker_graph'::cstring, label::cstring);
         END IF;
     END LOOP;
-    FOREACH label IN ARRAY ARRAY[
-        'AUTHORED', 'REPLIES_TO', 'IN_THREAD', 'MENTIONS', 'PART_OF', 'DISCUSSES', 'DECIDES',
-        'TARGETS', 'IMPLEMENTS', 'HOLDS', 'ABOUT', 'EVIDENCED_BY', 'MODIFIES', 'DISCUSSED_IN']
+    FOR label IN SELECT jsonb_array_elements_text(current_setting('pghacker.edge_labels')::jsonb)
     LOOP
         IF NOT EXISTS (SELECT FROM ag_catalog.ag_label WHERE graph = graph_oid AND name = label) THEN
             PERFORM ag_catalog.create_elabel('pghacker_graph'::cstring, label::cstring);
+            new_edges := new_edges || jsonb_build_array(label);
         END IF;
     END LOOP;
+    PERFORM set_config('pghacker.new_edge_labels', new_edges::text, true);
 END
 $$;
 

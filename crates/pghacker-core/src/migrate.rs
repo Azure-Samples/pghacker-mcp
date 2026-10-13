@@ -49,7 +49,8 @@ pub async fn bootstrap_roles(admin: &mut Client, passwords: &Passwords) -> Resul
         )
         .await?;
         tx.batch_execute(ROLES).await?;
-        tx.commit().await
+        tx.commit().await?;
+        Ok(())
     })
     .await
     .context("cannot create the roles")
@@ -59,13 +60,18 @@ pub async fn bootstrap_roles(admin: &mut Client, passwords: &Passwords) -> Resul
 /// concurrent bootstrap on the cluster's shared catalogs, up to 5 times.
 async fn retry_races(
     admin: &mut Client,
-    step: impl AsyncFn(&mut Client) -> std::result::Result<(), tokio_postgres::Error>,
-) -> std::result::Result<(), tokio_postgres::Error> {
+    step: impl AsyncFn(&mut Client) -> Result<()>,
+) -> Result<()> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         match step(admin).await {
-            Err(error) if attempt < 5 && is_race(&error) => {
+            Err(error)
+                if attempt < 5
+                    && error
+                        .downcast_ref::<tokio_postgres::Error>()
+                        .is_some_and(is_race) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(100 * attempt)).await;
             }
             result => return result,
@@ -117,16 +123,43 @@ fn is_missing_database(error: &anyhow::Error) -> bool {
 }
 
 /// `name` as an SQL identifier.
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// The database's extensions, schema, graph, labels and grants.
 pub async fn bootstrap_database(admin: &mut Client) -> Result<()> {
+    bootstrap_database_with_labels(admin, crate::VERTEX_LABELS, crate::EDGE_LABELS).await
+}
+
+async fn bootstrap_database_with_labels(
+    admin: &mut Client,
+    vertices: &[&str],
+    edges: &[&str],
+) -> Result<()> {
+    let vertices_json = serde_json::to_string(vertices)?;
+    let edges_json = serde_json::to_string(edges)?;
     retry_races(admin, async |admin: &mut Client| {
         let tx = admin.transaction().await?;
+        tx.execute(
+            "SELECT set_config('pghacker.vertex_labels', $1, true),
+                    set_config('pghacker.edge_labels', $2, true)",
+            &[&vertices_json, &edges_json],
+        )
+        .await?;
         tx.batch_execute(DATABASE).await?;
-        tx.commit().await
+        let labels: serde_json::Value = tx
+            .query_one(
+                "SELECT current_setting('pghacker.new_edge_labels')::jsonb",
+                &[],
+            )
+            .await?
+            .get(0);
+        let labels: Vec<String> = serde_json::from_value(labels)?;
+        crate::graph_indexes::index_new_labels(&tx, &labels).await?;
+        crate::graph_indexes::check_age(&tx, vertices, edges).await?;
+        tx.commit().await?;
+        Ok(())
     })
     .await
     .context("cannot bootstrap the database")
@@ -134,6 +167,9 @@ pub async fn bootstrap_database(admin: &mut Client) -> Result<()> {
 
 /// Whether `error` is a collision with a concurrent bootstrap.
 fn is_race(error: &tokio_postgres::Error) -> bool {
+    if error.code() == Some(&SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE) {
+        return false;
+    }
     let text = format!("{error:?}");
     text.contains("concurrently")
         || text.contains("duplicate key")
@@ -225,6 +261,9 @@ pub async fn migrate(indexer: &mut Client) -> Result<Vec<String>> {
             }
         }
     }
+    crate::graph_indexes::check(&tx)
+        .await
+        .context("graph indexes are not ready after migrations")?;
     tx.commit().await?;
     Ok(done)
 }
@@ -249,6 +288,57 @@ pub async fn reset(admin: &Client) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn a_new_registry_label_is_indexed_atomically() {
+        let db = crate::testing::TestDb::create().await.unwrap();
+        let mut admin = db.admin().await.unwrap();
+        let mut edges = crate::EDGE_LABELS.to_vec();
+        edges.push("FUTURE_EDGE_TEST");
+        super::bootstrap_database_with_labels(&mut admin, crate::VERTEX_LABELS, &edges)
+            .await
+            .unwrap();
+        super::bootstrap_database_with_labels(&mut admin, crate::VERTEX_LABELS, &edges)
+            .await
+            .unwrap();
+        let requirement = crate::graph_indexes::inspect(&admin)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| {
+                r.kind == crate::graph_indexes::Kind::EdgeId
+                    && r.label.as_deref() == Some("FUTURE_EDGE_TEST")
+            })
+            .unwrap();
+        assert_eq!(requirement.state, crate::graph_indexes::State::Ready);
+        assert_eq!(requirement.usable_indexes, ["FUTURE_EDGE_TEST_id_idx"]);
+    }
+
+    #[tokio::test]
+    async fn failed_readiness_does_not_publish_a_new_label() {
+        let db = crate::testing::TestDb::create().await.unwrap();
+        let mut admin = db.admin().await.unwrap();
+        admin
+            .batch_execute("DROP INDEX pghacker_graph.\"ABOUT_id_idx\"")
+            .await
+            .unwrap();
+        let mut edges = crate::EDGE_LABELS.to_vec();
+        edges.push("UNPUBLISHED_EDGE_TEST");
+        assert!(
+            super::bootstrap_database_with_labels(&mut admin, crate::VERTEX_LABELS, &edges)
+                .await
+                .is_err()
+        );
+        let exists: bool = admin
+            .query_one(
+                "SELECT EXISTS (SELECT FROM ag_catalog.ag_label WHERE name = 'UNPUBLISHED_EDGE_TEST')",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!exists);
+    }
+
     #[test]
     fn migrations_are_ordered_and_named() {
         let list = super::migrations();

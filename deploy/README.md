@@ -159,6 +159,77 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
 Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap briefly: the new indexer serves its tools at once, but runs jobs only once the old one has stopped.
 
+### Graph index preparation
+
+The graph-index upgrade requires preparation **before deploying the new service
+revision**. Fresh bootstrap creates concrete edge-ID indexes atomically with new
+labels; migration `0009_graph_indexes` creates mapping endpoint indexes only on a
+table checked empty under a write-blocking lock. Existing missing AGE indexes or
+populated mappings fail startup with operator guidance instead of launching a
+blocking build. Applied migration markers alone do not satisfy readiness.
+
+From an approved private-network operator environment, use the established
+`PGHACKER_ADMIN_DATABASE_URL` (graph owner) and, for read-only checks,
+`PGHACKER_INDEXER_DATABASE_URL`. Never pass those credentials to the public
+reader, portal agents, or serving indexer. No new ownership/grants are needed:
+the graph owner must already be able to `SET ROLE pgh_indexer` for mapping DDL.
+The script does not bootstrap roles, run migrations/jobs, deploy, or drop indexes.
+
+```sh
+node scripts/graph-indexes.mjs --plan --out /protected/operator/graph-indexes.json
+node scripts/graph-indexes.mjs --check
+# Only after approval of the exact manifest, capacity/window, and statement budget:
+node scripts/graph-indexes.mjs --apply \
+  --plan-file /protected/operator/graph-indexes.json --build-timeout-ms <approved-ms>
+```
+
+Plan output includes existing/parent index definitions and blocked states.
+Manifests contain no credentials, are created owner-only without overwriting a
+file, and bind the target database/server, relation OIDs, owners, and definitions.
+An unexpected label, replaced table, incompatible/invalid index, or new missing
+requirement needs a newly reviewed plan. Equivalent valid indexes under another
+name are reused; `IF NOT EXISTS` is not treated as proof.
+
+The script uses one persistent autocommit psql session, a separate preparation
+advisory lock, and one concurrent build at a time. It checks exact physical ID
+duplicates before a selected AGE build; it does not repair them or claim a full
+graph-data audit. It sets a two-second lock timeout, disables parallel
+maintenance workers for that session, and requires an explicit build deadline.
+Before applying, approve disk reserve for remaining indexes, measured temporary
+build/WAL space and growth, and compare producer/read latency under concurrent
+extraction/full sync. Do not change jobs or terminate other sessions to bypass a
+writer/snapshot wait without separate permission.
+
+For an approved canary, add `--only pghacker_graph.MODIFIES_id_idx` if that index
+is in the manifest. A completed subset reports the remaining requirements and
+exits 2 until the full catalog is ready. Resume the same reviewed manifest only
+when scope is unchanged; completed equivalent indexes are skipped. Failure exits
+nonzero, reports completed work and SQLSTATE, and never automatically drops an
+invalid concurrent index. SIGINT/SIGTERM cancels the owned psql operation; inspect
+reported active/invalid state before any separately approved cleanup.
+
+Monitor JSON progress and `pg_stat_progress_create_index` phases/lockers,
+authorized activity/wait information, disk, WAL/replica lag, and service
+latency/timeouts. A concurrent build still scans and waits, and can interfere
+with maintenance and long full-sync transactions. Do not infer a total sync
+speedup from a selective lookup plan.
+
+Recovery or rollback requires separate approval for the exact added index.
+After confirming no active build and no constraint dependency, the appropriate
+owner can drop one identified addition with `DROP INDEX CONCURRENTLY` outside a
+transaction, then prepare again. Never drop existing AGE endpoint/parent
+indexes, reset the graph, or delete the migration ledger row. Additive valid
+indexes can remain when application code is rolled back; fence any incremental
+consumer before removing its prerequisites.
+
+Before deployment, require successful catalog checks, approved exact graph/data
+audits, realistic before/after ID and both endpoint plans, and resource/latency
+gates. Production DDL, cleanup, and deployment are distinct approvals; a script
+flag is not user authorization. Older corpus seed manifests without the new
+migration still fail strict restore compatibility: regenerate them with the
+approved new image rather than weakening the check. `docs/design.md` is not
+part of this change.
+
 ## Production mode in use
 
 Ask a **pghacker Crawler** session in the portal, for example:

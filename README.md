@@ -47,6 +47,23 @@ Each process gets only the credentials it needs: the indexer gets `pgh_indexer`,
 
 Everything listens on loopback only, and sign-in is disabled: **don't expose it**. `npm run stop` stops the portal, the services and PostgreSQL; the data volume is kept. `npm run db:reset` (with the app stopped) drops and recreates schema `pghacker` and the graph, and leaves PilotSwarm's data alone.
 
+### Graph index readiness
+
+Bootstrap indexes every newly created concrete AGE edge label by `id`, including
+empty and future registered labels. The graph mapping migration adds outgoing
+`(start_key, label, end_key)` and incoming `(end_key, label, start_key)` B-trees on
+`pghacker.graph_edges`. Existing AGE endpoint and vertex-ID indexes are reused;
+edge-ID indexes are non-unique and do not change graph IDs, properties, or
+projection behavior.
+
+For an existing database, prepare missing indexes **before upgrading**. Startup
+checks the actual catalog definitions and usable state, including already-applied
+migrations, and refuses missing/invalid prerequisites. It never performs a large
+blocking build on populated tables or repairs an existing AGE label at startup.
+See [production preparation](deploy/README.md#graph-index-preparation) for the
+separate, opt-in operator script and recovery policy. Adding these indexes does
+not make the full graph sync incremental or establish its total runtime.
+
 ### Configuration
 
 | Setting (`.env`) | Purpose |
