@@ -183,7 +183,7 @@ The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in D
 
 ## Deploy to Azure
 
-[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform. It runs as one image (`Dockerfile`), with HorizonDB and Azure AI Foundry behind private endpoints and Front Door in front. `/mcp` is public; the portal needs GitHub sign-in as a member of example-org/example-team. `npm run corpus:dump` exports the local corpus for the deployment's restore job.
+[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform. Start with the synthetic [example.tfvars](deploy/environments/example.tfvars); real environment and backend files are local and ignored. It runs as one image (`Dockerfile`), with HorizonDB and Azure AI Foundry behind private endpoints and Front Door in front. `/mcp` is public; the portal requires GitHub sign-in through your configured organization, team, or explicit login list. `npm run corpus:dump` exports the local corpus for the deployment's restore job.
 
 ## Repository
 

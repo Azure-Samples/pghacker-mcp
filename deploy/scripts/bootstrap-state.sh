@@ -13,13 +13,13 @@
 #
 # Running it again is safe: it creates only what's missing, and puts the
 # account's security settings back if they've drifted. Progress goes to
-# stderr; stdout gets the backend settings. For production, from the
+# stderr; stdout gets the backend settings. For your environment, from the
 # repository root:
 #
-#   deploy/scripts/bootstrap-state.sh --resource-group pghacker-example-state \
-#     --storage-account examplepghtf12345 --location westus3 \
-#     --subscription aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa \
-#     --key pghacker-mcp/prod.tfstate > deploy/environments/prod.backend.hcl
+#   deploy/scripts/bootstrap-state.sh --resource-group "<state-resource-group>" \
+#     --storage-account "<globally-unique-state-account>" --location "<azure-region>" \
+#     --subscription "$(az account show --query id --output tsv)" \
+#     --key pghacker-mcp/local.tfstate > deploy/environments/local.backend.hcl
 #
 # --dry-run runs only the commands that read, and prints the ones that would
 # change something.

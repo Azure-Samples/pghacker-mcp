@@ -7,7 +7,8 @@
 | `terraform/*.tf` | The configuration: `main.tf` (resource group, registry, identity, vault, generated secrets), `network.tf`, `horizondb.tf`, `foundry.tf`, `containerapps.tf`, `frontdoor.tf` |
 | `terraform/tests/` | Offline `terraform test` suites; every provider is mocked (`tests/mocks/`) |
 | `terraform/.terraform.lock.hcl` | Provider versions and hashes for linux_amd64 and darwin_arm64 |
-| `environments/prod.tfvars`, `prod.backend.hcl` | Production's settings and state backend; no secrets |
+| `environments/example.tfvars` | Synthetic template to copy and customize; no real deployment identifiers |
+| `environments/*.tfvars`, `*.backend.hcl` | Local environment settings and state backends; ignored except for the template |
 | `scripts/bootstrap-state.sh` | Creates the state's resource group, storage account and container |
 | `acr-build.yaml` | Builds the repository's `Dockerfile` with ACR Tasks |
 
@@ -27,18 +28,20 @@ The tests apply to synthetic state and never reach Azure. They cover the paramet
 
 ## State
 
-State is a blob in a storage account that only Entra ID can reach, in its own resource group (`pghacker-example-state`), so destroying the deployment can't delete it. `scripts/bootstrap-state.sh` creates what's missing and prints the backend file (`--help` lists its options; `--dry-run` only reads):
+State is a blob in a storage account that only Entra ID can reach, in its own resource group, so destroying the deployment can't delete it. `scripts/bootstrap-state.sh` creates what's missing and prints the backend file (`--help` lists its options; `--dry-run` only reads). Choose your own resource group, globally unique storage account name, and region:
 
 ```sh
-deploy/scripts/bootstrap-state.sh --resource-group pghacker-example-state \
-  --storage-account examplepghtf12345 --location westus3 \
-  --subscription aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa \
-  --key pghacker-mcp/prod.tfstate > deploy/environments/prod.backend.hcl
+deploy/scripts/bootstrap-state.sh --resource-group "<state-resource-group>" \
+  --storage-account "<globally-unique-state-account>" --location "<azure-region>" \
+  --subscription "$(az account show --query id --output tsv)" \
+  --key pghacker-mcp/local.tfstate > deploy/environments/local.backend.hcl
 cd deploy/terraform
-terraform init -backend-config=../environments/prod.backend.hcl
+terraform init -backend-config=../environments/local.backend.hcl
 ```
 
 ## Before the first apply
+
+Copy `environments/example.tfvars` to an ignored file such as `environments/local.tfvars`, and replace the synthetic values. The example names are not a deployment and must not be used unchanged. Real environment settings, backend files, state, and plans must never be committed.
 
 Terraform registers no resource providers. Once per subscription, someone with rights on it registers `Microsoft.App`, `Microsoft.OperationalInsights`, `Microsoft.ContainerRegistry`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity`, `Microsoft.HorizonDB`, `Microsoft.Network`, `Microsoft.CognitiveServices`, `Microsoft.Cdn` and `Microsoft.Storage` (`az provider register --namespace <namespace> --wait`).
 
@@ -106,7 +109,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `restrict_origin_to_front_door` | `true` | Admit only `AzureFrontDoor.Backend`'s IPv4 ranges to the app's own host name |
 | `mcp_rate_per_minute`, `mcp_rate_burst` | `60`, `30` | Per-client limits of the public MCP endpoint (`PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST`) |
 | `crawl_start_sessions`, `crawl_max_sessions` | `8`, `16` | Extraction sessions at start and at most, up to 64 (`PGHACKER_CRAWL_START_SESSIONS`, `PGHACKER_CRAWL_MAX_SESSIONS`) |
-| `github_org`, `github_team` | `"example-org"`, `"example-team"` | Who may sign in to the portal (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`) |
+| `github_org`, `github_team` | `"example-org"`, `"example-team"` | Placeholder access settings; replace with your organization and team (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`) |
 | `github_users` | `[]` | More GitHub logins allowed in (`PGHACKER_GITHUB_USERS`, omitted when empty) |
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
 | `app_env` | `{}` | More app environment variables, such as `RUST_LOG`; can't replace the settings above or set `OAUTH2_PROXY_*` |

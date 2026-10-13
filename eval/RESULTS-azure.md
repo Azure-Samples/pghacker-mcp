@@ -3,7 +3,7 @@
 19 of 20 questions passed (judged correct, with valid verbatim citations).
 Answer model: `github-copilot:gpt-6-luna`; judge: `github-copilot:gpt-6-luna`; run 2026-10-09T23:50:42.704Z.
 
-pghacker-mcp: `https://pghacker-example.mock.azurefd.net/mcp`.
+pghacker-mcp: the deployment's public `/mcp` endpoint (environment-specific URL omitted).
 
 | Question | Kind | Correct | Citations valid | On a gold thread | Seconds |
 | --- | --- | --- | --- | --- | --- |

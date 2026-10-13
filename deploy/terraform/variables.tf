@@ -1,5 +1,5 @@
-# The settings of one pghacker-mcp deployment. ../environments/prod.tfvars
-# holds production's, and ../TERRAFORM.md tabulates them.
+# The settings of one pghacker-mcp deployment. Copy ../environments/example.tfvars
+# to a local ignored file; ../TERRAFORM.md tabulates the variables.
 
 # --- Subscription, region and names ---------------------------------------
 

@@ -22,7 +22,7 @@ flowchart LR
 ```
 
 - **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client (`X-Azure-ClientIP`, IPv6 by /64), and serves only requests that came through this Front Door profile (`X-Azure-FDID`).
-- **`https://<front door>/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of example-org/example-team (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
+- **`https://<front door>/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
@@ -51,32 +51,42 @@ Only the bootstrap, which runs once before the services start, gets the administ
 
 ## First deployment
 
-You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, and Node 24 with the local app set up (for the corpus). Commands run from `deploy/terraform` unless they say otherwise; `prod` stands for `-var-file=../environments/prod.tfvars`.
+You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, and Node 24 with the local app set up (for the corpus). From the repository root, copy the synthetic example:
+
+```sh
+cp deploy/environments/example.tfvars deploy/environments/local.tfvars
+```
+
+Replace its placeholder subscription ID, names, region, model capacities, and GitHub access settings with your own. Choose globally unique registry and vault names, and leave `create_app = false` until step 8. Real `.tfvars`, `.tfvars.json`, and `.backend.hcl` files are ignored; do not force-add them or commit secrets, state, or plans.
+
+The remaining commands run from `deploy/terraform` unless they say otherwise. The `local` filenames are examples: use a separate settings file and backend for each environment.
 
 1. **State.**
 
    ```sh
-   ../scripts/bootstrap-state.sh --resource-group pghacker-example-state --storage-account examplepghtf12345 \
-     --location westus3 --subscription aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa --key pghacker-mcp/prod.tfstate
-   terraform init -backend-config=../environments/prod.backend.hcl
+   ../scripts/bootstrap-state.sh --resource-group "<state-resource-group>" \
+     --storage-account "<globally-unique-state-account>" --location "<azure-region>" \
+     --subscription "$(az account show --query id --output tsv)" \
+     --key pghacker-mcp/local.tfstate > ../environments/local.backend.hcl
+   terraform init -backend-config=../environments/local.backend.hcl
    ```
 
 2. **The registry.** This is a targeted apply, so Terraform warns that the plan is incomplete:
 
    ```sh
-   terraform apply -var-file=../environments/prod.tfvars -target=azurerm_container_registry.this \
-     -var image=examplepghacr12345.azurecr.io/pghacker-mcp:bootstrap
+   terraform apply -var-file=../environments/local.tfvars -target=azurerm_container_registry.this
    ```
 
 3. **The image.** From the repository root, ACR Tasks builds `Dockerfile` for linux/amd64 (`deploy/acr-build.yaml`):
 
    ```sh
+   acr=$(terraform -chdir=deploy/terraform output -raw acr_name)
    tag=$(git rev-parse --short=12 HEAD)
-   az acr run --registry examplepghacr12345 --file deploy/acr-build.yaml --set TAG="$tag" .
-   az acr repository show --name examplepghacr12345 --image "pghacker-mcp:$tag" --query digest --output tsv
+   az acr run --registry "$acr" --file deploy/acr-build.yaml --set TAG="$tag" .
+   az acr repository show --name "$acr" --image "pghacker-mcp:$tag" --query digest --output tsv
    ```
 
-   Set `image = "examplepghacr12345.azurecr.io/pghacker-mcp@<digest>"` in `prod.tfvars`.
+   Set `image = "<your-registry>.azurecr.io/pghacker-mcp@sha256:<digest>"` in `local.tfvars`, using your registry name and the returned digest.
 
 4. **Everything but the app.** This step creates:
    - the VNet, HorizonDB with its parameter group and private endpoint;
@@ -84,7 +94,7 @@ You need the Azure CLI, signed in (`az login`) with Owner on the subscription, T
    - Key Vault and its secrets, the identity, the Container Apps environment, the probe job, and Front Door.
 
    ```sh
-   terraform apply -var-file=../environments/prod.tfvars
+   terraform apply -var-file=../environments/local.tfvars
    ```
 
 5. **The probe.** It bootstraps the database from inside the VNet. It then checks:
@@ -102,22 +112,23 @@ You need the Azure CLI, signed in (`az login`) with Owner on the subscription, T
 
    ```sh
    npm run corpus:dump                             # from the repository root: .runtime/corpus/<id>/
+   acr=$(terraform -chdir=deploy/terraform output -raw acr_name)
    cd .runtime/corpus/<id>
-   az acr build --registry examplepghacr12345 --platform linux/amd64 --image pghacker-seed:<id> \
-     --build-arg APP_IMAGE=examplepghacr12345.azurecr.io/pghacker-mcp@<digest> .
+   az acr build --registry "$acr" --platform linux/amd64 --image pghacker-seed:<id> \
+     --build-arg "APP_IMAGE=$acr.azurecr.io/pghacker-mcp@sha256:<digest>" .
    ```
 
-   Set `seed_image = "examplepghacr12345.azurecr.io/pghacker-seed:<id>"`, apply (this creates the restore job), and run it:
+   Set `seed_image = "<your-registry>.azurecr.io/pghacker-seed:<id>"`, apply (this creates the restore job), and run it:
 
    ```sh
-   terraform apply -var-file=../environments/prod.tfvars
+   terraform apply -var-file=../environments/local.tfvars
    ../scripts/run-job.sh restore | jq '{ok, corpus, rows}'
    ```
 
    The restore checks that the dump's checksum, migrations and embedding model match. It refuses a database that already has a corpus unless run with `--replace`, and refuses while the indexer is connected. It loads schema `pghacker` and checks every table's row count. The app rebuilds the graph from the tables when it starts.
 
 7. **The GitHub OAuth App.**
-   - Register it at <https://github.com/organizations/<your-org>/settings/applications> (or under your account), with:
+   - Register it under your GitHub organization's **Settings > Developer settings > OAuth Apps** (or under your account), with:
      - homepage `terraform output -raw public_url`
      - callback `terraform output -raw oauth_callback_url`
    - Some organizations restrict OAuth Apps. Until an org owner approves this one, GitHub hides org and team membership from it, and every sign-in fails with a 500 (the logs say `user is missing required organization`).

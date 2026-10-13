@@ -6,6 +6,12 @@
 .git
 .env
 .env.*
+**/.env
+**/.env.*
+*.env
+**/*.env
+*.env.*
+**/*.env.*
 .runtime
 node_modules
 **/node_modules
@@ -27,5 +33,7 @@ test
 **/*.tfplan
 *.tfvars
 **/*.tfvars
+*.tfvars.json
+**/*.tfvars.json
 *.backend.hcl
 **/*.backend.hcl

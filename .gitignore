@@ -4,6 +4,15 @@ dist-tarballs/
 .env
 .env.*
 !.env.example
+*.env
+*.env.*
+!*.env.example
+# Deployment settings are local; only the synthetic example is published.
+*.tfvars
+*.tfvars.json
+*.backend.hcl
+/deploy/environments/*
+!/deploy/environments/example.tfvars
 .model_providers.json
 npm-debug.log*
 .DS_Store
