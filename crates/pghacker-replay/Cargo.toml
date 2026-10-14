@@ -31,3 +31,9 @@ tracing-subscriber.workspace = true
 name = "profile_full"
 path = "perf_tuning/profile_full.rs"
 doc-scrape-examples = false
+
+# Times one call through both engines in pghacker_bench.
+[[example]]
+name = "profile_history"
+path = "perf_tuning/profile_history.rs"
+doc-scrape-examples = false

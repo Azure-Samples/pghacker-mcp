@@ -691,6 +691,50 @@ fn search_args(c: &Case, corpus: &Corpus) -> Result<SearchArgs> {
     Ok(args)
 }
 
+/// The generated searches as (family, grep command line, search
+/// arguments), from the PG19 subset tree that `pg19` materializes: a
+/// workload for other replays.
+pub fn workload(
+    ctx: &Ctx,
+    count: usize,
+    seed: u64,
+) -> Result<Vec<(String, String, Option<SearchArgs>)>> {
+    let tree = ctx
+        .runtime
+        .join("trees")
+        .join(format!("postgres-{}", &SHA[..12]));
+    if !tree.is_dir() {
+        bail!(
+            "run `pghacker-replay pg19` first: it materializes {}",
+            tree.display()
+        );
+    }
+    let mut files = Vec::new();
+    let mut stack = vec![tree.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(&tree) {
+                files.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    files.sort();
+    let corpus = read_corpus(&tree, &files)?;
+    Ok(generate(&corpus, count, seed)
+        .iter()
+        .map(|c| {
+            (
+                c.family.to_owned(),
+                c.command.clone(),
+                search_args(c, &corpus).ok(),
+            )
+        })
+        .collect())
+}
+
 /// Every line `search` returns, page by page, and the time it took.
 async fn search_lines(
     client: &Client,

@@ -7,6 +7,7 @@
 //! by `--study-dir` or `PGHACKER_STUDY_DIR`, and per-search details go only to
 //! `.runtime/replay/` (ignored by git). The console shows aggregates.
 
+mod engines;
 mod gitstats;
 mod gnu;
 mod pg19;
@@ -51,6 +52,34 @@ enum Command {
         /// Skip the GNU grep run that classifies grep-path differences.
         #[arg(long)]
         skip_gnu: bool,
+    },
+    /// Creates pghacker_bench: production's 15 snapshots and the whole
+    /// history, from a full clone.
+    BenchPrepare {
+        /// A full clone of PostgreSQL with every branch and tag.
+        #[arg(long)]
+        git_dir: PathBuf,
+    },
+    /// Runs the same calls through the snapshot and history engines at
+    /// every snapshot, comparing outputs and latencies.
+    Engines {
+        /// Generated PG19 searches to run.
+        #[arg(long, default_value_t = 2000)]
+        pg19: usize,
+        #[arg(long, default_value_t = 19)]
+        seed: u64,
+        /// Calls run at once.
+        #[arg(long, default_value_t = 8)]
+        jobs: usize,
+        /// Only the newest N snapshots.
+        #[arg(long)]
+        heads: Option<usize>,
+        /// Runs of the whole workload: the first is colder.
+        #[arg(long, default_value_t = 1)]
+        passes: usize,
+        /// Add the grep command lines of the last study replay.
+        #[arg(long)]
+        study: bool,
     },
     /// Loads the PG19 subset and replays generated searches.
     Pg19 {
@@ -130,28 +159,34 @@ fn find_rg(env: &Env) -> PathBuf {
 
 /// Creates the replay database if missing, bootstraps and migrates it.
 async fn prepare(ctx: &Ctx) -> Result<()> {
+    prepare_database(ctx, DATABASE).await
+}
+
+/// Creates database `name` if missing, bootstraps and migrates it.
+pub async fn prepare_database(ctx: &Ctx, name: &str) -> Result<()> {
     let admin = ctx.env.admin_database_url()?;
     let maintenance = db::connect(&with_database(&admin, "postgres")?, "pghacker-replay").await?;
     let exists = maintenance
-        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&DATABASE])
+        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&name])
         .await?
         .is_some();
     if !exists {
         maintenance
-            .batch_execute(&format!("CREATE DATABASE {DATABASE}"))
+            .batch_execute(&format!("CREATE DATABASE {name}"))
             .await
-            .context("cannot create the replay database")?;
-        println!("created database {DATABASE}");
+            .with_context(|| format!("cannot create database {name}"))?;
+        println!("created database {name}");
     }
-    let mut admin = db::connect(&ctx.admin_url()?, "pghacker-replay").await?;
+    let mut admin = db::connect(&with_database(&admin, name)?, "pghacker-replay").await?;
     if !migrate::roles_exist(&admin).await? {
         migrate::bootstrap_roles(&mut admin, &ctx.env.passwords()?).await?;
     }
     migrate::bootstrap_database(&mut admin).await?;
-    let mut indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
+    let indexer_url = with_database(&ctx.env.indexer_database_url()?, name)?;
+    let mut indexer = db::connect(&indexer_url, "pghacker-replay").await?;
     let applied = migrate::migrate(&mut indexer).await?;
     println!(
-        "{DATABASE} is ready{}",
+        "{name} is migrated{}",
         if applied.is_empty() {
             String::new()
         } else {
@@ -222,5 +257,27 @@ async fn main() -> Result<()> {
             study::run(&ctx, &dir, limit, jobs.max(1), skip_gnu).await
         }
         Command::Pg19 { count, seed, jobs } => pg19::run(&ctx, count, seed, jobs.max(1)).await,
+        Command::BenchPrepare { git_dir } => engines::prepare(&ctx, &git_dir).await,
+        Command::Engines {
+            pg19,
+            seed,
+            jobs,
+            heads,
+            passes,
+            study,
+        } => {
+            engines::run(
+                &ctx,
+                &engines::RunOptions {
+                    pg19,
+                    seed,
+                    jobs,
+                    heads,
+                    passes,
+                    study,
+                },
+            )
+            .await
+        }
     }
 }

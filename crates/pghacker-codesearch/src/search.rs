@@ -1049,21 +1049,18 @@ async fn similar_names(
         "l.file_id = ANY($1::int4[])"
     };
     // In the history, $1 is the commit, $2 the pattern and $3 the files.
-    let history_lines = match &snapshot.history {
-        Some(h) => Some(crate::history::spelling_scope(h, whole)?),
-        None => None,
-    };
+    let history = snapshot.history.as_ref();
     let mut similar = Similar::default();
     let mut timed_out = false;
     for name in &names {
         let Some(id) = pattern::identifier_pattern(name) else {
             continue;
         };
-        let spell_sql = match &history_lines {
-            Some(lines) => format!(
-                "SELECT m[1], count(DISTINCT l.id) FROM \
-                 (SELECT l.id, l.line FROM {lines} AND l.line ~* $2) l, \
-                 regexp_matches(l.line, $2, 'gi') m GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5"
+        let spell_sql = match history {
+            Some(h) => format!(
+                "SELECT m[1], count(DISTINCT l.id) FROM {}, \
+                 regexp_matches(l.line, $2, 'gi') m GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5",
+                crate::history::lines_matching(h, "l.line ~* $2", whole)?
             ),
             None => format!(
                 "SELECT m[1], count(DISTINCT (l.file_id, l.line_no)) FROM code_lines l, \
@@ -1075,7 +1072,7 @@ async fn similar_names(
             timed_out = true;
             break;
         }
-        let rows = match (&snapshot.history, whole) {
+        let rows = match (history, whole) {
             (Some(h), true) => client.query(spell_sql.as_str(), &[&h.addr, &id]).await,
             (Some(h), false) => {
                 client
@@ -1104,21 +1101,21 @@ async fn similar_names(
             }
         }
         let word = name.trim();
-        let source = match &history_lines {
-            Some(lines) => lines.clone(),
-            None => format!("code_lines l WHERE {scope}"),
+        let source = match history {
+            Some(h) => crate::history::lines_matching(h, "l.line %> $2", whole)?,
+            None => format!("code_lines l WHERE {scope} AND l.line %> $2"),
         };
         let sim_sql = format!(
             "SELECT w, round(similarity(w, $2)::numeric, 2)::float8, count(*) FROM \
              (SELECT (regexp_matches(l.line, '[A-Za-z_$][A-Za-z0-9_$]*', 'g'))[1] AS w \
-              FROM {source} AND l.line %> $2) x \
+              FROM {source}) x \
              WHERE similarity(w, $2) >= 0.5 AND w <> $2 GROUP BY w ORDER BY 2 DESC, 3 DESC, 1 LIMIT 5"
         );
         if !budget.apply(client).await? {
             timed_out = true;
             break;
         }
-        let rows = match (&snapshot.history, whole) {
+        let rows = match (history, whole) {
             (Some(h), true) => client.query(sim_sql.as_str(), &[&h.addr, &word]).await,
             (Some(h), false) => {
                 client

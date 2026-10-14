@@ -413,7 +413,7 @@ pub async fn finish(client: &Client, schema: &str) -> Result<()> {
             "instance keys",
             format!(
                 "ALTER TABLE {s}.code_line_instances ADD PRIMARY KEY (id);
-                 CREATE INDEX code_line_instances_scope ON {s}.code_line_instances (lineage, hi);
+                 CREATE INDEX code_line_instances_scope ON {s}.code_line_instances (lineage, hi, lo);
                  CREATE INDEX code_line_instances_weave ON {s}.code_line_instances (lineage, weave);"
             ),
         ),

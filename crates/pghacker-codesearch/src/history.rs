@@ -130,12 +130,24 @@ pub type Keys = Arc<Vec<i64>>;
 /// Cached keys of at most this many lines in all.
 const KEY_CACHE_LINES: usize = 40_000_000;
 
-#[derive(Default)]
 struct KeyCache {
     entries: HashMap<(String, i32), (Keys, u64)>,
     by_use: BTreeMap<u64, (String, i32)>,
     lines: usize,
     tick: u64,
+    cap: usize,
+}
+
+impl Default for KeyCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            by_use: BTreeMap::new(),
+            lines: 0,
+            tick: 0,
+            cap: KEY_CACHE_LINES,
+        }
+    }
 }
 
 impl KeyCache {
@@ -157,7 +169,7 @@ impl KeyCache {
             self.by_use.remove(&used);
         }
         self.by_use.insert(self.tick, key);
-        while self.lines > KEY_CACHE_LINES {
+        while self.lines > self.cap {
             let Some((_, oldest)) = self.by_use.pop_first() else {
                 break;
             };
@@ -199,9 +211,10 @@ pub async fn keys(
         .query(
             &format!(
                 "SELECT v.id, array_agg(l.weave ORDER BY l.weave) \
-                 FROM {s}.code_file_versions v \
+                 FROM (SELECT id, lineage, lo FROM {s}.code_file_versions \
+                       WHERE id = ANY($1::int4[]) OFFSET 0) v \
                  JOIN {s}.code_line_instances l ON l.lineage = v.lineage AND {} \
-                 WHERE v.id = ANY($1::int4[]) GROUP BY v.id",
+                 GROUP BY v.id",
                 alive_at("l", "v.lo")
             ),
             &[&missing],
@@ -227,38 +240,55 @@ pub async fn keys(
 
 type Param = Box<dyn ToSql + Sync + Send>;
 
-/// The candidate query: rows of (version id, weave key, line).
-pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> {
-    let s = checked(&h.schema)?;
-    let mut params: Vec<Param> = vec![Box::new(h.addr)];
-    let scope = match q.file_ids {
-        Some(ids) => {
-            params.push(Box::new(ids.to_vec()));
-            "v.id = ANY($2::int4[])"
-        }
-        None => "true",
-    };
-    let mut sql = if q.scope_first {
-        // The scope's lines first, fenced from the text predicates.
+/// The versions to read, fenced so the planner reads them once: the ids in
+/// `$2`, or every version alive at `$1`.
+fn versions_sql(s: &str, ids: bool) -> String {
+    if ids {
         format!(
-            "SELECT l.vid, l.weave, l.line FROM \
-             (SELECT v.id AS vid, i.weave, i.line FROM {s}.code_file_versions v \
-              JOIN {s}.code_line_instances i ON i.lineage = v.lineage AND i.hi > $1 \
-              WHERE {} AND {scope} AND i.lo <= $1 AND (i.alive IS NULL OR i.alive @> $1) \
-              OFFSET 0) AS l WHERE true",
-            alive_at("v", "$1")
+            "(SELECT id, lineage FROM {s}.code_file_versions WHERE id = ANY($2::int4[]) OFFSET 0)"
         )
     } else {
         format!(
-            "SELECT v.id, l.weave, l.line FROM {s}.code_line_instances l \
-             JOIN {s}.code_file_versions v ON v.lineage = l.lineage AND {} \
-             WHERE {} AND {scope}",
-            alive_at("v", "$1"),
-            alive_at("l", "$1")
+            "(SELECT v.id, v.lineage FROM {s}.code_file_versions v WHERE {} OFFSET 0)",
+            alive_at("v", "$1")
+        )
+    }
+}
+
+/// The candidate query: rows of (version id, weave key, line).
+///
+/// Scope first reads the versions' lines, then applies the text filters;
+/// otherwise the trigram index finds the lines alive at the commit, once,
+/// before they meet the versions. Fences keep the planner from repeating
+/// the trigram scan for each version.
+pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> {
+    let s = checked(&h.schema)?;
+    let mut params: Vec<Param> = vec![Box::new(h.addr)];
+    if let Some(ids) = q.file_ids {
+        params.push(Box::new(ids.to_vec()));
+    }
+    let versions = versions_sql(s, q.file_ids.is_some());
+    let mut filters = String::new();
+    crate::engine::push_filters(&mut filters, &mut params, q);
+    let sql = if q.scope_first {
+        format!(
+            "SELECT l.vid, l.weave, l.line FROM \
+             (SELECT v.id AS vid, i.weave, i.line FROM {versions} v \
+              JOIN {s}.code_line_instances i ON i.lineage = v.lineage AND i.hi > $1 \
+              WHERE i.lo <= $1 AND (i.alive IS NULL OR i.alive @> $1) OFFSET 0) AS l \
+             WHERE true{filters} LIMIT {}",
+            q.cap + 1
+        )
+    } else {
+        format!(
+            "SELECT v.id, l.weave, l.line FROM \
+             (SELECT l.lineage, l.weave, l.line FROM {s}.code_line_instances l \
+              WHERE {}{filters} OFFSET 0) AS l \
+             JOIN {versions} v ON v.lineage = l.lineage LIMIT {}",
+            alive_at("l", "$1"),
+            q.cap + 1
         )
     };
-    crate::engine::push_filters(&mut sql, &mut params, q);
-    sql.push_str(&format!(" LIMIT {}", q.cap + 1));
     Ok((sql, params))
 }
 
@@ -271,6 +301,7 @@ pub async fn candidates(
 ) -> Result<Candidates> {
     let (sql, params) = line_sql(q, h)?;
     let mut out = Candidates::default();
+    let started = std::time::Instant::now();
     let found = crate::engine::stream_rows(client, &sql, &params, q.cap, budget, &mut out, |row| {
         (
             row.get::<_, i32>(0),
@@ -289,6 +320,7 @@ pub async fn candidates(
         out.timed_out = true;
         return Ok(out);
     }
+    let read_ms = started.elapsed().as_millis() as u64;
     let keys = match keys(client, h, &versions).await {
         Ok(keys) => keys,
         Err(error)
@@ -301,6 +333,14 @@ pub async fn candidates(
         }
         Err(error) => return Err(error.context("cannot number the lines")),
     };
+    tracing::debug!(
+        rows = found.len(),
+        versions = versions.len(),
+        scope_first = q.scope_first,
+        read_ms,
+        keys_ms = started.elapsed().as_millis() as u64 - read_ms,
+        "history candidates"
+    );
     for (file_id, weave, line) in found {
         let Ok(k) = keys[&file_id].binary_search(&weave) else {
             bail!("version {file_id} has no line with weave key {weave}");
@@ -365,19 +405,49 @@ pub async fn line_ranges(
     Ok(out)
 }
 
-/// The FROM and WHERE of the spelling queries: the commit's lines as `l`
-/// (with `l.id` and `l.line`), in the versions `$3` or all of them.
-pub fn spelling_scope(h: &History, whole: bool) -> Result<String> {
+/// The commit's lines that match `cond` (on `l.line`), as FROM items
+/// giving `l.id` and `l.line`: in the versions `$3`, or all of them. The
+/// trigram scan runs once, fenced, before the versions are joined.
+pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
     let s = checked(&h.schema)?;
-    let scope = if whole {
-        ""
-    } else {
-        " AND v.id = ANY($3::int4[])"
-    };
-    Ok(format!(
-        "{s}.code_line_instances l JOIN {s}.code_file_versions v \
-         ON v.lineage = l.lineage AND {}{scope} WHERE {}",
-        alive_at("v", "$1"),
+    let lines = format!(
+        "(SELECT l.id, l.lineage, l.line FROM {s}.code_line_instances l \
+         WHERE {} AND {cond} OFFSET 0) l",
         alive_at("l", "$1")
-    ))
+    );
+    Ok(if whole {
+        lines
+    } else {
+        format!(
+            "{lines} JOIN (SELECT lineage FROM {s}.code_file_versions \
+             WHERE id = ANY($3::int4[]) OFFSET 0) v ON v.lineage = l.lineage"
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_key_cache_forgets_the_least_recently_used() {
+        let mut cache = KeyCache {
+            cap: 10,
+            ..KeyCache::default()
+        };
+        let key = |v: i32| ("build".to_owned(), v);
+        cache.put(key(1), Arc::new(vec![1, 2, 3, 4]));
+        cache.put(key(2), Arc::new(vec![1, 2, 3, 4]));
+        assert!(cache.get(&key(1)).is_some());
+        // Version 2 is now the least recently used.
+        cache.put(key(3), Arc::new(vec![1, 2, 3, 4]));
+        assert!(cache.get(&key(2)).is_none());
+        assert!(cache.get(&key(1)).is_some() && cache.get(&key(3)).is_some());
+        assert_eq!(cache.lines, 8);
+        cache.put(key(3), Arc::new(vec![1]));
+        assert_eq!(cache.lines, 5);
+        assert!(alive_at("l", "$1").contains("l.alive @> $1"));
+        assert!(checked("pghacker_history").is_ok());
+        assert!(checked("x; DROP TABLE y").is_err());
+    }
 }
