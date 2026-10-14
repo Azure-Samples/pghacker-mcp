@@ -44,7 +44,8 @@ object in a ```json fenced block:
   "citations": [
     { "message_id": "<Message-ID>", "quote": "verbatim text from that message" }
   ],
-  "files": ["src/backend/parser/parse_jsontable.c:123"]
+  "files": ["src/backend/parser/parse_jsontable.c:123"],
+  "commits": ["<full 40-character commit SHA>"]
 }
 ```
 
@@ -55,8 +56,10 @@ was decided and why), not just that there were concerns.
 with a quote copied character for character from the message as the tools
 returned it (12 to 200 characters). `files` lists code locations you relied
 on (empty when none), with commits as `/commit/<sha>/<path>:<line>` when the
-location isn't in the default version. If the tools don't hold the answer,
-say so in `answer` and leave `citations` empty.
+location isn't in the default version. `commits` lists the full 40-character
+SHAs of the commits your answer names or relies on (empty when none);
+`get_commit` gives the full SHA of an abbreviated one or a revision. If the
+tools don't hold the answer, say so in `answer` and leave `citations` empty.
 
 ## Check your citations
 
@@ -74,3 +77,7 @@ LEFT JOIN messages m ON m.message_id = c.id
 Fix any row that isn't found and verbatim: look up the message by a
 distinctive part of the quote (`WHERE body LIKE '%...%'`), copy its
 `message_id` from the result, and check again.
+
+When you list commits, check them the same way:
+`SELECT sha FROM code_commits WHERE sha IN ('<sha>', '<sha>')` must return
+every one.

@@ -237,7 +237,7 @@ The worker runs `PILOTSWARM_WORKER_CONCURRENCY` session turns at once (8 by defa
 npm test                 # launcher, configuration, readiness and evaluation helpers
 npm run rust:check       # rustfmt, clippy -D warnings, and the Rust tests (they create temporary databases)
 npm run smoke            # with the app running: both MCP servers, the portal, the worker and the agents
-npm run eval             # with the corpus built: the 20-question evaluation (eval/questions.json, results in eval/RESULTS.md)
+npm run eval             # with the corpus built: the 30-question evaluation (eval/questions.json, results in eval/RESULTS.md)
 ```
 
 Rust integration tests read the local database configuration from `.env`, with

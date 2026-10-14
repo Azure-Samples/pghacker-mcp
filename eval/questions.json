@@ -197,5 +197,138 @@
     "question": "Which three source files of PostgreSQL's parser (src/backend/parser) are mentioned in the most pgsql-hackers messages in the corpus?",
     "gold_answer": "src/backend/parser/gram.y is mentioned by far the most, followed by parse_expr.c and then parse_clause.c. Supporting detail: about 240, 160 and 125 messages respectively.",
     "gold_citations": []
+  },
+  {
+    "id": "q21",
+    "kind": "origin",
+    "question": "Which commit added the vacuum_buffer_usage_limit setting? Who wrote it, who reviewed it, and which pgsql-hackers thread discussed it?",
+    "gold_answer": "Commit 1cbbee03385763b066ae3961fc61f2cd01a0d0d7, \"Add VACUUM/ANALYZE BUFFER_USAGE_LIMIT option\", committed by David Rowley on 7 April 2023 for PostgreSQL 16. Melanie Plageman wrote it, and David Rowley, Andres Freund, Justin Pryzby and Bharath Rupireddy reviewed it. It was discussed in the thread Andres Freund started in January 2023, \"Option to not use ringbuffer in VACUUM, using it in failsafe mode\", about VACUUM's ring buffer often causing substantial slowdowns; the idea was his. Supporting detail: the setting sizes the buffer access strategy ring that VACUUM, ANALYZE and autovacuum use when BUFFER_USAGE_LIMIT isn't given, and defaults to 256kB, the ring's previous fixed size.",
+    "gold_citations": [
+      { "message_id": "20230111182720.ejifsclfwymw2reb@awork3.anarazel.de", "quote": "The use of the ringbuffer in VACUUM often causes very substantial slowdowns." },
+      { "message_id": "CAApHDvqs+Fcw9Yrn4ORCAX0xKK1-SiCC0w1j7Dhg=G9hrvag7g@mail.gmail.com", "quote": "I've pushed the patch after a little more adjusting." }
+    ],
+    "gold_commits": ["1cbbee03385763b066ae3961fc61f2cd01a0d0d7"]
+  },
+  {
+    "id": "q22",
+    "kind": "origin",
+    "question": "Who originally wrote the built-in trigger function suppress_redundant_updates_trigger(), when was it committed, and what problem did it address? Note that git blame credits many of its lines to later reformatting.",
+    "gold_answer": "Andrew Dunstan wrote and committed it on 3 November 2008 (commit f0dae70431ec0af676d7e6f26454145903045aba), for PostgreSQL 8.4. It is a BEFORE UPDATE trigger function that skips updates that would not change the row, avoiding the cost of no-op updates; it grew out of his \"minimal update\" proposal on pgsql-hackers, prompted by a data-warehouse application whose large daily batch updates made many unnecessary updates. Supporting detail: plain git blame credits most of its lines to Bruce Momjian's 8.4 pgindent run in June 2009, a reformatting commit listed in .git-blame-ignore-revs; Tom Lane cleaned up the code the next day; Tom Lane had suggested a BEFORE UPDATE trigger, written in C, rather than an option on UPDATE.",
+    "gold_citations": [
+      { "message_id": "472B4712.3060704@dunslane.net", "quote": "do minimal instead of maximal updating" },
+      { "message_id": "7164.1194020748@sss.pgh.pa.us", "quote": "A BEFORE UPDATE trigger would be better" },
+      { "message_id": "4908B9FD.3040905@dunslane.net", "quote": "suppress_redundant_updates_trigger() is what I have now" }
+    ],
+    "gold_commits": ["f0dae70431ec0af676d7e6f26454145903045aba"]
+  },
+  {
+    "id": "q23",
+    "kind": "backpatch",
+    "question": "In June 2025, PostgreSQL fixed a bug where VACUUM could apply the wrong TRUNCATE or INDEX_CLEANUP setting when it processed several relations, or a table and its TOAST table, in one command. Which branches got the fix, and in which release did it first ship on each?",
+    "gold_answer": "It was committed to master on 25 June 2025, just before REL_18_STABLE branched, so it shipped in 18.0, and back-patched to 17, 16, 15, 14 and 13, where it first shipped in 17.6, 16.10, 15.14, 14.19 and 13.22 (the August 2025 minor releases). Supporting detail: the commit is \"Avoid scribbling of VACUUM options\"; Shihao Zhong reported the bug, Nathan Bossart wrote the fix and Michael Paquier the tests, and Michael Paquier committed it; vacuum_rel() modified a VacuumParams struct shared across relations; the new tests use injection points and went back only to 17.",
+    "gold_citations": [
+      { "message_id": "CAGRkXqTo+aK=GTy5pSc-9cy8H2F2TJvcrZ-zXEiNJj93np1UUw@mail.gmail.com", "quote": "They had configured a table with vacuum_truncate=false to prevent exclusive lock contention" },
+      { "message_id": "aFtRd1Q4QuCWcg5k@paquier.xyz", "quote": "Okay, applied the main fix down to v13 then." }
+    ],
+    "gold_commits": [
+      "661643dedad97f8b924991fdc739b1f47b0fb60b",
+      "2e0b5d252b10b790abdee9dec202a306006037c2",
+      "d187cabddadcbea2033d172e738edbd65b5a3f8d",
+      "354944663df38a360f8519814658a10cb5c3d04a",
+      "c079ba3fc2a4ed4801a0adf55cbbf69c961b1ba4",
+      "65c3223f93a0e5dc4ae1f3ec5fd48455b2da8d86"
+    ]
+  },
+  {
+    "id": "q24",
+    "kind": "time-travel",
+    "question": "Was JIT compilation enabled by default in PostgreSQL 11? How did that differ in PostgreSQL 12, and why?",
+    "gold_answer": "No: PostgreSQL 11 shipped with jit = off. JIT had been committed enabled by default, but on 15 September 2018 Tom Lane disabled it by default on the v11 branch only (commit 0fdadfb0192935e0f8bec7fa5ec9dbb470d6d587, first in 11beta4), because JIT wasn't quite mature enough to ship enabled by default; master kept it on, so PostgreSQL 12 was the first release with jit = on by default. Supporting detail: Andres Freund put the choice to pgsql-hackers: leave it enabled, disable it in v11 but leave it enabled in master, or raise JIT's costs; JIT could trigger over-eagerly when cost estimates were far off, and as largely one person's work it risked bugs; Tom Lane, Peter Geoghegan and others favored disabling it in v11 only.",
+    "gold_citations": [
+      { "message_id": "20180914222657.mw25esrzbcnu6qlu@alap3.anarazel.de", "quote": "Disable it by default in v11, leave it enabled in master." },
+      { "message_id": "3949.1536964323@sss.pgh.pa.us", "quote": "I'd go with #2, personally." }
+    ],
+    "gold_commits": ["0fdadfb0192935e0f8bec7fa5ec9dbb470d6d587", "8f32bacc006692e63f137924d5849b3cb9f2d4d3"]
+  },
+  {
+    "id": "q25",
+    "kind": "time-travel",
+    "question": "What was the default of password_encryption in PostgreSQL 13, what is it in PostgreSQL 14, and why did it change?",
+    "gold_answer": "md5 in PostgreSQL 13, and scram-sha-256 from PostgreSQL 14. Peter Eisentraut proposed in May 2020 changing the default to nudge people to adopt SCRAM, since passwords were still hashed with MD5 by default, and committed the change on 10 June 2020 (commit c7eab0e97e6cf1d0c136c22269c10ae11ba874c4, reviewed by Jonathan Katz), after 13 had branched, so it first shipped in 14. Supporting detail: the same commit removed the legacy values on/true/yes/1, which meant md5, leaving only scram-sha-256 and md5; Tom Lane asked whether client libraries were SCRAM-ready and Magnus Hagander replied that nearly all listed drivers were; Stephen Frost supported the change.",
+    "gold_citations": [
+      { "message_id": "d5b0ad33-7d94-bdd1-caac-43a1c782cab2@2ndquadrant.com", "quote": "perhaps we should change the default for password_encryption to nudge people to adopt SCRAM" },
+      { "message_id": "20200522144638.GK3418@tamriel.snowman.net", "quote": "I'm +1 on moving the default for password_encryption to be scram." }
+    ],
+    "gold_commits": ["c7eab0e97e6cf1d0c136c22269c10ae11ba874c4"]
+  },
+  {
+    "id": "q26",
+    "kind": "change",
+    "question": "When and why was recovery.conf removed from PostgreSQL, and what replaced it?",
+    "gold_answer": "Peter Eisentraut removed it on 25 November 2018, for PostgreSQL 12 (commit 2dedf4d9a899b36d1a8ed29be5efbd1b31a8fe85, \"Integrate recovery.conf into postgresql.conf\"). Its settings became ordinary configuration parameters, set in postgresql.conf or other configuration sources, as Simon Riggs's 2016 proposal had wanted recovery parameters to be part of the main postgresql.conf infrastructure; a recovery.signal file now starts recovery and a standby.signal file standby mode, and the server reports an error if it finds a recovery.conf. Supporting detail: standby_mode was removed and trigger_file renamed promote_trigger_file; pg_basebackup -R appends settings to postgresql.auto.conf and creates standby.signal; the authors were Fujii Masao, Simon Riggs, Abhijit Menon-Sen and Sergei Kornilov, who revived the work in June 2018.",
+    "gold_citations": [
+      { "message_id": "607741529606767@web3g.yandex.ru", "quote": "if recovery.conf present during start we report FATAL error about old style config" },
+      { "message_id": "d7f0860c-65d6-5346-c672-3b1116b20ac4@2ndquadrant.com", "quote": "Committed with that addition." },
+      { "message_id": "CANP8+jLO5fmfudbB1b1iw3pTdOK1HBM=xMTaRfOa5zpDVcqzew@mail.gmail.com", "quote": "Recovery parameters would now be part of the main postgresql.conf infrastructure" }
+    ],
+    "gold_commits": ["2dedf4d9a899b36d1a8ed29be5efbd1b31a8fe85"]
+  },
+  {
+    "id": "q27",
+    "kind": "change",
+    "question": "Why was the pg_xlog directory renamed, to what, and when?",
+    "gold_answer": "It was renamed pg_wal in PostgreSQL 10: Robert Haas committed Michael Paquier's patch on 20 October 2016 (commit f82ec32ac30ae7e3ec7c84067192535b2ff8ec0e). \"xlog\" was an unclear abbreviation for write-ahead log, and users took the directory's contents for ordinary logs that were safe to delete to free up space, with unpleasant consequences. Supporting detail: pg_upgrade and pg_basebackup were taught both layouts; later in the 10 cycle, tools and SQL functions with \"xlog\" in their names were renamed to \"wal\" (February 2017) and pg_clog was renamed pg_xact (March 2017).",
+    "gold_citations": [
+      { "message_id": "CAB7nPqTaZDRtoeordOKcdnU_74OdwkKGfypPc3ThFusLrvz3pQ@mail.gmail.com", "quote": "sometimes users think that pg_xlog and pg_clog are just logs" },
+      { "message_id": "CA+TgmoY5bUx9qL1q=XwoGerQn0+BmhC4uQ0Mx-rUZqpQPG2qyg@mail.gmail.com", "quote": "Committed 0001." }
+    ],
+    "gold_commits": ["f82ec32ac30ae7e3ec7c84067192535b2ff8ec0e"]
+  },
+  {
+    "id": "q28",
+    "kind": "provenance",
+    "question": "Which posted version of the JSON_TABLE patch did Amit Langote commit as the basic JSON_TABLE() functionality in April 2024, and how did it differ from the full JSON_TABLE patch posted in March 2024?",
+    "gold_answer": "v49 (patch 0001, \"Add JSON_TABLE function\"), posted on 3 April 2024: Amit Langote committed it on 4 April 2024 as de3600452b61d1bc3967e9e37e86db8956c8f577, after fixing jian he's latest review comments and a few other issues. It was the barebones JSON_TABLE he had split out on 28 March (v46): unlike the full patch (v45, about 5,000 added lines), it had no NESTED paths or columns and no PLAN clause, so it was roughly half the size. Supporting detail: NESTED paths and columns followed as a separate patch, committed on 8 April 2024 (bb766cde63b4f624d029b34c9cdd3d0a94fd5b46); the PLAN clause was left out.",
+    "gold_citations": [
+      { "message_id": "CA+HiwqHx0kAe74hXY-M3GVqZAmZWx+GuAksjcG4iK-ZHoaeBLg@mail.gmail.com", "quote": "implements barebones JSON_TABLE(), that is, without NESTED paths/columns and PLAN clause" },
+      { "message_id": "CA+HiwqGGF2K9EDfN+Zw-=dzPFRk0PTVdMw1n4joXNhhWJVcitA@mail.gmail.com", "quote": "Pushed after fixing these and a few other issues." }
+    ],
+    "gold_commits": ["de3600452b61d1bc3967e9e37e86db8956c8f577"]
+  },
+  {
+    "id": "q29",
+    "kind": "review",
+    "question": "Who reported the problem that led PostgreSQL to reject \"=\" in the names of reloptions and foreign-data options in June 2025, who wrote and reviewed the fix, and why was \"=\" a problem?",
+    "gold_answer": "Chapman Flack reported it, and he also reviewed the fix, which Tom Lane wrote and committed on 2 June 2025 (master commit aa87f69c009a062685f0c984dbcc18e60c02920d), back-patched through 13. These options are stored as array elements of the form name=value, so a name containing \"=\" confused reading the array back in and, because validation often happens long after that conversion, produced confusing, off-point error messages; such names are now rejected up front. Supporting detail: Chapman showed that an option named \"a=b\" with value 'c=d' is stored as a=b=c=d; Tom noted that pairs of array elements would have been a better design but it was too late for that, that there is no evident use for such names, and that GUC names already reject them.",
+    "gold_citations": [
+      { "message_id": "6830EB30.8090904@acm.org", "quote": "generic_option_name is a ColLabel, therefore a fully general SQL identifier." },
+      { "message_id": "557970.1748888023@sss.pgh.pa.us", "quote": "Here's a proposed patch for the \"=\" issue." },
+      { "message_id": "702396.1748892205@sss.pgh.pa.us", "quote": "Pushed, thanks for looking at it." }
+    ],
+    "gold_commits": [
+      "aa87f69c009a062685f0c984dbcc18e60c02920d",
+      "d4046125dd7d876b4930b346c28c588e622667ec",
+      "ab758ec4d30745427e46b51b7b19b3c5483d513d",
+      "e76097124f7d6679d287701ab108aa20088b13a6",
+      "eb423464753f5a853ec47209aab05f74fafa9328",
+      "cd31eaaebc406d043f5dc240f8849d640490e707"
+    ]
+  },
+  {
+    "id": "q30",
+    "kind": "review",
+    "question": "Who reported the crash in ALTER SUBSCRIPTION ... REFRESH PUBLICATION when a subscribed relation is dropped concurrently, fixed in August 2026? Who wrote and reviewed the fix, and what caused the crash?",
+    "gold_answer": "Satyanarayana Narlapuram reported it on pgsql-hackers in May 2026 and wrote the fix with Bharath Rupireddy; Ajin Cherian and Masahiko Sawada reviewed it, and Masahiko Sawada committed it on 26 August 2026 (master commit f3b0bb29834edb9242b180ea7289013a92c9f225), back-patched to 16. The origin checks, check_publications_origin_tables() and check_publications_origin_sequences(), read the names of already-subscribed relations without locking them, so a relation dropped concurrently gave a NULL name that quote_literal_cstr() dereferenced; the fix skips relations whose names are gone. Supporting detail: the NULL names became a crash with commit 46b4f5c11b0 (Noah Misch's May 2026 fix for SQL injection in those checks), which started quoting them; the window needs copy_data = true and origin = none; skipping a relation can at most produce a spurious WARNING; the test went into v19 and later only.",
+    "gold_citations": [
+      { "message_id": "CAHg+QDcd_o3707Ey8c8b7HkE-t14g8c0tk8ME3ctywDsh3ut8g@mail.gmail.com", "quote": "ALTER SUBSCRIPTION ... REFRESH PUBLICATION may crash if a subscribed table (or sequence) is dropped concurrently." },
+      { "message_id": "CAFPTHDbTRuxqG0J_tnUB5UbYQF-wM6QPyiSJe3FQb89Op5xP_Q@mail.gmail.com", "quote": "I've reviewed the patch and it looks good" }
+    ],
+    "gold_commits": [
+      "f3b0bb29834edb9242b180ea7289013a92c9f225",
+      "4d9224a436f0e728b0b1bdd70e72c798bf4bbe98",
+      "ec074c41efbd93ddc4b882c142c15c8d5b2ae6f8",
+      "ebf7971dabac93558ebe0b1e47b4d665ac20c054",
+      "ec8aaf845f4b7606ccf3b97247ebddd3548de917"
+    ]
   }
 ]

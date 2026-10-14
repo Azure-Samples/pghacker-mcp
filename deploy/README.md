@@ -284,7 +284,7 @@ The crawl scheduler's progress is in the container's log, with `[crawl]` lines. 
 
 ## Evaluating the deployment
 
-The 20-question evaluation runs local agents against the deployment's public endpoint, and checks their citations there. From the repository root:
+The 30-question evaluation runs local agents against the deployment's public endpoint, and checks their citations and cited commits there; questions q21 to q30 need the commit history. From the repository root:
 
 ```sh
 npm run stop

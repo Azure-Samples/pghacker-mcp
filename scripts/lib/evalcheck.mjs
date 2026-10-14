@@ -1,6 +1,6 @@
 // Checks for the evaluation's answers: the same quote rule as the indexer's
-// citations (pghacker_core::text::quote_in), CSV from the query tool, and the
-// answer's JSON block.
+// citations (pghacker_core::text::quote_in), CSV from the query tool, the
+// answer's JSON block, and the commits it cites.
 
 /** Whitespace- and quote-marker-insensitive text, as pghacker_core::text::normalize_for_quote. */
 export function normalizeForQuote(text) {
@@ -47,5 +47,60 @@ export function lastJsonBlock(reply) {
     }
   }
   return null;
+}
+
+/**
+ * The results table, one row per question. The commit columns show "—" when
+ * they don't apply: no gold commits, or none cited and none expected.
+ */
+export function resultsTable(results) {
+  const yesNo = (value) => (value === null || value === undefined ? "—" : value ? "yes" : "no");
+  return [
+    "| Question | Kind | Correct | Citations valid | On a gold thread | Commits valid | Gold commit cited | Seconds |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ...results.map((r) => [
+      `${r.id}: ${String(r.question ?? "").replaceAll("|", "\\|")}`,
+      r.kind ?? "",
+      r.correct ? "yes" : "no",
+      r.citations_valid ? "yes" : "no",
+      r.on_gold_thread ? "yes" : "no",
+      yesNo(r.commits_valid),
+      yesNo(r.on_gold_commit),
+      r.seconds ?? "",
+    ].join(" | ")).map((row) => `| ${row} |`),
+  ];
+}
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** An answer's `commits`: the full SHAs, lower-cased and deduplicated, and the entries that aren't one. */
+export function citedCommits(list) {
+  const shas = new Set();
+  const malformed = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    const sha = String(item ?? "").trim().toLowerCase();
+    if (FULL_SHA.test(sha)) shas.add(sha);
+    else malformed.push(String(item));
+  }
+  return { shas: [...shas], malformed };
+}
+
+/**
+ * Checks an answer's `commits` against `known`, the SHAs among them that the
+ * history's code_commits holds: valid when every entry is a full SHA the
+ * history has, and on a gold commit when one of them is among `gold`.
+ */
+export function checkCommits(list, known, gold = []) {
+  const { shas, malformed } = citedCommits(list);
+  const have = new Set(known.map((sha) => String(sha).toLowerCase()));
+  const golden = new Set(gold.map((sha) => String(sha).toLowerCase()));
+  const unknown = shas.filter((sha) => !have.has(sha));
+  return {
+    commits: shas,
+    malformed,
+    unknown,
+    valid: malformed.length === 0 && unknown.length === 0,
+    onGold: shas.some((sha) => golden.has(sha)),
+  };
 }
 

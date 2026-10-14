@@ -4,7 +4,7 @@ import { parseArgs } from "node:util";
 import { portalEnvironment, readLocalConfig, serviceUrl } from "./lib/config.mjs";
 import { callTool } from "./lib/services.mjs";
 import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
-import { lastJsonBlock, parseCsv, quoteIn } from "./lib/evalcheck.mjs";
+import { checkCommits, citedCommits, lastJsonBlock, parseCsv, quoteIn, resultsTable } from "./lib/evalcheck.mjs";
 
 // The wave 1 evaluation (npm start must be running):
 //   npm run eval -- [--questions eval/questions.json] [--only q01,q02] [--concurrency 3] [--results eval/RESULTS.md]
@@ -13,9 +13,12 @@ import { lastJsonBlock, parseCsv, quoteIn } from "./lib/evalcheck.mjs";
 // --mcp-url, so that the citations are checked against it.
 // Each question goes to a pghacker-eval session, which may use only
 // pghacker-mcp. The script checks every citation (the Message-ID exists and
-// the quote is verbatim) and a judge session grades the answer against the
-// gold answer. A question passes when it is judged correct and its citations
-// are valid. Full results go to .runtime/eval; the summary to eval/RESULTS.md.
+// the quote is verbatim) and every cited commit (a full SHA that the
+// history's code_commits holds), and a judge session grades the answer
+// against the gold answer. A question passes when it is judged correct, its
+// citations are valid when it has gold citations, and, when it has gold
+// commits, its commits are valid and include one of them. Full results go to
+// .runtime/eval; the summary to eval/RESULTS.md.
 const { values: options } = parseArgs({
   options: {
     questions: { type: "string", default: "eval/questions.json" },
@@ -47,6 +50,16 @@ async function messages(ids) {
   const cell = rows[1]?.[0];
   const list = cell && cell !== "None" ? JSON.parse(cell) : [];
   return new Map(list.map((m) => [m.id, m]));
+}
+
+/** The SHAs among `shas` that the commit history holds. */
+async function knownCommits(shas) {
+  if (!shas.length) return [];
+  const csv = await callTool(mcp, "query", {
+    sql: `SELECT sha FROM code_commits WHERE sha IN (${shas.map(sqlText).join(", ")})`,
+    max_rows: 1000,
+  });
+  return parseCsv(String(csv)).slice(1).map((row) => row[0]);
 }
 
 const JUDGE = `You grade answers about PostgreSQL's history and code against a gold answer written by an expert.
@@ -93,6 +106,19 @@ async function evaluate(client, question) {
   const goldThreads = new Set(goldIds.map((id) => found.get(id)?.thread).filter(Boolean));
   const citationsValid = checked.length > 0 && checked.every((c) => c.exists && c.verbatim);
   const onGoldThread = checked.some((c) => goldThreads.has(found.get(c.message_id)?.thread));
+  const goldCommits = question.gold_commits ?? [];
+  const cited = citedCommits(parsed.commits);
+  let commits;
+  let commitsError;
+  try {
+    commits = checkCommits(parsed.commits, await knownCommits(cited.shas), goldCommits);
+  } catch (error) {
+    commitsError = error.message;
+    commits = { ...checkCommits(parsed.commits, [], goldCommits), valid: false };
+  }
+  const needsCommits = goldCommits.length > 0;
+  const citesCommits = cited.shas.length + cited.malformed.length > 0;
+  const commitsValid = needsCommits ? commits.commits.length > 0 && commits.valid : citesCommits ? commits.valid : null;
   const grade = await judge(client, question, parsed.answer ?? "");
   const needsCitations = goldIds.length > 0;
   return {
@@ -107,7 +133,14 @@ async function evaluate(client, question) {
     citations_valid: needsCitations ? citationsValid : checked.every((c) => c.exists && c.verbatim),
     on_gold_thread: onGoldThread,
     files: parsed.files ?? [],
-    pass: Boolean(grade.correct) && (needsCitations ? citationsValid : true),
+    commits: commits.commits,
+    ...(commits.malformed.length ? { commits_malformed: commits.malformed } : {}),
+    ...(commits.unknown.length ? { commits_unknown: commits.unknown } : {}),
+    ...(commitsError ? { commits_error: commitsError } : {}),
+    commits_valid: commitsValid,
+    on_gold_commit: needsCommits ? commits.onGold : null,
+    pass: Boolean(grade.correct) && (needsCitations ? citationsValid : true)
+      && (needsCommits ? commitsValid && commits.onGold : true),
     seconds: Math.round((Date.now() - started) / 1000),
     session: session.sessionId,
   };
@@ -134,7 +167,8 @@ try {
       const result = await evaluate(client, question);
       results.push(result);
       console.log(`[eval] ${result.id}: ${result.pass ? "PASS" : "FAIL"}` +
-        `${result.error ? ` (${result.error})` : ` correct=${result.correct} citations_valid=${result.citations_valid}`}`);
+        `${result.error ? ` (${result.error})` : ` correct=${result.correct} citations_valid=${result.citations_valid}` +
+          `${result.on_gold_commit === null ? "" : ` commits_valid=${result.commits_valid} gold_commit=${result.on_gold_commit}`}`}`);
     }
   });
   await Promise.all(workers);
@@ -144,6 +178,11 @@ try {
 
 results.sort((a, b) => a.id.localeCompare(b.id));
 const passed = results.filter((r) => r.pass).length;
+const withCommits = new Set(questions.filter((q) => (q.gold_commits ?? []).length).map((q) => q.id));
+const tally = (keep) => {
+  const group = results.filter((r) => keep(withCommits.has(r.id)));
+  return `${group.filter((r) => r.pass).length} of ${group.length}`;
+};
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const dir = path.join(config.runtimeDir, "eval");
 mkdirSync(dir, { recursive: true });
@@ -151,13 +190,14 @@ writeFileSync(path.join(dir, `eval-${stamp}.json`), JSON.stringify({ options, re
 const lines = [
   "# Wave 1 evaluation",
   "",
-  `${passed} of ${results.length} questions passed (judged correct, with valid verbatim citations).`,
+  `${passed} of ${results.length} questions passed (judged correct, with valid verbatim citations and, for questions with gold commits, a valid cited gold commit).`,
+  ...(withCommits.size && withCommits.size < results.length
+    ? [`Questions with gold commits: ${tally((has) => has)} passed; the others: ${tally((has) => !has)}.`]
+    : []),
   `Answer model: \`${options.model}\`; judge: \`${options["judge-model"]}\`; run ${new Date().toISOString()}.`,
   ...(options["mcp-url"] ? ["", `pghacker-mcp: \`${options["mcp-url"]}\`.`] : []),
   "",
-  "| Question | Kind | Correct | Citations valid | On a gold thread | Seconds |",
-  "| --- | --- | --- | --- | --- | --- |",
-  ...results.map((r) => `| ${r.id}: ${String(r.question ?? "").replaceAll("|", "\\|")} | ${r.kind ?? ""} | ${r.correct ? "yes" : "no"} | ${r.citations_valid ? "yes" : "no"} | ${r.on_gold_thread ? "yes" : "no"} | ${r.seconds ?? ""} |`),
+  ...resultsTable(results),
   "",
 ];
 writeFileSync(path.resolve(config.root, options.results), lines.join("\n"));
