@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { APP_ROOT, portalEnvironment, readLocalConfig, serviceUrl } from "./lib/config.mjs";
-import { memoryUsed, probeFoundry, runSession, watch } from "./lib/crawl.mjs";
+import { lanesLine, memoryUsed, probeFoundry, runSession, watch } from "./lib/crawl.mjs";
 import { callTool } from "./lib/services.mjs";
 import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 
@@ -41,8 +41,10 @@ async function status() {
 
 function summary(s) {
   const e = s.extraction;
+  const lanes = lanesLine(e.lanes);
   return `pending ${e.threads_pending}, extracted ${e.threads_extracted}, skipped ${e.threads_skipped}, ` +
-    `features ${e.features}, decisions ${e.decisions}, positions ${e.positions}, citations ${e.citations}`;
+    `features ${e.features}, decisions ${e.decisions}, positions ${e.positions}, citations ${e.citations}` +
+    (lanes ? `; ${lanes}` : "");
 }
 
 function session(agent, task, title) {

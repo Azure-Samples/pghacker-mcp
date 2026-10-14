@@ -219,6 +219,24 @@ test("PGHACKER_CODE_HISTORY, from .env or the shell, reaches the indexer and pgh
   assert.throws(() => services("PGHACKER_CODE_HISTORY=pghacker.code\n"), /must name a schema/);
 });
 
+test("the extraction order's settings, from .env or the shell, reach the indexer only", () => {
+  const services = (text, inherited = {}) => serviceEnvironments(parseLocalConfig(`${initialEnv(password)}${text}`), inherited);
+  for (const env of Object.values(services(""))) {
+    assert.equal("PGHACKER_EXTRACTION_ORDER" in env, false);
+  }
+  const fromFile = services(
+    "PGHACKER_EXTRACTION_ORDER=largest\nPGHACKER_EXTRACTION_NEW_MAIL_SHARE=0.3\n",
+    { PGHACKER_EXTRACTION_ORDER: "lanes", PGHACKER_EXTRACTION_NEW_MAIL_DAYS: "2" },
+  );
+  assert.equal(fromFile.indexer.PGHACKER_EXTRACTION_ORDER, "largest");
+  assert.equal(fromFile.indexer.PGHACKER_EXTRACTION_NEW_MAIL_SHARE, "0.3");
+  assert.equal(fromFile.indexer.PGHACKER_EXTRACTION_NEW_MAIL_DAYS, "2");
+  for (const process of ["bootstrap", "mcp"]) {
+    assert.equal("PGHACKER_EXTRACTION_ORDER" in fromFile[process], false, process);
+  }
+  assert.throws(() => services("PGHACKER_EXTRACTION_NEW_MAIL_DAYS=0\n"), /PGHACKER_EXTRACTION_NEW_MAIL_DAYS/);
+});
+
 test("the plugin's agents load with the MCP servers they name", async () => {
   const { loadAgentFiles } = await import("pilotswarm-sdk");
   const agents = Object.fromEntries(loadAgentFiles(path.join(APP_ROOT, "plugin", "agents")).map((agent) => [agent.name, agent]));

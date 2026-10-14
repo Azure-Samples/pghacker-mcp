@@ -122,6 +122,33 @@ test("PGHACKER_CODE_HISTORY names the history schema of the indexer and pghacker
   }
 });
 
+test("the extraction order's settings reach the indexer only, and are checked", () => {
+  const names = ["PGHACKER_EXTRACTION_ORDER", "PGHACKER_EXTRACTION_NEW_MAIL_SHARE", "PGHACKER_EXTRACTION_NEW_MAIL_DAYS"];
+  for (const env of Object.values(processEnvironments(readAzureConfig(ENV)))) {
+    for (const name of names) assert.equal(name in env, false, name);
+  }
+  const set = {
+    PGHACKER_EXTRACTION_ORDER: "largest",
+    PGHACKER_EXTRACTION_NEW_MAIL_SHARE: " 0.25 ",
+    PGHACKER_EXTRACTION_NEW_MAIL_DAYS: "3",
+  };
+  for (const [process, env] of Object.entries(processEnvironments(readAzureConfig({ ...ENV, ...set })))) {
+    for (const name of names) {
+      assert.equal(env[name], process === "indexer" ? set[name].trim() : undefined, `${process} ${name}`);
+    }
+  }
+  for (const [name, bad] of [
+    ["PGHACKER_EXTRACTION_ORDER", "newest"],
+    ["PGHACKER_EXTRACTION_NEW_MAIL_SHARE", "0"],
+    ["PGHACKER_EXTRACTION_NEW_MAIL_SHARE", "1.5"],
+    ["PGHACKER_EXTRACTION_NEW_MAIL_SHARE", "half"],
+    ["PGHACKER_EXTRACTION_NEW_MAIL_DAYS", "0"],
+    ["PGHACKER_EXTRACTION_NEW_MAIL_DAYS", "2.5"],
+  ]) {
+    assert.throws(() => readAzureConfig({ ...ENV, [name]: bad }), new RegExp(name), `${name}=${bad}`);
+  }
+});
+
 test("oauth2-proxy signs in the team for the portal, passes /mcp through, and gets no secret in its arguments", () => {
   const args = oauth2ProxyArgs(readAzureConfig(ENV));
   for (const expected of [

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Concurrency, isRateLimited, launches, retryAfterMs, watch } from "../scripts/lib/crawl.mjs";
+import { Concurrency, isRateLimited, lanesLine, launches, retryAfterMs, watch } from "../scripts/lib/crawl.mjs";
 
 const MINUTE = 60_000;
 
@@ -120,4 +120,47 @@ test("the scheduler pauses after failures in a row and starts only what the back
   // scheduler for a minute: nothing starts at the next tick.
   assert.deepEqual(started, [8, 8, 4]);
   assert.ok(logs.some((line) => line.includes("pausing")), logs.join("\n"));
+});
+
+const LANES = {
+  order: "lanes",
+  new_mail: {
+    days: 7, share: 0.5, threads: 195, leased: 4, messages: 3609,
+    oldest_activity_at: "2026-10-09T04:28:48Z", leased_since_start: 12,
+  },
+  backfill: {
+    threads: 44640, leased: 9, messages: 321528,
+    newest_activity_at: "2026-10-07T04:53:38.123Z", leased_since_start: 13,
+  },
+};
+
+test("the lanes read in a line, and nothing without them", () => {
+  assert.equal(
+    lanesLine(LANES),
+    "new mail 195 threads (4 leased, oldest activity 2026-10-09 04:28), backfill 44640 threads " +
+      "(9 leased, newest activity 2026-10-07 04:53), leased since start 12 new mail and 13 backfill",
+  );
+  assert.equal(lanesLine(undefined), "");
+  const empty = { ...LANES, new_mail: { ...LANES.new_mail, threads: 0, oldest_activity_at: null } };
+  assert.match(lanesLine(empty), /new mail 0 threads \(4 leased, oldest activity none\)/);
+});
+
+test("the scheduler logs the backlog and its lanes every 10 minutes", async () => {
+  const time = harness(25);
+  const logs = [];
+  await watch({
+    status: async () => ({ extraction: { threads_pending: 300, threads_changed_since_extraction: 20, threads_extracted: 0, lanes: LANES } }),
+    extract: () => new Promise(() => {}),
+    dedup: async () => ({ ok: true }),
+    log: (line) => logs.push(line),
+    signal: time.signal,
+    now: time.now,
+    sleep: time.sleep,
+    options: { start: 2, max: 2, perSession: 8, tickMs: 30_000 },
+  });
+  // 25 ticks of 30 seconds: at 0 and at 10 minutes.
+  const reports = logs.filter((line) => line.startsWith("Backlog:"));
+  assert.equal(reports.length, 2, logs.join("\n"));
+  assert.equal(reports[0], `Backlog: 320 threads, 0 sessions running; ${lanesLine(LANES)}.`);
+  assert.ok(reports[1].startsWith("Backlog: 320 threads, 2 sessions running; new mail 195 threads"), reports[1]);
 });

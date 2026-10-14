@@ -19,6 +19,7 @@ use uuid::Uuid;
 use pghacker_core::text::{quote_in, truncate_chars};
 
 use crate::Indexer;
+use crate::lanes::{self, Lane, NEEDS_EXTRACTION, Order};
 
 /// Characters of messages per page, across messages.
 const PAGE_CHARS: usize = 48_000;
@@ -312,6 +313,56 @@ struct Lease {
 /// working session keeps its threads, and an abandoned lease lapses soon.
 const LEASE_MINUTES: i32 = 20;
 
+/// SQL: no live lease holds thread `t`.
+const FREE: &str = "NOT EXISTS (SELECT FROM extraction_leases l
+                    WHERE t.id = ANY (l.thread_ids) AND l.released_at IS NULL AND l.expires_at > now())";
+
+/// The next free threads of the lanes, up to `count`, picked from both lanes'
+/// heads. One statement reads both, so that a thread that new mail moves into
+/// the other lane meanwhile can't be read in both.
+async fn lane_heads(
+    indexer: &Indexer,
+    client: &impl GenericClient,
+    count: i64,
+) -> Result<Vec<(i64, Lane)>> {
+    let rows = client
+        .query(
+            &format!(
+                "(SELECT t.id, true AS new_mail, t.last_at FROM threads t
+                  WHERE {NEEDS_EXTRACTION} AND {new_mail} AND {FREE}
+                  ORDER BY t.last_at, t.id LIMIT $1)
+                 UNION ALL
+                 (SELECT t.id, false, t.last_at FROM threads t
+                  WHERE {NEEDS_EXTRACTION} AND {backfill} AND {FREE}
+                  ORDER BY t.last_at DESC NULLS LAST, t.id DESC LIMIT $1)",
+                new_mail = lanes::new_mail("$2"),
+                backfill = lanes::backfill("$2"),
+            ),
+            &[&count, &indexer.settings.new_mail_days],
+        )
+        .await?;
+    let mut new_mail = Vec::new();
+    let mut backfill = Vec::new();
+    for row in rows {
+        let head: (Option<DateTime<Utc>>, i64) = (row.get(2), row.get(0));
+        if row.get(1) {
+            new_mail.push(head);
+        } else {
+            backfill.push(head);
+        }
+    }
+    // A UNION ALL promises no order: new mail oldest first, the backfill
+    // newest first and undated last.
+    new_mail.sort();
+    backfill.sort_by(|a, b| b.cmp(a));
+    Ok(indexer.lanes.pick(
+        count as usize,
+        indexer.settings.new_mail_share,
+        new_mail.into_iter().map(|(_, id)| id).collect(),
+        backfill.into_iter().map(|(_, id)| id).collect(),
+    ))
+}
+
 async fn lease(client: &impl GenericClient, token: &str) -> Result<Lease> {
     let token = lease_token(token)?;
     if let Some(row) = client
@@ -362,45 +413,44 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
     let tx = client.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('pghacker.extraction_leases'))")
         .await?;
-    let free = "NOT EXISTS (SELECT FROM extraction_leases l
-                            WHERE t.id = ANY (l.thread_ids) AND l.released_at IS NULL AND l.expires_at > now())";
-    let ids: Vec<i64> = match &args.thread_ids {
+    let picked: Vec<(i64, Lane)> = match &args.thread_ids {
         Some(ids) if !ids.is_empty() => tx
             .query(
                 &format!(
-                    "SELECT t.id FROM threads t WHERE t.id = ANY ($1) AND {free} ORDER BY t.id"
+                    "SELECT t.id FROM threads t WHERE t.id = ANY ($1) AND {FREE} ORDER BY t.id"
                 ),
                 &[ids],
             )
             .await?
             .iter()
-            .map(|row| row.get(0))
+            .map(|row| (row.get(0), Lane::Requested))
             .collect(),
-        _ => tx
-            .query(
-                &format!(
-                    "SELECT t.id FROM threads t
-                     WHERE (t.extraction_state = 'pending'
-                            OR (t.extraction_state IN ('extracted', 'skipped')
-                                AND t.extracted_version < t.content_version))
-                       AND t.message_count > 0 AND {free}
-                     ORDER BY (t.extraction_state = 'pending') DESC, t.message_count DESC, t.id
-                     LIMIT $1"
-                ),
-                &[&count],
-            )
-            .await?
-            .iter()
-            .map(|row| row.get(0))
-            .collect(),
+        _ => match indexer.settings.extraction_order {
+            Order::Lanes => lane_heads(indexer, &*tx, count).await?,
+            Order::Largest => tx
+                .query(
+                    &format!(
+                        "SELECT t.id FROM threads t WHERE {NEEDS_EXTRACTION} AND {FREE}
+                         ORDER BY (t.extraction_state = 'pending') DESC, t.message_count DESC, t.id
+                         LIMIT $1"
+                    ),
+                    &[&count],
+                )
+                .await?
+                .iter()
+                .map(|row| (row.get(0), Lane::Largest))
+                .collect(),
+        },
     };
+    let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
     if ids.is_empty() {
         tx.commit().await?;
         return Ok(json!({
             "lease_token": null,
             "threads": [],
             "done": true,
-            "message": "No threads need extraction now. Check ingest_status: retrieval may still be running.",
+            "message": "No threads need extraction now, or other sessions hold them. Check ingest_status: \
+                        retrieval may still be running.",
         }));
     }
     let token = Uuid::new_v4();
@@ -414,8 +464,10 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
         .get(0);
     tx.commit().await?;
     let mut threads = Vec::new();
-    for id in &ids {
-        threads.push(thread_overview(&**client, *id).await?);
+    for (id, lane) in &picked {
+        let mut overview = thread_overview(&**client, *id).await?;
+        overview["lane"] = json!(lane.as_str());
+        threads.push(overview);
     }
     Ok(json!({
         "lease_token": token.to_string(),

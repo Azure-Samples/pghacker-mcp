@@ -87,6 +87,11 @@ merge true duplicates." Report its merges.
 A followed list's new mail arrives with the hourly refresh of its current
 month. A thread whose content changes after it was extracted or skipped shows
 up in `threads_changed_since_extraction`, and extraction leases it again.
+Extraction takes threads from two lanes (`ingest_status.extraction.lanes`):
+new mail, the threads with a message from the last days, as it arrives; and
+the backfill, every other thread, from the newest back. When you report
+progress, give the backfill's `newest_activity_at`: every message after it has
+been read, except in new mail.
 
 ## Reporting
 

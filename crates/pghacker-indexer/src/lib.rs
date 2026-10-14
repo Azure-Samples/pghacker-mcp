@@ -12,6 +12,7 @@ pub mod extraction;
 pub mod graph;
 pub mod history;
 pub mod jobs;
+pub mod lanes;
 pub mod repair;
 pub mod settings;
 pub mod slices;
@@ -29,6 +30,7 @@ use pghacker_core::embed::Embedder;
 use pghacker_mail::{ArchiveClient, ArchiveConfig};
 use tokio::sync::Semaphore;
 
+use crate::lanes::Lanes;
 use crate::settings::Settings;
 use crate::slices::Slices;
 
@@ -49,6 +51,8 @@ pub struct Indexer {
     pub tools: CallPool,
     /// Room for find_duplicates calls ([`FIND_DUPLICATES_AT_ONCE`]).
     pub find_duplicates: Arc<Semaphore>,
+    /// The extraction lanes' share of the threads leased.
+    pub lanes: Arc<Lanes>,
     pub settings: Arc<Settings>,
     pub slices: Arc<Slices>,
     pub embedder: Option<Embedder>,
@@ -84,6 +88,7 @@ impl Indexer {
             pool,
             tools,
             find_duplicates: Arc::new(Semaphore::new(FIND_DUPLICATES_AT_ONCE)),
+            lanes: Arc::new(Lanes::default()),
             settings: Arc::new(settings),
             slices: Arc::new(slices),
             embedder,

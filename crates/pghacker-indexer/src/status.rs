@@ -1,12 +1,16 @@
 //! `ingest_status`: what each source has retrieved, parsed, embedded and
-//! extracted, and the graph's size. Months are summarized per list, with the
-//! unfinished and latest ones in detail: a whole archive has hundreds.
+//! extracted, the extraction lanes, and the graph's size. Months are
+//! summarized per list, with the unfinished and latest ones in detail: a
+//! whole archive has hundreds.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
+use tokio_postgres::GenericClient;
 
 use crate::Indexer;
 use crate::jobs::kind;
+use crate::lanes::NEEDS_EXTRACTION;
 
 /// The months detailed: unfinished first, then the latest.
 const MONTHS_LISTED: i64 = 24;
@@ -157,6 +161,7 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
         .get(0);
     graph["nodes"] = graph_counts.get(0);
     graph["edges"] = graph_counts.get(1);
+    let lanes = lanes(indexer, &**client).await?;
     let chunks: i64 = counts.get(4);
     let embedded: i64 = counts.get(5);
     Ok(json!({
@@ -187,8 +192,60 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
             "decisions": counts.get::<_, i64>(12),
             "positions": counts.get::<_, i64>(13),
             "citations": counts.get::<_, i64>(14),
+            "lanes": lanes,
         },
         "code": { "history": crate::history::summary(&**client).await? },
         "graph": graph,
+    }))
+}
+
+/// The extraction lanes: the threads each holds that need extraction, those
+/// leased now among them, and their messages; how old new mail's oldest
+/// activity is, and how far back the backfill has read: every message after
+/// its newest activity has been read, except in new mail. Leased threads
+/// count, so that the backfill's frontier never passes work in flight.
+async fn lanes(indexer: &Indexer, client: &impl GenericClient) -> Result<Value> {
+    let row = client
+        .query_one(
+            &format!(
+                "WITH leased AS (
+                     SELECT DISTINCT unnest(thread_ids) AS id FROM extraction_leases
+                     WHERE released_at IS NULL AND expires_at > now()
+                 ), waiting AS (
+                     SELECT t.message_count, t.last_at, coalesce({new_mail}, false) AS new_mail,
+                            t.id IN (SELECT id FROM leased) AS leased
+                     FROM threads t WHERE {NEEDS_EXTRACTION}
+                 )
+                 SELECT count(*) FILTER (WHERE new_mail), count(*) FILTER (WHERE new_mail AND leased),
+                        coalesce(sum(message_count) FILTER (WHERE new_mail), 0),
+                        min(last_at) FILTER (WHERE new_mail),
+                        count(*) FILTER (WHERE NOT new_mail), count(*) FILTER (WHERE NOT new_mail AND leased),
+                        coalesce(sum(message_count) FILTER (WHERE NOT new_mail), 0),
+                        max(last_at) FILTER (WHERE NOT new_mail)
+                 FROM waiting",
+                new_mail = crate::lanes::new_mail("$1"),
+            ),
+            &[&indexer.settings.new_mail_days],
+        )
+        .await?;
+    let (new_mail_since_start, backfill_since_start) = indexer.lanes.leased();
+    Ok(json!({
+        "order": indexer.settings.extraction_order.as_str(),
+        "new_mail": {
+            "days": indexer.settings.new_mail_days,
+            "share": indexer.settings.new_mail_share,
+            "threads": row.get::<_, i64>(0),
+            "leased": row.get::<_, i64>(1),
+            "messages": row.get::<_, i64>(2),
+            "oldest_activity_at": row.get::<_, Option<DateTime<Utc>>>(3),
+            "leased_since_start": new_mail_since_start,
+        },
+        "backfill": {
+            "threads": row.get::<_, i64>(4),
+            "leased": row.get::<_, i64>(5),
+            "messages": row.get::<_, i64>(6),
+            "newest_activity_at": row.get::<_, Option<DateTime<Utc>>>(7),
+            "leased_since_start": backfill_since_start,
+        },
     }))
 }

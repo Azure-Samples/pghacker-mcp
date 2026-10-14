@@ -240,6 +240,35 @@ export function codeHistoryEnvironment(config, inherited = process.env) {
   return { PGHACKER_CODE_HISTORY: schema };
 }
 
+const EXTRACTION_SETTINGS = {
+  PGHACKER_EXTRACTION_ORDER: (v) => ["lanes", "largest"].includes(v) || "must be lanes or largest",
+  PGHACKER_EXTRACTION_NEW_MAIL_SHARE: (v) => (Number(v) > 0 && Number(v) <= 1) || "must be a number above 0, up to 1",
+  PGHACKER_EXTRACTION_NEW_MAIL_DAYS: (v) => (/^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 3650) ||
+    "must be a whole number of days from 1 to 3650",
+};
+
+/**
+ * The extraction order's settings for the indexer, each from the first of
+ * `sources` that sets it (.env, then the shell; the container's environment
+ * in Azure): PGHACKER_EXTRACTION_ORDER, lanes or largest (the order before
+ * the lanes); PGHACKER_EXTRACTION_NEW_MAIL_SHARE, new mail's share of the
+ * threads leased while the backfill has threads too; and
+ * PGHACKER_EXTRACTION_NEW_MAIL_DAYS, how recent a thread's latest message
+ * must be for the thread to be new mail. Unset, the indexer's defaults
+ * apply: lanes, 0.5 and 7.
+ */
+export function extractionEnvironment(...sources) {
+  const environment = {};
+  for (const [name, check] of Object.entries(EXTRACTION_SETTINGS)) {
+    const value = sources.map((source) => String(source?.[name] ?? "").trim()).find((v) => v !== "");
+    if (value === undefined) continue;
+    const verdict = check(value);
+    if (verdict !== true) throw new Error(`${name} ${verdict}.`);
+    environment[name] = value;
+  }
+  return environment;
+}
+
 /**
  * The environments of the Rust services, each with only what it needs:
  * bootstrap gets the administrator's URL; the indexer pgh_indexer's; pghacker-mcp pgh_reader's.
@@ -253,6 +282,7 @@ export function serviceEnvironments(config, inherited = process.env) {
   const readerUrl = roleDatabaseUrl(config, "pgh_reader", config.values.PGH_READER_PASSWORD);
   const embed = embedEnvironment(config, inherited);
   const history = codeHistoryEnvironment(config, inherited);
+  const extraction = extractionEnvironment(config.values, inherited);
   const runtime = (name) => path.join(config.runtimeDir, name);
   return {
     bootstrap: {
@@ -266,6 +296,7 @@ export function serviceEnvironments(config, inherited = process.env) {
       ...base,
       ...embed,
       ...history,
+      ...extraction,
       PGHACKER_INDEXER_DATABASE_URL: indexerUrl,
       PGHACKER_INDEXER_ADDR: `${LOCAL_HOST}:${config.indexerPort}`,
       PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),

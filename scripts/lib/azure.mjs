@@ -8,7 +8,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { APP_ROOT } from "./config.mjs";
+import { APP_ROOT, extractionEnvironment } from "./config.mjs";
 import { PLACEHOLDER_KEY } from "./foundry.mjs";
 
 export const DATA_DIR = "/var/lib/pghacker";
@@ -147,6 +147,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     },
     // The schema whose commit history the code tools read; unset, pghacker.
     code: { history },
+    // The extraction order's settings for the indexer; unset, its defaults.
+    extraction: extractionEnvironment(env),
     github: {
       ...github,
       clientId: env.OAUTH2_PROXY_CLIENT_ID,
@@ -278,6 +280,7 @@ export function processEnvironments(config) {
       ...rust,
       ...embed,
       ...history,
+      ...config.extraction,
       PGHACKER_INDEXER_DATABASE_URL: urls.indexer,
       PGHACKER_INDEXER_ADDR: `127.0.0.1:${PORTS.indexer}`,
       PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),

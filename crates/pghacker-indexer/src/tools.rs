@@ -70,16 +70,20 @@ pub static TOOLS: &[ToolSpec] = &[
         name: "ingest_status",
         description: "Reports progress: jobs by kind with recent errors; months and seed threads retrieved; \
             messages, threads, authors, patches and anchors parsed; chunks embedded; threads extracted, pending \
-            and skipped; features, decisions, positions and citations; the commit history; graph vertices and edges.",
+            and skipped, and the extraction lanes (new mail and the backfill: threads waiting and leased, and how \
+            far back the backfill has read); features, decisions, positions and citations; the commit history; \
+            graph vertices and edges.",
         effect: READ,
         schema: schema::<NoArgs>,
     },
     ToolSpec {
         name: "next_extraction_batch",
-        description: "Leases 1-3 threads that need extraction (or the thread_ids given) and returns each with its \
-            participants (author_id, name), extracts already linked to it, and the first page of messages: \
-            Message-ID, author, date, text without quoted replies, patches (files changed) and anchors. Long \
-            threads have next_offset: page on with read_messages. Returns done=true when nothing is pending.",
+        description: "Leases 1-3 threads that need extraction (or the thread_ids given) from two lanes: new mail, \
+            the threads with messages from the last days, oldest first; and the backfill, every other thread, \
+            from the newest back. Returns each thread with its lane, participants (author_id, name), extracts \
+            already linked to it, and the first page of messages: Message-ID, author, date, text without quoted \
+            replies, patches (files changed) and anchors. Long threads have next_offset: page on with \
+            read_messages. Returns done=true when no thread that needs extraction is free.",
         effect: CREATE,
         schema: schema::<NextBatchArgs>,
     },

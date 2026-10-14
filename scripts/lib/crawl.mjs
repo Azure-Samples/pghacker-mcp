@@ -65,6 +65,22 @@ export function isRateLimited(error) {
   return /\b429\b|rate.?limit|too many requests/i.test(String(error?.message ?? error ?? ""));
 }
 
+/**
+ * The extraction lanes (ingest_status's extraction.lanes) in a line: each
+ * lane's threads, how many are leased, new mail's oldest activity and the
+ * backfill's newest (how far back it has read), and the threads each has
+ * leased since the indexer started. Empty when the indexer reports no lanes.
+ */
+export function lanesLine(lanes) {
+  if (!lanes?.new_mail || !lanes?.backfill) return "";
+  const minute = (at) => (at ? String(at).slice(0, 16).replace("T", " ") : "none");
+  const { new_mail: mail, backfill } = lanes;
+  return `new mail ${mail.threads} threads (${mail.leased} leased, oldest activity ${minute(mail.oldest_activity_at)}), ` +
+    `backfill ${backfill.threads} threads (${backfill.leased} leased, newest activity ` +
+    `${minute(backfill.newest_activity_at)}), leased since start ${mail.leased_since_start} new mail and ` +
+    `${backfill.leased_since_start} backfill`;
+}
+
 /** Retry-After from response headers, in milliseconds (retry-after-ms first). */
 export function retryAfterMs(headers) {
   const ms = Number(headers.get("retry-after-ms"));
@@ -125,7 +141,8 @@ export async function runSession(client, agent, task, { model, title, timeoutMs,
  * Foundry once a minute, and starts extraction sessions of `perSession`
  * threads while the concurrency limit and memory allow; starts a
  * deduplication session after `dedupEvery` newly extracted threads, or when
- * the backlog empties. Runs until `signal` aborts.
+ * the backlog empties; and logs the backlog and its lanes every
+ * `reportEveryMs`. Runs until `signal` aborts.
  */
 export async function watch({
   status,
@@ -141,7 +158,7 @@ export async function watch({
 }) {
   const {
     start = 8, max = 16, perSession = 8, tickMs = 30_000, probeEveryMs = 60_000, increaseEveryMs = 60_000,
-    dedupEvery = 100, memoryHold = 0.85, memoryShed = 0.92,
+    dedupEvery = 100, memoryHold = 0.85, memoryShed = 0.92, reportEveryMs = 10 * 60_000,
   } = options;
   const control = new Concurrency({ start, max, increaseEveryMs, now: now() });
   let running = 0;
@@ -150,6 +167,7 @@ export async function watch({
   let failures = 0;
   let pauseUntil = 0;
   let lastProbe = -Infinity;
+  let lastReport = -Infinity;
   let deduplicating = null;
   let extractedAtDedup = null;
   const sessions = new Set();
@@ -166,6 +184,11 @@ export async function watch({
     }
     const pending = backlog.threads_pending + backlog.threads_changed_since_extraction;
     const at = now();
+    if (at - lastReport >= reportEveryMs) {
+      lastReport = at;
+      const lanes = lanesLine(backlog.lanes);
+      log(`Backlog: ${pending} threads, ${running} sessions running${lanes ? `; ${lanes}` : ""}.`);
+    }
     if (probe && at - lastProbe >= probeEveryMs) {
       lastProbe = at;
       try {

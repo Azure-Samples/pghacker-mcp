@@ -77,6 +77,7 @@ not make the full graph sync incremental or establish its total runtime.
 | `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
 | `PGHACKER_AGENT_MCP_URL` | Another pghacker-mcp for the local agents, such as a deployment's public `/mcp`, to evaluate it. |
 | `PGHACKER_CODE_HISTORY` | The schema whose commit history the code tools read, such as a build's before it is installed. Unset, `pghacker`, where `history build --install` puts it. |
+| `PGHACKER_EXTRACTION_ORDER`, `PGHACKER_EXTRACTION_NEW_MAIL_SHARE`, `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` | [The order of extraction](#the-order-of-extraction): `lanes` (the default) or `largest`; new mail's share of the threads leased (0.5) and its window in days (7). |
 
 `config/test-slices.toml` chooses the months and seed threads that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months, threads or commit instead, and `follow` keeps a list current (deploy/README.md).
 
@@ -204,6 +205,26 @@ and the commits whose back-patch group a regroup changes. An install asks for
 a full sync. Each batch also checks the history's author names, so that
 `COMMITTED` follows the authors' merges and renames. Without a history, nothing
 more is projected.
+
+### The order of extraction
+
+`next_extraction_batch` leases threads from two lanes. A thread needs
+extraction when extraction never read it, or read or skipped it before its
+latest messages came. Those whose latest message is from the last 7 days are
+**new mail**, leased oldest first, as mail arrives. All the others are the
+**backfill**, leased from the newest back to the archive's start, so the
+extracted months fill in from the present backward. While both lanes have
+threads, new mail gets at most half of the threads leased, and a lane without
+threads leaves the other every one. A thread whose mail changes after
+extraction keeps its place in time.
+
+`ingest_status` shows both lanes (`extraction.lanes`): the threads waiting and
+leased, new mail's oldest activity, and the backfill's newest, after which
+every message has been read except in new mail.
+`PGHACKER_EXTRACTION_NEW_MAIL_DAYS` (7) and
+`PGHACKER_EXTRACTION_NEW_MAIL_SHARE` (0.5) set the window and the share.
+`PGHACKER_EXTRACTION_ORDER=largest` brings back the order before the lanes:
+the threads never extracted first, the largest first.
 
 ### How duplicates are found
 
