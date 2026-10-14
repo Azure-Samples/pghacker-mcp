@@ -22,6 +22,7 @@ pub mod ingest;
 pub mod mbox;
 pub mod parse;
 pub mod patch;
+pub mod patch_lines;
 pub mod store;
 pub mod subject;
 

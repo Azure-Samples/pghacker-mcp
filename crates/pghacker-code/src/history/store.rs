@@ -54,11 +54,12 @@ pub fn readable_schema(name: &str) -> Result<&str> {
 }
 
 /// The history's tables, from migration 0011.
-pub const TABLES: [&str; 8] = [
+pub const TABLES: [&str; 9] = [
     "code_history",
     "code_lanes",
     "code_commits",
     "code_commit_files",
+    "code_commit_threads",
     "code_refs",
     "code_lineages",
     "code_file_versions",
@@ -293,6 +294,7 @@ pub struct Stored {
     pub commit_files: u64,
     /// Commits in back-patch groups.
     pub backpatched: u64,
+    pub links: super::links::Linked,
     pub lanes: u64,
     pub refs: u64,
     pub lineages: u64,

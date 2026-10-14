@@ -15,6 +15,7 @@ use tokio_postgres::GenericClient;
 use crate::diff::{Side, WeaveLine, hunks};
 use crate::glob::RgGlob;
 use crate::history::{alive_at, checked};
+use pghacker_core::text::discussion_message_id;
 
 /// The most diff lines a call returns.
 pub const MAX_DIFF_LINES: usize = 3_000;
@@ -53,11 +54,15 @@ pub struct FirstRelease {
     pub date: String,
 }
 
-/// A thread a Discussion trailer names.
+/// A pgsql-hackers thread linked to a commit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ThreadLink {
+    /// "trailer": a Discussion trailer names it; "anchor": it cites the
+    /// commit.
+    pub via: String,
+    /// The message named, or the first citing the commit.
     pub message_id: String,
-    /// The thread when the mail archive has the message.
+    /// The thread, when the mail archive has the message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,49 +144,6 @@ impl PathFilter {
                 }
             })
     }
-}
-
-/// The Message-ID a Discussion value names: a postgr.es/m or
-/// postgresql.org/message-id link, or `<id>`.
-pub fn message_id(value: &str) -> Option<String> {
-    let v = value
-        .trim()
-        .trim_start_matches('<')
-        .trim_end_matches(['>', '.', ',', ';']);
-    let rest = [
-        "postgr.es/m/",
-        "postgresql.org/message-id/flat/",
-        "postgresql.org/message-id/",
-    ]
-    .iter()
-    .find_map(|p| v.find(p).map(|i| &v[i + p.len()..]));
-    let id = match rest {
-        Some(rest) => rest.split(['/', '?', '#']).next().unwrap_or(""),
-        None if v.contains('@') && !v.contains('/') => v,
-        None => return None,
-    };
-    let id = percent_decode(id);
-    (id.contains('@') && !id.is_empty()).then_some(id)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = |b: u8| (b as char).to_digit(16);
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
-        {
-            out.push((h * 16 + l) as u8);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 const DATE: &str = "to_char(c.committed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')";
@@ -300,39 +262,47 @@ pub async fn get_commit(
         }
     }
 
+    // Linked threads; the mail tables may be absent where only code is
+    // loaded.
+    let sha: String = row.get(0);
     let mut threads: Vec<ThreadLink> = Vec::new();
+    if let Ok(rows) = client
+        .query(
+            &format!(
+                "SELECT DISTINCT ON (t.thread_id, t.via) t.via, m.message_id, t.thread_id, \
+                        th.subject \
+                 FROM {s}.code_commit_threads t \
+                 JOIN messages m ON m.id = t.message_id JOIN threads th ON th.id = t.thread_id \
+                 WHERE t.sha = $1 ORDER BY t.thread_id, t.via, m.sent_at"
+            ),
+            &[&sha],
+        )
+        .await
+    {
+        for r in rows {
+            threads.push(ThreadLink {
+                via: r.get(0),
+                message_id: r.get(1),
+                thread_id: Some(r.get(2)),
+                subject: Some(r.get(3)),
+            });
+        }
+    }
+    threads.sort_by_key(|t| (t.via != "trailer", t.thread_id));
+    // Discussion messages the archive lacks.
     for id in trailers
         .get("Discussion")
         .into_iter()
         .flatten()
-        .filter_map(|v| message_id(v))
+        .filter_map(|v| discussion_message_id(v))
     {
         if !threads.iter().any(|t| t.message_id == id) {
             threads.push(ThreadLink {
+                via: "trailer".into(),
                 message_id: id,
                 thread_id: None,
                 subject: None,
             });
-        }
-    }
-    if !threads.is_empty() {
-        let ids: Vec<&str> = threads.iter().map(|t| t.message_id.as_str()).collect();
-        // The mail tables may be absent where only code is loaded.
-        if let Ok(rows) = client
-            .query(
-                "SELECT m.message_id, t.id, t.subject FROM messages m \
-                 JOIN threads t ON t.id = m.thread_id WHERE m.message_id = ANY($1)",
-                &[&ids],
-            )
-            .await
-        {
-            for r in rows {
-                let id: &str = r.get(0);
-                if let Some(t) = threads.iter_mut().find(|t| t.message_id == id) {
-                    t.thread_id = Some(r.get(1));
-                    t.subject = Some(r.get(2));
-                }
-            }
         }
     }
 
@@ -358,7 +328,7 @@ pub async fn get_commit(
         .collect();
     let mut result = CommitResult {
         repo: repo.to_owned(),
-        sha: row.get(0),
+        sha,
         parent,
         branch: row.get(1),
         author: row.get(2),
@@ -520,23 +490,6 @@ pub async fn get_commit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn discussion_links_name_messages() {
-        assert_eq!(
-            message_id("https://postgr.es/m/CAH2-Wz=4CJK9@mail.gmail.com").as_deref(),
-            Some("CAH2-Wz=4CJK9@mail.gmail.com")
-        );
-        assert_eq!(
-            message_id("https://www.postgresql.org/message-id/flat/abc%40example.org").as_deref(),
-            Some("abc@example.org")
-        );
-        assert_eq!(
-            message_id("<20190101.123@example.org>").as_deref(),
-            Some("20190101.123@example.org")
-        );
-        assert_eq!(message_id("https://example.org/thread"), None);
-    }
 
     #[test]
     fn path_filters() {

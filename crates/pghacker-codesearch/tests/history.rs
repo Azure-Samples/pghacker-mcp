@@ -1420,3 +1420,205 @@ async fn search_commits_agrees_with_git_log() {
         ]
     );
 }
+
+#[tokio::test]
+async fn search_patches_finds_lines_by_thread() {
+    use pghacker_codesearch::{SearchPatchesArgs, search_patches};
+    let diff = |path: &str, lines: &str| {
+        format!(
+            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,2 +1,{} @@\n int\n x(void)\n{lines}",
+            2 + lines.lines().filter(|l| l.starts_with('+')).count()
+                - lines.lines().filter(|l| l.starts_with('-')).count()
+        )
+    };
+    let v1 = diff("src/a.c", "+\tfoo_bar(1);\n");
+    let v2 = diff("src/a.c", "+\tfoo_bar(1);\n+\tfoo_bar(2);\n");
+    let removal = "diff --git a/src/b.c b/src/b.c\n--- a/src/b.c\n+++ b/src/b.c\n@@ -1,2 +1,1 @@\n int\n-\tfoo_bar(1);\n";
+
+    // The commit that landed thread 1's patch names its first message.
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, 0, &["init", "-q", "-b", "master"]);
+    std::fs::create_dir_all(d.join("src")).unwrap();
+    std::fs::write(d.join("src/a.c"), "int\nx(void)\n").unwrap();
+    git(d, 1, &["add", "-A"]);
+    git(d, 1, &["commit", "-q", "-m", "base"]);
+    std::fs::write(
+        d.join("src/a.c"),
+        "int\nx(void)\n\tfoo_bar(1);\n\tfoo_bar(2);\n",
+    )
+    .unwrap();
+    git(d, 2, &["add", "-A"]);
+    git(
+        d,
+        2,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "Add foo_bar calls\n\nDiscussion: https://postgr.es/m/v1@example.org",
+        ],
+    );
+    let landed_sha = git(d, 2, &["rev-parse", "HEAD"]);
+
+    let db = TestDb::create().await.unwrap();
+    let mut admin = db.admin().await.unwrap();
+    let insert_patch = |id: i64, message: i64, content: &str, path: &str| {
+        format!(
+            "INSERT INTO pghacker.patches (id, message_id, filename, series_version, paths, content) \
+             VALUES ({id}, {message}, 'v{id}-0001-x.patch', {id}, ARRAY['{path}'], $${content}$$);"
+        )
+    };
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO pghacker.threads (id, list, root_message_id, subject) VALUES
+                 (1, 'pgsql-hackers', 'v1@example.org', 'Add foo_bar'),
+                 (2, 'pgsql-hackers', 'rm@example.org', 'Remove foo_bar');
+             INSERT INTO pghacker.messages (id, message_id, list, thread_id, sent_at, from_name) VALUES
+                 (10, 'v1@example.org', 'pgsql-hackers', 1, '2025-01-01', 'Ann Lee'),
+                 (11, 'v2@example.org', 'pgsql-hackers', 1, '2025-02-01', 'Ann Lee'),
+                 (20, 'rm@example.org', 'pgsql-hackers', 2, '2025-03-01', 'Bob Ray');
+             {}{}{}",
+            insert_patch(1, 10, &v1, "src/a.c"),
+            insert_patch(2, 11, &v2, "src/a.c"),
+            insert_patch(3, 20, removal, "src/b.c"),
+        ))
+        .await
+        .unwrap();
+    let indexed = pghacker_mail::patch_lines::index(&mut admin, 100)
+        .await
+        .unwrap();
+    assert_eq!((indexed.patches, indexed.more), (3, false));
+    assert_eq!(
+        pghacker_mail::patch_lines::index(&mut admin, 100)
+            .await
+            .unwrap()
+            .patches,
+        0
+    );
+    // "\tfoo_bar(1);" is one text for all its '+' lines.
+    assert_eq!(
+        admin
+            .query_one(
+                "SELECT count(*) FROM pghacker.patch_texts WHERE line = E'\\tfoo_bar(1);'",
+                &[]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        2
+    );
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: d.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let reader = db.reader().await.unwrap();
+    let run = |args: Value, history: bool| {
+        let reader = &reader;
+        async move {
+            let args: SearchPatchesArgs = serde_json::from_value(args).unwrap();
+            search_patches(reader, history.then_some(SCHEMA), &args)
+                .await
+                .unwrap()
+        }
+    };
+    let found = run(json!({"query": "foo_bar(1)"}), true).await;
+    type Summary = (
+        i64,
+        usize,
+        String,
+        String,
+        Vec<(Option<String>, String, String)>,
+    );
+    let summary: Vec<Summary> = found
+        .threads
+        .iter()
+        .map(|t| {
+            (
+                t.thread_id,
+                t.patches,
+                t.first.message_id.clone(),
+                t.latest.message_id.clone(),
+                t.lines
+                    .iter()
+                    .map(|l| (l.path.clone(), l.sign.clone(), l.text.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                2,
+                1,
+                "rm@example.org".to_owned(),
+                "rm@example.org".to_owned(),
+                vec![(
+                    Some("src/b.c".to_owned()),
+                    "-".to_owned(),
+                    "\tfoo_bar(1);".to_owned()
+                )]
+            ),
+            (
+                1,
+                2,
+                "v1@example.org".to_owned(),
+                "v2@example.org".to_owned(),
+                vec![(
+                    Some("src/a.c".to_owned()),
+                    "+".to_owned(),
+                    "\tfoo_bar(1);".to_owned()
+                )]
+            ),
+        ]
+    );
+    assert_eq!(found.threads[1].lines[0].line, 7);
+    let landed: Vec<&str> = found.threads[1]
+        .landed
+        .iter()
+        .map(|c| c.sha.as_str())
+        .collect();
+    assert_eq!(landed, [landed_sha.as_str()]);
+    assert!(found.threads[0].landed.is_empty());
+    // Filters.
+    let added = run(json!({"query": "foo_bar", "lines": "added"}), false).await;
+    assert_eq!(
+        added
+            .threads
+            .iter()
+            .map(|t| t.thread_id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    assert!(added.threads[0].landed.is_empty());
+    let paths = run(json!({"query": "foo_bar", "paths": ["src/b.c"]}), false).await;
+    assert_eq!(
+        paths
+            .threads
+            .iter()
+            .map(|t| t.thread_id)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    let by = run(
+        json!({"query": "FOO_BAR", "match": "identifier", "author": "ann"}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        by.threads.iter().map(|t| t.thread_id).collect::<Vec<_>>(),
+        [1]
+    );
+    assert!(!by.incomplete);
+}

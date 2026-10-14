@@ -6,6 +6,51 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+/// The Message-ID a commit's Discussion trailer names, as messages store it
+/// (no angle brackets): a postgr.es/m or postgresql.org/message-id link, or
+/// `<id>`.
+pub fn discussion_message_id(value: &str) -> Option<String> {
+    let v = value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches(['>', '.', ',', ';']);
+    let rest = [
+        "postgr.es/m/",
+        "postgresql.org/message-id/flat/",
+        "postgresql.org/message-id/",
+    ]
+    .iter()
+    .find_map(|p| v.find(p).map(|i| &v[i + p.len()..]));
+    let id = match rest {
+        Some(rest) => rest.split(['/', '?', '#']).next().unwrap_or(""),
+        None if v.contains('@') && !v.contains('/') => v,
+        None => return None,
+    };
+    let id = percent_decode(id);
+    let id = id.trim_start_matches('<').trim_end_matches('>');
+    (id.contains('@')).then(|| id.to_owned())
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// At most `max` characters of `text`, cut on a character boundary.
 pub fn truncate_chars(text: &str, max: usize) -> &str {
     match text.char_indices().nth(max) {
@@ -67,6 +112,24 @@ pub fn redact_emails(text: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discussion_links_name_messages() {
+        assert_eq!(
+            discussion_message_id("https://postgr.es/m/CAH2-Wz=4CJK9@mail.gmail.com").as_deref(),
+            Some("CAH2-Wz=4CJK9@mail.gmail.com")
+        );
+        assert_eq!(
+            discussion_message_id("https://www.postgresql.org/message-id/flat/abc%40example.org")
+                .as_deref(),
+            Some("abc@example.org")
+        );
+        assert_eq!(
+            discussion_message_id("<20190101.123@example.org>").as_deref(),
+            Some("20190101.123@example.org")
+        );
+        assert_eq!(discussion_message_id("https://example.org/thread"), None);
+    }
 
     #[test]
     fn truncates_on_char_boundaries() {

@@ -22,7 +22,7 @@ const READ: Effect = Effect::Read;
 pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and code with \
 citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
 (search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full text, \
-semantic search or both. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
+semantic search or both; search_patches finds lines in the patches posted, by thread. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
 read-only SQL and Cypher. Code: search (first-class code search), grep (grep command lines), read_file and \
 list_files over the PostgreSQL source loaded (see list_files or get_ontology). Cite Message-IDs and file paths \
 with line numbers in answers.";
@@ -99,6 +99,12 @@ pub static TOOLS: &[ToolSpec] = &[
         description: code::LIST_FILES_DESCRIPTION,
         effect: READ,
         schema: schema::<code::ListFilesArgs>,
+    },
+    ToolSpec {
+        name: "search_patches",
+        description: code::SEARCH_PATCHES_DESCRIPTION,
+        effect: READ,
+        schema: schema::<code::SearchPatchesArgs>,
     },
     // Tools that read the commit history, last: served only with it.
     ToolSpec {
@@ -197,6 +203,12 @@ impl Server {
                         .and_then(|result| Ok(serde_json::to_value(result)?)),
                     Err(error) => Err(error),
                 }
+            }
+            "search_patches" => {
+                let args: code::SearchPatchesArgs = parse(name, arguments)?;
+                code::search_patches(client, code::history::schema_from_env(), &args)
+                    .await
+                    .and_then(|result| Ok(serde_json::to_value(result)?))
             }
             "search_commits" if served().iter().any(|t| t.name == name) => {
                 let args: code::SearchCommitsArgs = parse(name, arguments)?;

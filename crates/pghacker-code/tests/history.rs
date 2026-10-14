@@ -865,3 +865,55 @@ async fn renames_in_large_moves_are_followed() {
     assert_eq!(stats.walk.renames, 60);
     assert_eq!(stats.stored.lineages, 60);
 }
+
+#[tokio::test]
+async fn commits_link_to_the_threads_that_discussed_them() {
+    let mut r = Repo::new();
+    r.write("a.c", b"x\n");
+    r.commit("First\n\nDiscussion: https://postgr.es/m/disc%40example.org");
+    r.write("a.c", b"y\n");
+    let second = r.commit("Second");
+    let first = r.commits[0].clone();
+    let db = TestDb::create().await.unwrap();
+    let admin = db.admin().await.unwrap();
+    // The commits are from 2026-01-01; a message from 2020 can't cite them.
+    admin
+        .batch_execute(&format!(
+            "INSERT INTO pghacker.threads (id, list, root_message_id, subject) VALUES
+                 (1, 'pgsql-hackers', 'disc@example.org', 'Fix x'),
+                 (2, 'pgsql-hackers', 'cite@example.org', 'Follow-up');
+             INSERT INTO pghacker.messages (id, message_id, list, thread_id, sent_at) VALUES
+                 (10, 'disc@example.org', 'pgsql-hackers', 1, '2025-12-01'),
+                 (20, 'cite@example.org', 'pgsql-hackers', 2, '2026-02-01'),
+                 (30, 'early@example.org', 'pgsql-hackers', 2, '2020-01-01');
+             INSERT INTO pghacker.anchors (message_id, kind, value) VALUES
+                 (20, 'commit', '{}'), (30, 'commit', '{}');",
+            &second[..9],
+            &first[..9]
+        ))
+        .await
+        .unwrap();
+    let stats = build(&db, &r.path(), Vec::new()).await;
+    assert_eq!(
+        (stats.stored.links.by_trailer, stats.stored.links.by_anchor),
+        (1, 1)
+    );
+    let links: Vec<(String, i64, String)> = admin
+        .query(
+            "SELECT c.subject, t.thread_id, t.via FROM pghacker_history.code_commit_threads t \
+             JOIN pghacker_history.code_commits c ON c.sha = t.sha ORDER BY 1, 2",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        links,
+        [
+            ("First".to_owned(), 1, "trailer".to_owned()),
+            ("Second".to_owned(), 2, "anchor".to_owned())
+        ]
+    );
+}

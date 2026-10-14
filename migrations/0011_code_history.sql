@@ -101,6 +101,20 @@ CREATE TABLE code_refs (
     PRIMARY KEY (kind, name)
 );
 
+-- Commits and the pgsql-hackers threads that discussed them: the threads
+-- of the messages a commit's Discussion trailers name ('trailer'), and of
+-- messages citing the commit by SHA ('anchor'). Recomputed after each build
+-- and sync, as new mail cites old commits.
+CREATE TABLE code_commit_threads (
+    sha         text NOT NULL,
+    thread_id   bigint NOT NULL,
+    via         text NOT NULL CHECK (via IN ('trailer', 'anchor')),
+    -- The message named, or the message citing the commit.
+    message_id  bigint NOT NULL,
+    PRIMARY KEY (sha, thread_id, via, message_id)
+);
+CREATE INDEX code_commit_threads_thread ON code_commit_threads (thread_id);
+
 -- A file's identity across whole-file renames (git's 50% similarity).
 CREATE TABLE code_lineages (
     id          int4 PRIMARY KEY,

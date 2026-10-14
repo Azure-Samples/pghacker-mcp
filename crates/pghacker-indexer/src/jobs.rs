@@ -22,6 +22,7 @@ pub mod kind {
     pub const REPAIR_STATS: &str = "repair_stats";
     pub const MAIL_REFRESH: &str = "mail_refresh";
     pub const CODE_HISTORY_SYNC: &str = "code_history_sync";
+    pub const PATCH_LINES: &str = "patch_lines";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -34,10 +35,14 @@ pub const RECURRING: &[(&str, Duration)] = &[
     (kind::MAIL_REFRESH, Duration::from_secs(3600)),
     // New commits on every branch, hourly.
     (kind::CODE_HISTORY_SYNC, Duration::from_secs(3600)),
+    (kind::PATCH_LINES, Duration::from_secs(60)),
 ];
 
 /// How long a graph sync job applies batches of changes before it yields.
 const GRAPH_SYNC_BUDGET: Duration = Duration::from_secs(10);
+
+/// Patches a patch_lines run indexes.
+const PATCH_LINES_BATCH: i64 = 200;
 
 /// Attempts of an ingest job whose messages partly failed (a deadlock with a
 /// concurrent ingest, say) before it settles for what it stored.
@@ -387,6 +392,19 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             after: recurring_interval(kind::CODE_HISTORY_SYNC),
             result: crate::history::sync(indexer).await?,
         }),
+        kind::PATCH_LINES => {
+            let mut client = indexer.pool.get().await?;
+            let indexed = pghacker_mail::patch_lines::index(&mut client, PATCH_LINES_BATCH).await?;
+            let after = if indexed.more {
+                Duration::ZERO
+            } else {
+                recurring_interval(kind::PATCH_LINES)
+            };
+            Ok(Outcome::Again {
+                after,
+                result: serde_json::to_value(indexed)?,
+            })
+        }
         other => Err(anyhow!("unknown job kind {other}")),
     }
 }
@@ -419,6 +437,7 @@ async fn after_ingest(indexer: &Indexer) -> Result<()> {
         kind::RESOLVE_ANCHORS,
         kind::REPAIR_STATS,
         kind::GRAPH_SYNC,
+        kind::PATCH_LINES,
     ] {
         wake(&**client, kind).await?;
     }
@@ -464,6 +483,7 @@ const RECURRING_KINDS: &[&str] = &[
     kind::REPAIR_STATS,
     kind::MAIL_REFRESH,
     kind::CODE_HISTORY_SYNC,
+    kind::PATCH_LINES,
 ];
 
 const NOT_CODE: &[&str] = &[kind::CODE_SNAPSHOT];

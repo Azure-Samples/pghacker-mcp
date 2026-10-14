@@ -36,6 +36,7 @@ pub struct SyncStats {
     pub commits: u64,
     /// Commits in back-patch groups, after the sync.
     pub backpatched: u64,
+    pub links: super::links::Linked,
     pub new_lanes: Vec<String>,
     pub refs: u64,
     /// Lineages whose weave keys were renumbered.
@@ -394,6 +395,10 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
         ),
         &[&head, &(i32::from(stats.respread > 0))],
     ))?;
+    handle.block_on(tx.commit())?;
+    // New mail cites old commits: the links are refreshed every time.
+    let tx = handle.block_on(client.transaction())?;
+    stats.links = handle.block_on(super::links::refresh(&tx, &s))?;
     handle.block_on(tx.commit())?;
     if stats.commits > 0 {
         stats.backpatched = handle.block_on(super::backpatch::regroup(&client, &s))?;

@@ -238,17 +238,60 @@ enum Section {
     New,
 }
 
+/// What a line of a patch is: a hunk's added, removed or context line, or
+/// any other line (headers, hunk ranges, text around the diff).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LineKind {
+    Added,
+    Removed,
+    Context,
+    Other,
+}
+
+impl LineKind {
+    /// The diff prefix the kind stands for; `h` for other lines.
+    pub fn code(self) -> char {
+        match self {
+            LineKind::Added => '+',
+            LineKind::Removed => '-',
+            LineKind::Context => ' ',
+            LineKind::Other => 'h',
+        }
+    }
+}
+
+/// A line of a patch: a hunk line without its prefix, or another line whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PatchLine<'a> {
+    pub kind: LineKind,
+    pub text: &'a str,
+    /// The file it is in, an index into [`DiffStats::paths`].
+    pub file: Option<usize>,
+}
+
 /// The paths, added and removed lines and hunks of a diff, which may hold
 /// several files, git format-patch mails and context diffs.
 pub fn diff_stats(text: &str) -> DiffStats {
+    parse_diff(text).0
+}
+
+/// A diff's stats and its lines, classified: unified and context diffs,
+/// several files, and git format-patch mails.
+pub fn parse_diff(text: &str) -> (DiffStats, Vec<PatchLine<'_>>) {
     let lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<PatchLine<'_>> = Vec::with_capacity(lines.len());
     let mut stats = DiffStats::default();
-    let mut seen = HashSet::new();
-    let mut add_path = |path: Option<String>, stats: &mut DiffStats| {
-        if let Some(path) = path
-            && seen.insert(path.clone())
-        {
-            stats.paths.push(path);
+    let mut file: Option<usize> = None;
+    let add_path = |path: Option<String>, stats: &mut DiffStats, file: &mut Option<usize>| {
+        if let Some(path) = path {
+            let index = match stats.paths.iter().position(|p| *p == path) {
+                Some(index) => index,
+                None => {
+                    stats.paths.push(path);
+                    stats.paths.len() - 1
+                }
+            };
+            *file = Some(index);
         }
     };
     let mut hunk: Option<(i64, i64)> = None;
@@ -256,28 +299,37 @@ pub fn diff_stats(text: &str) -> DiffStats {
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
+        let mut push = |kind: LineKind, text, file: Option<usize>| {
+            out.push(PatchLine { kind, text, file });
+        };
         if let Some((old, new)) = &mut hunk {
             if *old > 0 || *new > 0 {
-                let consumed = match line.as_bytes().first() {
+                let kind = match line.as_bytes().first() {
                     Some(b'+') => {
                         stats.added += 1;
                         *new -= 1;
-                        true
+                        Some(LineKind::Added)
                     }
                     Some(b'-') => {
                         stats.removed += 1;
                         *old -= 1;
-                        true
+                        Some(LineKind::Removed)
                     }
                     Some(b' ') | None => {
                         *old -= 1;
                         *new -= 1;
-                        true
+                        Some(LineKind::Context)
                     }
-                    Some(b'\\') => true,
-                    _ => false,
+                    Some(b'\\') => Some(LineKind::Other),
+                    _ => None,
                 };
-                if consumed {
+                if let Some(kind) = kind {
+                    let text = if kind == LineKind::Other || line.is_empty() {
+                        line
+                    } else {
+                        &line[1..]
+                    };
+                    push(kind, text, file);
                     i += 1;
                     continue;
                 }
@@ -285,13 +337,15 @@ pub fn diff_stats(text: &str) -> DiffStats {
             hunk = None;
         }
         let next = lines.get(i + 1).copied().unwrap_or("");
+        let mut kind = LineKind::Other;
+        let mut text = line;
         if let Some(caps) = HUNK.captures(line) {
             let count = |g: usize| caps.get(g).map_or(1, |m| m.as_str().parse().unwrap_or(1));
             hunk = Some((count(2), count(4)));
             section = None;
             stats.hunks += 1;
         } else if let Some(rest) = line.strip_prefix("diff --git ") {
-            add_path(git_header_path(rest), &mut stats);
+            add_path(git_header_path(rest), &mut stats, &mut file);
             section = None;
         } else if CONTEXT_RANGE.is_match(line) {
             section = Some(if line.starts_with("***") {
@@ -303,7 +357,7 @@ pub fn diff_stats(text: &str) -> DiffStats {
             stats.hunks += 1;
             section = None;
         } else if let Some(rest) = line.strip_prefix("+++ ") {
-            add_path(normalize_path(header_path(rest)), &mut stats);
+            add_path(normalize_path(header_path(rest)), &mut stats, &mut file);
             section = None;
         } else if let Some(rest) = line.strip_prefix("--- ") {
             // A deleted file's path, or a context diff's new path.
@@ -311,34 +365,47 @@ pub fn diff_stats(text: &str) -> DiffStats {
             let context_header =
                 !next.starts_with("+++ ") && i > 0 && lines[i - 1].starts_with("*** ");
             if deleted || context_header {
-                add_path(normalize_path(header_path(rest)), &mut stats);
+                add_path(normalize_path(header_path(rest)), &mut stats, &mut file);
             }
         } else if let Some(section) = section {
+            let body = line.get(2..).unwrap_or("");
             if line.starts_with("+ ") || line == "+" {
                 stats.added += 1;
+                (kind, text) = (LineKind::Added, body);
             } else if line.starts_with("- ") || line == "-" {
                 stats.removed += 1;
+                (kind, text) = (LineKind::Removed, body);
             } else if line.starts_with("! ") || line == "!" {
                 match section {
-                    Section::Old => stats.removed += 1,
-                    Section::New => stats.added += 1,
+                    Section::Old => {
+                        stats.removed += 1;
+                        kind = LineKind::Removed;
+                    }
+                    Section::New => {
+                        stats.added += 1;
+                        kind = LineKind::Added;
+                    }
                 }
+                text = body;
+            } else if line.starts_with("  ") {
+                (kind, text) = (LineKind::Context, body);
             }
         } else if let Some(rest) = line.strip_prefix("Index: ") {
-            add_path(normalize_path(rest.trim()), &mut stats);
+            add_path(normalize_path(rest.trim()), &mut stats, &mut file);
         } else if let Some(rest) = line
             .strip_prefix("rename to ")
             .or_else(|| line.strip_prefix("copy to "))
         {
-            add_path(normalize_path(rest.trim()), &mut stats);
+            add_path(normalize_path(rest.trim()), &mut stats, &mut file);
         } else if let Some(rest) = line.strip_prefix("Binary files ")
             && let Some((_, new)) = rest.trim_end_matches(" differ").split_once(" and ")
         {
-            add_path(normalize_path(new.trim()), &mut stats);
+            add_path(normalize_path(new.trim()), &mut stats, &mut file);
         }
+        push(kind, text, file);
         i += 1;
     }
-    stats
+    (stats, out)
 }
 
 /// The new path of `diff --git a/x b/x`.

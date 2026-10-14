@@ -14,6 +14,7 @@ pub mod addr;
 pub mod backpatch;
 pub mod fetch;
 pub mod graph;
+pub mod links;
 pub mod message;
 pub mod store;
 pub mod sync;
@@ -171,6 +172,7 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
     let started = std::time::Instant::now();
     let mut stored = store::write(&mut client, &schema, &graph, &arena).await?;
     stored.backpatched = backpatch::regroup(&client, &schema).await?;
+    stored.links = links::refresh(&client, &schema).await?;
     let write_secs = started.elapsed().as_secs();
     let lanes = graph.lanes.len();
     let refs = graph.refs.len();

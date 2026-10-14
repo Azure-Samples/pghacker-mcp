@@ -18,11 +18,13 @@ pub mod grep;
 pub mod history;
 pub mod history_search;
 pub mod log;
+pub mod patches;
 pub mod pattern;
 pub mod range;
 pub mod rev;
 pub mod search;
 pub mod snapshot;
+mod sqlutil;
 
 pub use blame::{BlameArgs, BlameResult, blame};
 pub use commit::{CommitResult, GetCommitArgs, get_commit};
@@ -31,6 +33,7 @@ pub use files::{
 };
 pub use grep::{GrepArgs, grep};
 pub use log::{SearchCommitsArgs, SearchCommitsResult, search_commits};
+pub use patches::{SearchPatchesArgs, SearchPatchesResult, search_patches};
 pub use search::{SearchArgs, SearchResult, search};
 pub use snapshot::{Snapshot, resolve_snapshot};
 
@@ -91,6 +94,14 @@ matching Author and Co-authored-by trailers), paths (files, folders or globs), s
 expression (git log -G); occurrences finds commits that changed how many times a text occurs \
 in a file (git log -S), showing the lines. Each commit comes with its branch, line counts, \
 Discussion links and the other branches that got the same change; get_commit shows one whole.";
+
+/// The search_patches tool's description, for agents.
+pub const SEARCH_PATCHES_DESCRIPTION: &str = "\
+Find lines in the patches posted to pgsql-hackers, by thread: query (text, or with match regex \
+a regular expression, or identifier a whole word), lines (changed: added or removed, the \
+default; added; removed; context; all), and paths, author, since, until and thread_id filters. \
+Each thread comes with the first and latest patch version that has the lines, the lines with \
+their files and line numbers, and, with the commit history, the linked commits that added them.";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\

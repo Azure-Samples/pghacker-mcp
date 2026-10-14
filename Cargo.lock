@@ -2601,6 +2601,7 @@ dependencies = [
  "globset",
  "pghacker-code",
  "pghacker-core",
+ "pghacker-mail",
  "regex",
  "regex-automata",
  "regex-syntax",

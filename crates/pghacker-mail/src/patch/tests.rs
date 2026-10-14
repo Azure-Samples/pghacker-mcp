@@ -258,3 +258,80 @@ fn duplicate_names_stay_unique() {
     let names: Vec<_> = extract(&msg).into_iter().map(|p| p.filename).collect();
     assert_eq!(names, ["fix.patch", "fix.patch (2)"]);
 }
+
+#[test]
+fn diff_lines_are_classified() {
+    use super::LineKind::{Added, Context, Other, Removed};
+    let unified = "Subject: fix\n\
+        ---\n\
+        diff --git a/src/a.sql b/src/a.sql\n\
+        --- a/src/a.sql\n\
+        +++ b/src/a.sql\n\
+        @@ -1,3 +1,3 @@\n \
+        keep\n\
+        --- a comment\n\
+        +-- the comment\n \
+        end\n\
+        diff --git a/src/b.c b/src/b.c\n\
+        --- a/src/b.c\n\
+        +++ b/src/b.c\n\
+        @@ -1 +1,2 @@\n\
+        -x\n\
+        +y\n\
+        +\n";
+    let (stats, lines) = super::parse_diff(unified);
+    assert_eq!(stats.paths, ["src/a.sql", "src/b.c"]);
+    let kinds: Vec<(super::LineKind, &str, Option<usize>)> =
+        lines.iter().map(|l| (l.kind, l.text, l.file)).collect();
+    assert_eq!(
+        kinds,
+        [
+            (Other, "Subject: fix", None),
+            (Other, "---", None),
+            (Other, "diff --git a/src/a.sql b/src/a.sql", Some(0)),
+            (Other, "--- a/src/a.sql", Some(0)),
+            (Other, "+++ b/src/a.sql", Some(0)),
+            (Other, "@@ -1,3 +1,3 @@", Some(0)),
+            (Context, "keep", Some(0)),
+            (Removed, "-- a comment", Some(0)),
+            (Added, "-- the comment", Some(0)),
+            (Context, "end", Some(0)),
+            (Other, "diff --git a/src/b.c b/src/b.c", Some(1)),
+            (Other, "--- a/src/b.c", Some(1)),
+            (Other, "+++ b/src/b.c", Some(1)),
+            (Other, "@@ -1 +1,2 @@", Some(1)),
+            (Removed, "x", Some(1)),
+            (Added, "y", Some(1)),
+            (Added, "", Some(1)),
+        ]
+    );
+    assert_eq!((stats.added, stats.removed), (3, 2));
+
+    let context = "*** a/src/c.c\t2009-01-01\n\
+        --- b/src/c.c\t2009-01-02\n\
+        ***************\n\
+        *** 1,2 ****\n\
+        ! old\n  \
+        same\n\
+        --- 1,3 ----\n\
+        ! new\n\
+        + more\n  \
+        same\n";
+    let (stats, lines) = super::parse_diff(context);
+    assert_eq!(stats.paths, ["src/c.c"]);
+    let kinds: Vec<(super::LineKind, &str)> = lines
+        .iter()
+        .filter(|l| l.kind != Other)
+        .map(|l| (l.kind, l.text))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (Removed, "old"),
+            (Context, "same"),
+            (Added, "new"),
+            (Added, "more"),
+            (Context, "same")
+        ]
+    );
+}
