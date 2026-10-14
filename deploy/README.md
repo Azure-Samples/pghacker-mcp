@@ -193,8 +193,11 @@ name are reused; `IF NOT EXISTS` is not treated as proof.
 The script uses one persistent autocommit psql session, a separate preparation
 advisory lock, and one concurrent build at a time. It checks exact physical ID
 duplicates before a selected AGE build; it does not repair them or claim a full
-graph-data audit. It sets a two-second lock timeout, disables parallel
-maintenance workers for that session, and requires an explicit build deadline.
+graph-data audit. It sets a two-second lock timeout for its checks, disables
+parallel maintenance workers for that session, and requires an explicit build
+deadline. The build itself waits for older transactions, such as a running
+graph sync, for as long as that deadline allows: a lock timeout would cancel it
+and leave an invalid index.
 Before applying, approve disk reserve for remaining indexes, measured temporary
 build/WAL space and growth, and compare producer/read latency under concurrent
 extraction/full sync. Do not change jobs or terminate other sessions to bypass a

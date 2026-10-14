@@ -207,6 +207,29 @@ test("the CLI reports canary incompleteness, uses mapping ownership, and refuses
   }
 });
 
+test("a build waits for older writers longer than the lock timeout", isolated, async () => {
+  // Production always has transactions older than two seconds, such as a
+  // graph sync: the build must wait for them within its budget.
+  const db = fixtureUrl();
+  await psql(db, 'DROP INDEX pghacker_graph."TARGETS_id_idx"');
+  const writer = psqlSession(db);
+  try {
+    await writer.query("BEGIN");
+    await writer.query('LOCK TABLE ONLY pghacker_graph."TARGETS" IN ROW EXCLUSIVE MODE');
+    const before = await inventory(db);
+    const manifest = createManifest(db, before.identity, before.requirements);
+    const prepared = prepareIndexes(db, manifest, { buildTimeoutMs: 30000, only: "pghacker_graph.TARGETS_id_idx" });
+    await sleep(4000);
+    await writer.query("COMMIT");
+    const result = await prepared;
+    assert.deepEqual(result.completed, ["pghacker_graph.TARGETS_id_idx"]);
+    assert.equal((await inventory(db)).requirements
+      .find((r) => r.kind === "edge_id" && r.label === "TARGETS").state, "ready");
+  } finally {
+    await writer.close();
+  }
+});
+
 test("a timed-out concurrent build leaves explicit invalid state and needs approved recovery", isolated, async () => {
   const db = fixtureUrl();
   await psql(db, 'DROP INDEX pghacker_graph."MENTIONS_id_idx"');

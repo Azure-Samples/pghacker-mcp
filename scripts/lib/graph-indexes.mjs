@@ -213,7 +213,11 @@ export async function prepareIndexes(url, manifest, {
       }, 5000);
       try {
         signal?.throwIfAborted();
+        // A concurrent build waits for older transactions through lock waits,
+        // which lock_timeout would cut short: the build budget bounds it instead.
+        await session.query("SET lock_timeout = 0");
         await session.query(createIndexSql(r), { timeoutMs: buildTimeoutMs + 5000 });
+        await session.query("SET lock_timeout = '2s'");
         const after = await inventory(url);
         validateManifest(manifest, url, after.identity, after.requirements);
         const built = after.requirements.find((item) => indexKey(item) === indexKey(r));
