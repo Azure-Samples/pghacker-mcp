@@ -37,3 +37,8 @@ doc-scrape-examples = false
 name = "profile_history"
 path = "perf_tuning/profile_history.rs"
 doc-scrape-examples = false
+
+[[example]]
+name = "history_parity"
+path = "perf_tuning/history_parity.rs"
+doc-scrape-examples = false

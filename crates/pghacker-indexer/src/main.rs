@@ -86,6 +86,12 @@ enum History {
         #[arg(long, default_value_t = 200)]
         batch: usize,
     },
+    /// Groups the commits into back-patch groups afresh.
+    Regroup {
+        /// The build's schema, or pghacker once installed.
+        #[arg(long, default_value = "pghacker")]
+        schema: String,
+    },
     /// Rebuilds every file at commits and checks it against git.
     Verify {
         #[arg(long)]
@@ -216,6 +222,11 @@ async fn history(env: &Env, action: History) -> Result<()> {
             )
             .await?;
             serde_json::to_value(stats)?
+        }
+        History::Regroup { schema } => {
+            let client = db::connect(&env.admin_database_url()?, "pghacker-indexer").await?;
+            let grouped = history::backpatch::regroup(&client, &schema).await?;
+            serde_json::json!({ "schema": schema, "backpatched": grouped })
         }
         History::Verify {
             git_dir,

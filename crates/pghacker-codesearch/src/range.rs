@@ -5,7 +5,8 @@
 
 use crate::rev::parent;
 
-const MASTER_STEP: i64 = 1 << 32;
+/// The step between master commits' addresses.
+pub const MASTER_STEP: i64 = 1 << 32;
 const BRANCH_BLOCK: i64 = 1 << 24;
 
 /// Commits: master commits with addresses in (`after`, `upto`], and the

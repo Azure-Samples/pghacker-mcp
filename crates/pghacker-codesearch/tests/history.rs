@@ -1205,3 +1205,166 @@ async fn get_commit_matches_git_show() {
         [("REL_1_STABLE".to_owned(), "REL_1_0".to_owned())]
     );
 }
+
+#[tokio::test]
+async fn search_commits_agrees_with_git_log() {
+    use pghacker_codesearch::{SearchCommitsArgs, search_commits};
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let write = |path: &str, data: &str| {
+        let path = d.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    };
+    let commit = |tick: u32, author: &str, message: &str| {
+        git(d, tick, &["add", "-A"]);
+        git(
+            d,
+            tick,
+            &[
+                "commit",
+                "-q",
+                "--author",
+                &format!("{author} <a@example.org>"),
+                "-m",
+                message,
+            ],
+        );
+        git(d, tick, &["rev-parse", "HEAD"])
+    };
+    git(d, 0, &["init", "-q", "-b", "master"]);
+    write("a.c", "int\nx(void)\n{\n\treturn foo(1);\n}\n");
+    write("doc/b.txt", "bee\n");
+    commit(1, "Ann Lee", "Add a.c and b.txt");
+    // foo's count stays: -G finds it, -S doesn't.
+    write("a.c", "int\nx(void)\n{\n\treturn foo(2);\n}\n");
+    commit(
+        2,
+        "Bob Ray",
+        "Call foo with 2\n\nAuthor: Cy Doe <cy@example.org>",
+    );
+    write("a.c", "int\nx(void)\n{\n\tfoo(3);\n\treturn foo(2);\n}\n");
+    let c2 = commit(3, "Ann Lee", "Call foo once more");
+    git(d, 4, &["checkout", "-q", "-b", "REL_1_STABLE", &c2]);
+    write("doc/b.txt", "bee\nbranch\n");
+    commit(4, "Bob Ray", "Fix the docs on the branch");
+    git(d, 5, &["checkout", "-q", "master"]);
+    std::fs::remove_file(d.join("a.c")).unwrap();
+    write(
+        "src/a.c",
+        "int\nx(void)\n{\n\tfoo(3);\n\treturn foo(2);\n}\n",
+    );
+    commit(5, "Ann Lee", "Move a.c to src");
+    std::fs::remove_file(d.join("doc/b.txt")).unwrap();
+    write("src/a.c", "int\nx(void)\n{\n\treturn foo(2);\n}\n");
+    commit(6, "Bob Ray", "Drop b.txt and a foo call");
+
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: d.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let ours = |args: Value| {
+        let reader = &reader;
+        async move {
+            let args: SearchCommitsArgs = serde_json::from_value(args).unwrap();
+            let mut shas: Vec<String> = search_commits(reader, SCHEMA, "postgres", &args)
+                .await
+                .unwrap()
+                .commits
+                .into_iter()
+                .map(|c| c.sha)
+                .collect();
+            shas.sort();
+            shas
+        }
+    };
+    let theirs = |args: &[&str]| {
+        let mut all = vec!["log", "--format=%H"];
+        all.extend_from_slice(args);
+        let mut shas: Vec<String> = git(d, 0, &all).lines().map(str::to_owned).collect();
+        shas.sort();
+        shas
+    };
+    let not_c2 = format!("^{c2}");
+    let cases: Vec<(Value, Vec<&str>)> = vec![
+        (json!({}), vec!["--all"]),
+        (json!({"range": "master"}), vec!["master"]),
+        (json!({"range": "REL_1_STABLE"}), vec!["REL_1_STABLE"]),
+        (
+            json!({"range": format!("{}..master", &c2[..10])}),
+            vec!["master", &not_c2],
+        ),
+        (
+            json!({"paths": ["src/a.c"]}),
+            vec!["--all", "--", "src/a.c"],
+        ),
+        (json!({"paths": ["a.c"]}), vec!["--all", "--", "a.c"]),
+        (json!({"paths": ["doc"]}), vec!["--all", "--", "doc"]),
+        (json!({"paths": ["*.txt"]}), vec!["--all", "--", "*.txt"]),
+        (
+            json!({"changed_lines": "foo\\("}),
+            vec!["--all", "-Gfoo\\("],
+        ),
+        (
+            json!({"changed_lines": "foo\\(3"}),
+            vec!["--all", "-Gfoo\\(3"],
+        ),
+        (json!({"occurrences": "foo("}), vec!["--all", "-Sfoo("]),
+        (
+            json!({"occurrences": "foo\\([23]", "occurrences_regex": true}),
+            vec!["--all", "--pickaxe-regex", "-Sfoo\\([23]"],
+        ),
+        (json!({"occurrences": "bee"}), vec!["--all", "-Sbee"]),
+        (
+            json!({"author": "ann lee"}),
+            vec!["--all", "-i", "--author=ann lee"],
+        ),
+        (json!({"message": "FOO"}), vec!["--all", "-i", "--grep=FOO"]),
+        (
+            json!({"range": "master", "changed_lines": "foo"}),
+            vec!["master", "-Gfoo"],
+        ),
+    ];
+    for (args, git_args) in cases {
+        assert_eq!(ours(args.clone()).await, theirs(&git_args), "{args}");
+    }
+    // The Author trailer counts as authorship.
+    let cy = ours(json!({"author": "Cy Doe"})).await;
+    assert_eq!(cy.len(), 1);
+    // Lines shown for diff filters, with their files.
+    let found = search_commits(
+        &reader,
+        SCHEMA,
+        "postgres",
+        &serde_json::from_value(json!({"occurrences": "foo(3)"})).unwrap(),
+    )
+    .await
+    .unwrap();
+    let lines: Vec<(String, String, String)> = found
+        .commits
+        .iter()
+        .flat_map(|c| {
+            c.lines
+                .iter()
+                .map(|l| (l.path.clone(), l.sign.clone(), l.text.clone()))
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("src/a.c".to_owned(), "-".to_owned(), "\tfoo(3);".to_owned()),
+            ("a.c".to_owned(), "+".to_owned(), "\tfoo(3);".to_owned()),
+        ]
+    );
+}

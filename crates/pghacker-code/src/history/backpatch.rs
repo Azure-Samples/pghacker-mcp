@@ -2,8 +2,10 @@
 //! PostgreSQL back-patches fixes to its supported branches. Commits group
 //! when they are on different lanes and have the same patch id, or the same
 //! subject and author within a week of each other and a changed file in
-//! common. A group's commits share its first commit's address, master's
-//! when it has one, in code_commits.backpatch.
+//! common. A group holds at most one commit per lane, and the closest pairs
+//! join first (same patch id before same subject, then by time apart), so
+//! two rounds of one fix make two groups. A group's commits share its first
+//! commit's address, master's when it has one, in code_commits.backpatch.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,23 +24,35 @@ struct Row {
     at: i64,
 }
 
-/// Union-find over row indexes.
-struct Sets(Vec<usize>);
+/// The most commits with one patch id that are paired: more are some
+/// generic change, not one fix.
+const MAX_SAME_PATCH: usize = 64;
+
+/// Union-find over row indexes, with each group's lanes.
+struct Sets {
+    parent: Vec<usize>,
+    lanes: Vec<Vec<i16>>,
+}
 
 impl Sets {
     fn find(&mut self, mut i: usize) -> usize {
-        while self.0[i] != i {
-            self.0[i] = self.0[self.0[i]];
-            i = self.0[i];
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
         }
         i
     }
 
-    fn union(&mut self, a: usize, b: usize) {
+    /// Joins a's and b's groups unless they share a lane.
+    fn join(&mut self, a: usize, b: usize) {
         let (a, b) = (self.find(a), self.find(b));
-        if a != b {
-            self.0[a.max(b)] = a.min(b);
+        if a == b || self.lanes[a].iter().any(|l| self.lanes[b].contains(l)) {
+            return;
         }
+        let (keep, gone) = (a.min(b), a.max(b));
+        self.parent[gone] = keep;
+        let moved = std::mem::take(&mut self.lanes[gone]);
+        self.lanes[keep].extend(moved);
     }
 }
 
@@ -64,7 +78,11 @@ pub async fn regroup(client: &impl GenericClient, schema: &str) -> Result<u64> {
             at: r.get(2),
         })
         .collect();
-    let mut sets = Sets((0..commits.len()).collect());
+    let mut sets = Sets {
+        parent: (0..commits.len()).collect(),
+        lanes: commits.iter().map(|c| vec![c.lane]).collect(),
+    };
+    let apart = |i: usize, j: usize| (commits[i].at - commits[j].at).abs();
 
     let mut by_patch: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_message: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
@@ -74,12 +92,19 @@ pub async fn regroup(client: &impl GenericClient, schema: &str) -> Result<u64> {
         }
         by_message.entry((r.get(3), r.get(4))).or_default().push(i);
     }
-    for members in by_patch.values() {
-        for &j in &members[1..] {
-            if members.iter().any(|&i| commits[i].lane != commits[j].lane) {
-                sets.union(members[0], j);
+    let mut same_patch: Vec<(usize, usize)> = Vec::new();
+    for members in by_patch.values().filter(|m| m.len() <= MAX_SAME_PATCH) {
+        for (n, &i) in members.iter().enumerate() {
+            for &j in &members[n + 1..] {
+                if commits[i].lane != commits[j].lane {
+                    same_patch.push((i, j));
+                }
             }
         }
+    }
+    same_patch.sort_by_key(|&(i, j)| (apart(i, j), i, j));
+    for (i, j) in same_patch {
+        sets.join(i, j);
     }
 
     // Subject and author: pairs on different lanes within the window, which
@@ -120,11 +145,12 @@ pub async fn regroup(client: &impl GenericClient, schema: &str) -> Result<u64> {
             paths.entry(r.get(0)).or_default().insert(r.get(1));
         }
         let empty = HashSet::new();
+        pairs.sort_by_key(|&(i, j)| (apart(i, j), i, j));
         for (i, j) in pairs {
             let a = paths.get(&commits[i].addr).unwrap_or(&empty);
             let b = paths.get(&commits[j].addr).unwrap_or(&empty);
             if !a.is_disjoint(b) {
-                sets.union(i, j);
+                sets.join(i, j);
             }
         }
     }

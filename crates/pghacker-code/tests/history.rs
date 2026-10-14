@@ -731,6 +731,20 @@ async fn commit_files_and_metadata_match_git() {
             .as_bytes(),
     );
     let typo_back = r.commit("Fix typo");
+    // Days later, another round of the same subject: a second group.
+    let more = |extra: &str| {
+        numbered("f.c", 10)
+            .replace("f.c line 3\n", "f.c line three\n")
+            .replace(extra, "changed\n")
+            .replace("f.c line 5\n", "f.c line five\n")
+    };
+    r.git(&["checkout", "-q", "master"]);
+    r.tick = 100;
+    r.write("f.c", more("f.c line 9\n").as_bytes());
+    let typo2 = r.commit("Fix typo");
+    r.git(&["checkout", "-q", "REL_1_STABLE"]);
+    r.write("f.c", more("f.c line 8\n").as_bytes());
+    let typo2_back = r.commit("Fix typo");
     let db2 = TestDb::create().await.unwrap();
     build(&db2, &r.path(), Vec::new()).await;
     let client = db2.admin().await.unwrap();
@@ -762,6 +776,12 @@ async fn commit_files_and_metadata_match_git() {
     assert_eq!(
         row(typo_back).await.get::<_, Option<i64>>(2),
         Some(typo_addr)
+    );
+    let typo2_addr: i64 = row(typo2.clone()).await.get(0);
+    assert_eq!(row(typo2).await.get::<_, Option<i64>>(2), Some(typo2_addr));
+    assert_eq!(
+        row(typo2_back).await.get::<_, Option<i64>>(2),
+        Some(typo2_addr)
     );
     assert_eq!(row(base).await.get::<_, Option<i64>>(2), None);
 

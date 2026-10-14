@@ -17,6 +17,7 @@ pub mod glob;
 pub mod grep;
 pub mod history;
 pub mod history_search;
+pub mod log;
 pub mod pattern;
 pub mod range;
 pub mod rev;
@@ -29,6 +30,7 @@ pub use files::{
     ListFilesArgs, ListFilesResult, ReadFileArgs, ReadFileResult, list_files, read_file,
 };
 pub use grep::{GrepArgs, grep};
+pub use log::{SearchCommitsArgs, SearchCommitsResult, search_commits};
 pub use search::{SearchArgs, SearchResult, search};
 pub use snapshot::{Snapshot, resolve_snapshot};
 
@@ -79,6 +81,16 @@ Discussion, Backpatch-through...), the pgsql-hackers threads its Discussion trai
 same change back-patched to other branches, the first release on each branch with the change, \
 the files changed with line counts, and the unified diff (paths limits it to files or folders; \
 context sets the lines around changes; diff: false leaves it out).";
+
+/// The search_commits tool's description, for agents.
+pub const SEARCH_COMMITS_DESCRIPTION: &str = "\
+Find PostgreSQL commits as git log does, newest first: range (a branch, tag or SHA and its \
+ancestors, or A..B; default every branch), message (a regular expression), author (also \
+matching Author and Co-authored-by trailers), paths (files, folders or globs), since and until \
+(dates). changed_lines finds commits that added or removed a line matching a regular \
+expression (git log -G); occurrences finds commits that changed how many times a text occurs \
+in a file (git log -S), showing the lines. Each commit comes with its branch, line counts, \
+Discussion links and the other branches that got the same change; get_commit shows one whole.";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\
