@@ -8,6 +8,7 @@
 //! `grep` tool reads GNU grep command lines and prints what GNU grep 3.11
 //! prints, refusing incomplete searches rather than counting partial output.
 
+pub mod blame;
 pub mod engine;
 pub mod files;
 pub mod glob;
@@ -20,6 +21,7 @@ pub mod rev;
 pub mod search;
 pub mod snapshot;
 
+pub use blame::{BlameArgs, BlameResult, blame};
 pub use files::{
     ListFilesArgs, ListFilesResult, ReadFileArgs, ReadFileResult, list_files, read_file,
 };
@@ -56,6 +58,15 @@ pub const READ_FILE_DESCRIPTION: &str = "\
 Read a PostgreSQL source file with line numbers: path relative to the source root (such as \
 src/backend/parser/gram.y), optional start_line and end_line. Returns at most 2000 lines or \
 200 KB; `cut` says more remain, and total_lines gives the file's length.";
+
+/// The blame tool's description, for agents.
+pub const BLAME_DESCRIPTION: &str = "\
+Show which commit added each line of a PostgreSQL source file, as git blame does: path (relative \
+to the source root, or below /branch/<name>/, /tag/<name>/ or /commit/<rev>/), optional start_line \
+and end_line (at most 2000 lines), and version. It follows renames and, by default, passes \
+through the reformatting commits (pgindent runs) in .git-blame-ignore-revs to the commit that \
+wrote the line. reverse gives the commit that removed each line after this version, on its \
+branch. Commits come once each, with date, author, branch and subject.";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\

@@ -149,6 +149,38 @@ pub fn death_at(end: i64) -> Option<i64> {
     (last % MASTER_STEP == 0 || block_end(last) != last).then_some(end)
 }
 
+/// The commit after `at` on its lane, master or `at`'s branch, that removed
+/// a line alive at `at` over `spans` (sorted): None while the lane's head has
+/// it. On master, holes the line has on branches don't count.
+pub fn death_after(spans: &[(i64, i64)], at: i64) -> Option<i64> {
+    let covering = |x: i64| {
+        spans
+            .iter()
+            .find(|&&(a, b)| a <= x && x < b)
+            .map(|&(_, b)| b)
+    };
+    let mut end = covering(at)?;
+    if at % MASTER_STEP != 0 {
+        return (end <= block_end(at)).then_some(end);
+    }
+    loop {
+        if end == i64::MAX {
+            return None;
+        }
+        let next = if end % MASTER_STEP == 0 {
+            end
+        } else {
+            end.div_euclid(MASTER_STEP)
+                .checked_add(1)?
+                .checked_mul(MASTER_STEP)?
+        };
+        match covering(next) {
+            Some(b) => end = b,
+            None => return Some(next),
+        }
+    }
+}
+
 /// Steps back from `addr` `n` times; None past the root.
 pub fn back(mut addr: i64, n: u32) -> Option<i64> {
     for _ in 0..n {
@@ -181,6 +213,22 @@ mod tests {
         assert_eq!((later.master, later.branch), (None, Some((b + 2, b + 3))));
         let from_branch = Range::between(Some(b + 3), 8 * M);
         assert_eq!(from_branch.master, Some((5 * M, 8 * M)));
+    }
+
+    #[test]
+    fn deaths_follow_the_lane() {
+        let b = 2 * M + 1;
+        // Born at 2, changed on its branch at b, removed on master at 4.
+        let spans = [(2 * M, b), (2 * M + BRANCH_BLOCK + 1, 4 * M)];
+        assert_eq!(death_after(&spans, 2 * M), Some(4 * M));
+        assert_eq!(death_after(&spans, 3 * M), Some(4 * M));
+        assert_eq!(death_after(&spans, 4 * M), None);
+        // On master to the end; on the branch until b + 2.
+        let spans = [(2 * M, b + 2), (2 * M + BRANCH_BLOCK + 1, i64::MAX)];
+        assert_eq!(death_after(&spans, b), Some(b + 2));
+        assert_eq!(death_after(&spans, 2 * M), None);
+        // Alive to its branch's end: a natural end.
+        assert_eq!(death_after(&[(b, b + BRANCH_BLOCK)], b + 5), None);
     }
 
     #[test]

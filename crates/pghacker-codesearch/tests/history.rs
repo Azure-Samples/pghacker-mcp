@@ -761,3 +761,173 @@ async fn history_search_finds_lines_across_commits() {
     let error = search(&reader, &snap, &snap_args).await.unwrap_err();
     assert!(error.to_string().contains("history"), "{error}");
 }
+
+/// The commit per line that `git blame` gives, with extra options.
+fn git_blame(dir: &Path, rev: &str, path: &str, extra: &[&str]) -> Vec<String> {
+    let mut args = vec!["blame", "--porcelain"];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&[rev, "--", path]);
+    let out = git(dir, 99, &args);
+    out.lines()
+        .filter(|l| {
+            l.len() > 41
+                && l.as_bytes()[40] == b' '
+                && l[..40].bytes().all(|b| b.is_ascii_hexdigit())
+        })
+        .map(|l| l[..12].to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn blame_agrees_with_git_blame() {
+    use pghacker_codesearch::{BlameArgs, blame};
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let write = |path: &str, data: &str| {
+        let path = d.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    };
+    let commit = |tick: u32, message: &str| {
+        git(d, tick, &["add", "-A"]);
+        git(d, tick, &["commit", "-q", "-m", message]);
+        git(d, tick, &["rev-parse", "HEAD"])
+    };
+    git(d, 0, &["init", "-q", "-b", "master"]);
+    write("src/a.c", "int\nmain(void)\n{\nint x = 1;\nreturn x;\n}\n");
+    commit(1, "c0");
+    write(
+        "src/a.c",
+        "int\nmain(int argc)\n{\nint x = 1;\nint y = 2;\nreturn x;\n}\n",
+    );
+    let c1 = commit(2, "c1");
+    git(d, 3, &["checkout", "-q", "-b", "REL_1_STABLE", &c1]);
+    write(
+        "src/a.c",
+        "int\nmain(int argc)\n{\nint x = 1;\nint y = 3;\nreturn x;\n}\n",
+    );
+    let b1 = commit(3, "b1");
+    write(
+        "src/a.c",
+        "int\nmain(int argc)\n{\nint x = 10;\nint y = 3;\nreturn x;\n}\n",
+    );
+    let b2 = commit(4, "b2");
+    git(d, 4, &["checkout", "-q", "master"]);
+    std::fs::remove_file(d.join("src/a.c")).unwrap();
+    write(
+        "src/b.c",
+        "int\nmain(int argc)\n{\nint x = 1;\nint y = 2;\nreturn x + y;\n}\n",
+    );
+    commit(5, "c2: rename");
+    // A reformatting commit, then the file that lists it.
+    write(
+        "src/b.c",
+        "int\nmain(int argc)\n{\n\tint x = 1;\n\tint y = 2;\n\treturn x + y;\n}\n",
+    );
+    let indent = commit(6, "pgindent run");
+    write(".git-blame-ignore-revs", &format!("# pgindent\n{indent}\n"));
+    let head = commit(7, "list the reformatting");
+
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: d.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let at = |rev: &str| {
+        let (reader, rev) = (&reader, rev.to_owned());
+        async move {
+            pghacker_codesearch::rev::resolve(reader, SCHEMA, "postgres", Some(&rev))
+                .await
+                .unwrap()
+        }
+    };
+    let ours = |snap: Snapshot, path: &str, ignore: bool, reverse: bool| {
+        let (reader, path) = (&reader, path.to_owned());
+        async move {
+            let args = BlameArgs {
+                path,
+                ignore_revs: Some(ignore),
+                reverse,
+                ..Default::default()
+            };
+            blame(reader, &snap, &args).await.unwrap()
+        }
+    };
+    let commits = |r: &pghacker_codesearch::BlameResult| -> Vec<String> {
+        r.lines.iter().map(|l| l.commit.clone()).collect()
+    };
+    let master = at("master").await;
+    let plain = ours(master.clone(), "src/b.c", false, false).await;
+    assert_eq!(commits(&plain), git_blame(d, &head, "src/b.c", &[]));
+    assert_eq!(plain.lines[3].text, "\tint x = 1;");
+    let ignoring = ours(master.clone(), "src/b.c", true, false).await;
+    assert_eq!(
+        commits(&ignoring),
+        git_blame(
+            d,
+            &head,
+            "src/b.c",
+            &["--ignore-revs-file", ".git-blame-ignore-revs"]
+        )
+    );
+    assert_eq!(ignoring.ignored_revs, 1);
+    assert!(!commits(&ignoring).contains(&indent[..12].to_owned()));
+    // A mounted commit reads its own list: c1's tree has none.
+    let mounted_head = ours(
+        at(&c1[..10]).await,
+        &format!("/commit/{}/src/b.c", &head[..10]),
+        true,
+        false,
+    )
+    .await;
+    assert_eq!(
+        (commits(&mounted_head), mounted_head.ignored_revs),
+        (commits(&ignoring), 1)
+    );
+    let branch = ours(at("REL_1_STABLE").await, "src/a.c", true, false).await;
+    assert_eq!(commits(&branch), git_blame(d, &b2, "src/a.c", &[]));
+    let mounted = ours(master.clone(), "/branch/REL_1_STABLE/src/a.c", true, false).await;
+    assert_eq!(
+        (commits(&mounted), mounted.path.as_str()),
+        (commits(&branch), "/branch/REL_1_STABLE/src/a.c")
+    );
+
+    // Reverse: which commit, on the version's lane, removed each line.
+    let gone = |r: &pghacker_codesearch::BlameResult| -> Vec<(u32, String)> {
+        r.lines
+            .iter()
+            .filter(|l| !l.commit.is_empty())
+            .map(|l| (l.line, r.commits[&l.commit].subject.clone()))
+            .collect()
+    };
+    // On master the rename keeps the lineage; b1's change is on its branch.
+    let reverse = ours(at(&c1[..10]).await, "src/a.c", false, true).await;
+    assert_eq!(
+        gone(&reverse),
+        vec![
+            (4, "pgindent run".to_owned()),
+            (5, "pgindent run".to_owned()),
+            (6, "c2: rename".to_owned())
+        ]
+    );
+    let on_branch = ours(
+        master.clone(),
+        &format!("/commit/{}/src/a.c", &b1[..10]),
+        false,
+        true,
+    )
+    .await;
+    assert_eq!(gone(&on_branch), vec![(4, "b2".to_owned())]);
+    let at_head = ours(at("REL_1_STABLE").await, "src/a.c", false, true).await;
+    assert!(gone(&at_head).is_empty());
+}

@@ -100,7 +100,26 @@ pub static TOOLS: &[ToolSpec] = &[
         effect: READ,
         schema: schema::<code::ListFilesArgs>,
     },
+    // Tools that read the commit history, last: served only with it.
+    ToolSpec {
+        name: "blame",
+        description: code::BLAME_DESCRIPTION,
+        effect: READ,
+        schema: schema::<code::BlameArgs>,
+    },
 ];
+
+/// How many of TOOLS, at the end, need the commit history.
+const HISTORY_TOOLS: usize = 1;
+
+/// The tools served: the history's only with PGHACKER_CODE_HISTORY.
+pub fn served() -> &'static [ToolSpec] {
+    if code::history::schema_from_env().is_some() {
+        TOOLS
+    } else {
+        &TOOLS[..TOOLS.len() - HISTORY_TOOLS]
+    }
+}
 
 /// The server's state. Cheap to clone.
 #[derive(Clone)]
@@ -167,6 +186,15 @@ impl Server {
                     Err(error) => Err(error),
                 }
             }
+            "blame" if served().iter().any(|t| t.name == name) => {
+                let args: code::BlameArgs = parse(name, arguments)?;
+                match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
+                    Ok(snapshot) => code::blame(client, &snapshot, &args)
+                        .await
+                        .and_then(|result| Ok(serde_json::to_value(result)?)),
+                    Err(error) => Err(error),
+                }
+            }
             other => {
                 return Err(ErrorData::invalid_params(
                     format!("unknown tool {other}"),
@@ -179,7 +207,7 @@ impl Server {
 
 impl Tools for Server {
     fn specs(&self) -> &'static [ToolSpec] {
-        TOOLS
+        served()
     }
 
     async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
@@ -212,5 +240,19 @@ impl Tools for Server {
                 Err(error) => failed(error),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_tools_come_last() {
+        let names: Vec<&str> = TOOLS[TOOLS.len() - HISTORY_TOOLS..]
+            .iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["blame"]);
     }
 }
