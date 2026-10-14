@@ -900,7 +900,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     }
     let Some(current) = client
         .query_opt(
-            "SELECT content_version FROM threads WHERE id = $1",
+            "SELECT content_version, last_at FROM threads WHERE id = $1",
             &[&args.thread_id],
         )
         .await?
@@ -914,6 +914,9 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     let thread_version: i32 = lease_record
         .version_of(args.thread_id)
         .unwrap_or_else(|| current.get(0));
+    // How recent this thread's evidence is: a release it gives replaces one
+    // only from evidence at least as recent.
+    let evidence_at: Option<DateTime<Utc>> = current.get(1);
 
     if let Some(reason) = &args.skip_reason {
         if !args.features.is_empty() || !args.decisions.is_empty() || !args.positions.is_empty() {
@@ -1306,12 +1309,14 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             Action::New => {
                 let slug = feature.slug.clone().expect("validated");
                 let embedding = vectors.next().flatten();
+                let release_at = feature.release.as_ref().and(evidence_at);
                 let id: i64 = tx
                     .query_one(
-                        "INSERT INTO features (slug, name, description, status, release, embedding, created_by, model)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                        "INSERT INTO features (slug, name, description, status, release, release_at, embedding,
+                                               created_by, model)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
                         &[&slug, &feature.name.trim(), &feature.description.trim(), &feature.status.as_str(),
-                          &feature.release, &embedding, &session, &model],
+                          &feature.release, &release_at, &embedding, &session, &model],
                     )
                     .await?
                     .get(0);
@@ -1336,13 +1341,22 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             }
             Action::Reuse => {
                 let id = feature.existing_id.expect("validated");
-                // A status only moves forward: a follow-up thread doesn't undo a commit.
+                // A status only moves forward: a follow-up thread doesn't undo a
+                // commit. A release is replaced only by one from evidence at least
+                // as recent, an undated thread's only fills a missing one: an
+                // older thread extracted later doesn't undo a newer one's.
                 tx.execute(
                     "UPDATE features SET
                          status = CASE WHEN pg_temp.status_rank($2) > pg_temp.status_rank(status) THEN $2 ELSE status END,
-                         release = coalesce($3, release), updated_at = now()
+                         release = CASE WHEN $3::text IS NOT NULL
+                                             AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
+                                        THEN $3 ELSE release END,
+                         release_at = CASE WHEN $3::text IS NOT NULL
+                                                AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
+                                           THEN $4 ELSE release_at END,
+                         updated_at = now()
                      WHERE id = $1",
-                    &[&id, &feature.status.as_str(), &feature.release],
+                    &[&id, &feature.status.as_str(), &feature.release, &evidence_at],
                 )
                 .await?;
                 reused["features"]

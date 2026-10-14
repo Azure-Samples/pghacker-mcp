@@ -501,3 +501,156 @@ async fn a_thread_that_mail_merged_away_during_its_lease_is_not_saved() {
         leased(&[(5, "backfill")])
     );
 }
+
+/// Extracts thread `id` as discussing the feature `slug`, new the first time
+/// and reused after, with the release it gives, if any.
+async fn claim(db: &TestDb, indexer: &Indexer, id: i64, slug: &str, release: Option<&str>) {
+    let token = token_for(indexer, id).await;
+    let matched = extraction::match_extracts(
+        indexer,
+        args(json!({ "lease_token": token, "drafts": [
+            { "thread_id": id, "kind": "feature", "name": slug, "description": "A change to the planner." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    let draft = matched["drafts"][0]["draft_id"].as_i64().unwrap();
+    let existing: Option<i64> = db
+        .indexer()
+        .await
+        .unwrap()
+        .query_opt("SELECT id FROM features WHERE slug = $1", &[&slug])
+        .await
+        .unwrap()
+        .map(|row| row.get(0));
+    let mut feature = json!({ "draft_id": draft, "name": slug, "description": "A change to the planner.",
+        "status": "proposed", "release": release,
+        "citations": [{ "message_id": format!("t{id}@example.org"), "quote": "proposes a change to the planner" }] });
+    match existing {
+        Some(existing) => {
+            feature["action"] = json!("reuse");
+            feature["existing_id"] = json!(existing);
+        }
+        None => {
+            feature["action"] = json!("new");
+            feature["slug"] = json!(slug);
+        }
+    }
+    let saved = extraction::submit(
+        indexer,
+        args(json!({ "lease_token": token, "thread_id": id, "features": [feature] })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["accepted"], true, "{saved:#}");
+}
+
+/// A feature's release, and whether its evidence is the date of thread
+/// `id`'s latest message (None: no date).
+async fn release(db: &TestDb, slug: &str) -> (Option<String>, Option<i64>) {
+    let row = db
+        .indexer()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT f.release, (SELECT min(t.id) FROM threads t WHERE t.last_at = f.release_at)
+             FROM features f WHERE f.slug = $1",
+            &[&slug],
+        )
+        .await
+        .unwrap();
+    (row.get(0), row.get(1))
+}
+
+#[tokio::test]
+async fn a_release_comes_from_the_most_recent_evidence_whatever_the_order() {
+    let db = corpus(&[
+        (1, Some(2000), "pending", false),
+        (2, Some(3000), "pending", false),
+        (3, None, "pending", false),
+        (4, Some(100), "pending", false),
+        (5, Some(1500), "pending", false),
+        (6, Some(1500), "pending", false),
+    ])
+    .await;
+    let indexer = indexer(&db, &[]);
+    let at = |release: &str, thread: i64| (Some(release.to_owned()), Some(thread));
+
+    claim(&db, &indexer, 1, "plan-clause", Some("12")).await;
+    assert_eq!(release(&db, "plan-clause").await, at("12", 1));
+    claim(&db, &indexer, 2, "plan-clause", Some("11")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("12", 1),
+        "an older thread extracted later doesn't undo a newer one's release"
+    );
+    claim(&db, &indexer, 4, "plan-clause", None).await;
+    claim(&db, &indexer, 5, "plan-clause", Some("13")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("13", 5),
+        "a newer claim wins, though a still newer thread linked without one"
+    );
+    claim(&db, &indexer, 3, "plan-clause", Some("14")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("13", 5),
+        "an undated claim doesn't replace a release"
+    );
+    claim(&db, &indexer, 6, "plan-clause", Some("15")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("15", 5),
+        "evidence as recent: the later submission wins"
+    );
+
+    claim(&db, &indexer, 1, "hash-join", None).await;
+    claim(&db, &indexer, 3, "hash-join", Some("16")).await;
+    assert_eq!(
+        release(&db, "hash-join").await,
+        (Some("16".to_owned()), None),
+        "an undated claim fills a missing release"
+    );
+    claim(&db, &indexer, 2, "hash-join", Some("17")).await;
+    assert_eq!(
+        release(&db, "hash-join").await,
+        at("17", 2),
+        "undated evidence is the oldest"
+    );
+}
+
+#[tokio::test]
+async fn releases_set_before_take_their_features_most_recent_thread() {
+    let db = corpus(&[
+        (1, Some(300), "extracted", false),
+        (2, Some(30), "extracted", false),
+    ])
+    .await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "INSERT INTO features (id, slug, name, description, status, release) VALUES
+                 (1, 'with-release', 'With a release', 'A change.', 'committed', '18'),
+                 (2, 'without-release', 'Without a release', 'A change.', 'proposed', NULL),
+                 (3, 'unlinked', 'Unlinked', 'A change.', 'proposed', '17');
+             INSERT INTO feature_threads (feature_id, thread_id) VALUES (1, 1), (1, 2), (2, 2);
+             ALTER TABLE features DROP COLUMN release_at;",
+        )
+        .await
+        .unwrap();
+    client
+        .batch_execute(include_str!(
+            "../../../migrations/0018_feature_release_at.sql"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        release(&db, "with-release").await,
+        (Some("18".to_owned()), Some(2))
+    );
+    assert_eq!(release(&db, "without-release").await, (None, None));
+    assert_eq!(
+        release(&db, "unlinked").await,
+        (Some("17".to_owned()), None)
+    );
+}

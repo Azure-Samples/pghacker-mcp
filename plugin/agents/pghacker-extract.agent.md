@@ -70,7 +70,9 @@ bug fix: include a fix only when the thread treats it as a design question.
   even if follow-up fixes continue. When reusing a feature, give the status
   this thread shows; the indexer keeps the most advanced status it has seen.
 - `release`: the major version it targets or shipped in, only when the
-  thread says so ("for v19", "in PG 18").
+  thread says so ("for v19", "in PG 18"). When reusing a feature, give the
+  release this thread states; the indexer keeps the one from the most recent
+  thread.
 - `files`: paths the thread's patches change that implement it (only paths
   listed in the thread's patches or file anchors).
 
