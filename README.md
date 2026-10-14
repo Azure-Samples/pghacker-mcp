@@ -216,7 +216,8 @@ latest messages came. Those whose latest message is from the last 7 days are
 extracted months fill in from the present backward. While both lanes have
 threads, new mail gets at most half of the threads leased, and a lane without
 threads leaves the other every one. A thread whose mail changes after
-extraction keeps its place in time.
+extraction keeps its place in time, and one whose mail changes while it's
+leased is leased again: extraction records the version its lease read.
 
 `ingest_status` shows both lanes (`extraction.lanes`): the threads waiting and
 leased, new mail's oldest activity, and the backfill's newest, after which

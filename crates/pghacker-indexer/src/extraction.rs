@@ -305,8 +305,19 @@ pub struct MarkDistinctArgs {
 
 struct Lease {
     thread_ids: Vec<i64>,
+    /// Each thread's content version when leased; None for leases from
+    /// before migration 0017.
+    thread_versions: Option<Vec<i32>>,
     session: Option<String>,
     model: Option<String>,
+}
+
+impl Lease {
+    /// Thread `id`'s content version when it was leased.
+    fn version_of(&self, id: i64) -> Option<i32> {
+        let index = self.thread_ids.iter().position(|t| *t == id)?;
+        self.thread_versions.as_ref()?.get(index).copied()
+    }
 }
 
 /// How long a lease lasts by default, and how far each use renews it: a
@@ -317,6 +328,9 @@ const LEASE_MINUTES: i32 = 20;
 const FREE: &str = "NOT EXISTS (SELECT FROM extraction_leases l
                     WHERE t.id = ANY (l.thread_ids) AND l.released_at IS NULL AND l.expires_at > now())";
 
+/// A thread to lease, and its content version as the lease reads it.
+type Leased = (i64, i32);
+
 /// The next free threads of the lanes, up to `count`, picked from both lanes'
 /// heads. One statement reads both, so that a thread that new mail moves into
 /// the other lane meanwhile can't be read in both.
@@ -324,15 +338,15 @@ async fn lane_heads(
     indexer: &Indexer,
     client: &impl GenericClient,
     count: i64,
-) -> Result<Vec<(i64, Lane)>> {
+) -> Result<Vec<(Leased, Lane)>> {
     let rows = client
         .query(
             &format!(
-                "(SELECT t.id, true AS new_mail, t.last_at FROM threads t
+                "(SELECT t.id, t.content_version, true AS new_mail, t.last_at FROM threads t
                   WHERE {NEEDS_EXTRACTION} AND {new_mail} AND {FREE}
                   ORDER BY t.last_at, t.id LIMIT $1)
                  UNION ALL
-                 (SELECT t.id, false, t.last_at FROM threads t
+                 (SELECT t.id, t.content_version, false, t.last_at FROM threads t
                   WHERE {NEEDS_EXTRACTION} AND {backfill} AND {FREE}
                   ORDER BY t.last_at DESC NULLS LAST, t.id DESC LIMIT $1)",
                 new_mail = lanes::new_mail("$2"),
@@ -344,8 +358,8 @@ async fn lane_heads(
     let mut new_mail = Vec::new();
     let mut backfill = Vec::new();
     for row in rows {
-        let head: (Option<DateTime<Utc>>, i64) = (row.get(2), row.get(0));
-        if row.get(1) {
+        let head: (Option<DateTime<Utc>>, i64, i32) = (row.get(3), row.get(0), row.get(1));
+        if row.get(2) {
             new_mail.push(head);
         } else {
             backfill.push(head);
@@ -358,8 +372,14 @@ async fn lane_heads(
     Ok(indexer.lanes.pick(
         count as usize,
         indexer.settings.new_mail_share,
-        new_mail.into_iter().map(|(_, id)| id).collect(),
-        backfill.into_iter().map(|(_, id)| id).collect(),
+        new_mail
+            .into_iter()
+            .map(|(_, id, version)| (id, version))
+            .collect(),
+        backfill
+            .into_iter()
+            .map(|(_, id, version)| (id, version))
+            .collect(),
     ))
 }
 
@@ -370,15 +390,16 @@ async fn lease(client: &impl GenericClient, token: &str) -> Result<Lease> {
             "UPDATE extraction_leases
              SET expires_at = greatest(expires_at, now() + make_interval(mins => $2))
              WHERE token = $1 AND released_at IS NULL AND expires_at > now()
-             RETURNING thread_ids, session, model",
+             RETURNING thread_ids, thread_versions, session, model",
             &[&token, &LEASE_MINUTES],
         )
         .await?
     {
         return Ok(Lease {
             thread_ids: row.get(0),
-            session: row.get(1),
-            model: row.get(2),
+            thread_versions: row.get(1),
+            session: row.get(2),
+            model: row.get(3),
         });
     }
     let released: Option<bool> = client
@@ -413,24 +434,26 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
     let tx = client.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('pghacker.extraction_leases'))")
         .await?;
-    let picked: Vec<(i64, Lane)> = match &args.thread_ids {
+    let picked: Vec<(Leased, Lane)> = match &args.thread_ids {
         Some(ids) if !ids.is_empty() => tx
             .query(
                 &format!(
-                    "SELECT t.id FROM threads t WHERE t.id = ANY ($1) AND {FREE} ORDER BY t.id"
+                    "SELECT t.id, t.content_version FROM threads t
+                     WHERE t.id = ANY ($1) AND {FREE} ORDER BY t.id"
                 ),
                 &[ids],
             )
             .await?
             .iter()
-            .map(|row| (row.get(0), Lane::Requested))
+            .map(|row| ((row.get(0), row.get(1)), Lane::Requested))
             .collect(),
         _ => match indexer.settings.extraction_order {
             Order::Lanes => lane_heads(indexer, &*tx, count).await?,
             Order::Largest => tx
                 .query(
                     &format!(
-                        "SELECT t.id FROM threads t WHERE {NEEDS_EXTRACTION} AND {FREE}
+                        "SELECT t.id, t.content_version FROM threads t
+                         WHERE {NEEDS_EXTRACTION} AND {FREE}
                          ORDER BY (t.extraction_state = 'pending') DESC, t.message_count DESC, t.id
                          LIMIT $1"
                     ),
@@ -438,11 +461,12 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
                 )
                 .await?
                 .iter()
-                .map(|row| (row.get(0), Lane::Largest))
+                .map(|row| ((row.get(0), row.get(1)), Lane::Largest))
                 .collect(),
         },
     };
-    let ids: Vec<i64> = picked.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<i64> = picked.iter().map(|((id, _), _)| *id).collect();
+    let versions: Vec<i32> = picked.iter().map(|((_, version), _)| *version).collect();
     if ids.is_empty() {
         tx.commit().await?;
         return Ok(json!({
@@ -456,15 +480,15 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
     let token = Uuid::new_v4();
     let expires: DateTime<Utc> = tx
         .query_one(
-            "INSERT INTO extraction_leases (token, thread_ids, session, model, expires_at)
-             VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5::int)) RETURNING expires_at",
-            &[&token, &ids, &args.session, &args.model, &(minutes as i32)],
+            "INSERT INTO extraction_leases (token, thread_ids, thread_versions, session, model, expires_at)
+             VALUES ($1, $2, $3, $4, $5, now() + make_interval(mins => $6::int)) RETURNING expires_at",
+            &[&token, &ids, &versions, &args.session, &args.model, &(minutes as i32)],
         )
         .await?
         .get(0);
     tx.commit().await?;
     let mut threads = Vec::new();
-    for (id, lane) in &picked {
+    for ((id, _), lane) in &picked {
         let mut overview = thread_overview(&**client, *id).await?;
         overview["lane"] = json!(lane.as_str());
         threads.push(overview);
@@ -874,13 +898,22 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     if !lease_record.thread_ids.contains(&args.thread_id) {
         return Err(anyhow!("thread {} isn't in this lease", args.thread_id));
     }
-    let thread_version: i32 = client
-        .query_one(
+    let Some(current) = client
+        .query_opt(
             "SELECT content_version FROM threads WHERE id = $1",
             &[&args.thread_id],
         )
         .await?
-        .get(0);
+    else {
+        release_if_done(&**client, token).await?;
+        return Err(gone(args.thread_id));
+    };
+    // What the lease read: mail that came since leaves the thread changed,
+    // to be leased again. Leases from before the versions were kept record
+    // the version now.
+    let thread_version: i32 = lease_record
+        .version_of(args.thread_id)
+        .unwrap_or_else(|| current.get(0));
 
     if let Some(reason) = &args.skip_reason {
         if !args.features.is_empty() || !args.decisions.is_empty() || !args.positions.is_empty() {
@@ -891,13 +924,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 "skip_reason must say why the thread has nothing to extract"
             ));
         }
-        client
-            .execute(
-                "UPDATE threads SET extraction_state = 'skipped', extracted_version = $2, extracted_at = now()
-                 WHERE id = $1",
-                &[&args.thread_id, &thread_version],
-            )
-            .await?;
+        record_extraction(&**client, args.thread_id, "skipped", thread_version).await?;
         release_if_done(&**client, token).await?;
         return Ok(json!({ "accepted": true, "thread_id": args.thread_id, "skipped": reason }));
     }
@@ -1448,11 +1475,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         )
         .await?;
     }
-    tx.execute(
-        "UPDATE threads SET extraction_state = 'extracted', extracted_version = $2, extracted_at = now() WHERE id = $1",
-        &[&args.thread_id, &thread_version],
-    )
-    .await?;
+    record_extraction(&*tx, args.thread_id, "extracted", thread_version).await?;
     tx.commit().await?;
     release_if_done(&**client, token).await?;
     crate::jobs::wake(&**client, crate::jobs::kind::GRAPH_SYNC).await?;
@@ -1470,6 +1493,35 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
 /// The text, unless it's missing or blank.
 fn given(text: &Option<String>) -> Option<&str> {
     text.as_deref().map(str::trim).filter(|t| !t.is_empty())
+}
+
+/// The error for a leased thread that ingest has since merged into another.
+fn gone(thread_id: i64) -> anyhow::Error {
+    anyhow!(
+        "thread {thread_id} isn't stored any more: mail merged it into another thread, which extraction \
+         leases in its turn; nothing was saved"
+    )
+}
+
+/// Records thread `id` as extracted or skipped at `version`, the content
+/// version its lease read.
+async fn record_extraction(
+    client: &impl GenericClient,
+    id: i64,
+    state: &str,
+    version: i32,
+) -> Result<()> {
+    let updated = client
+        .execute(
+            "UPDATE threads SET extraction_state = $2, extracted_version = $3, extracted_at = now()
+             WHERE id = $1",
+            &[&id, &state, &version],
+        )
+        .await?;
+    if updated != 1 {
+        return Err(gone(id));
+    }
+    Ok(())
 }
 
 /// A verdict that two features, or two decisions, are different things.

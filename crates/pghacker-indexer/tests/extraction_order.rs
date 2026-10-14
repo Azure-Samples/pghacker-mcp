@@ -325,3 +325,179 @@ async fn a_leased_thread_that_new_mail_moves_is_not_leased_again() {
     assert_eq!(threads[0]["thread_id"], 4);
     assert_eq!(threads[0]["lane"], "requested");
 }
+
+/// Leases thread `id` by its id: the lease's token.
+async fn token_for(indexer: &Indexer, id: i64) -> String {
+    let batch = extraction::next_batch(indexer, args(json!({ "thread_ids": [id] })))
+        .await
+        .unwrap();
+    batch["lease_token"].as_str().unwrap().to_owned()
+}
+
+/// Stores a reply to thread `id`, sent now, as ingest does.
+async fn reply(db: &TestDb, id: i64) {
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "INSERT INTO messages (message_id, list, thread_id, parent_message_id, author_id, from_name, subject,
+                                   sent_at, body, body_clean)
+             VALUES ('reply-{id}@example.org', 'pgsql-hackers', {id}, 't{id}@example.org', 1, 'Alice Hacker',
+                     'Re: Thread {id}', now(), 'A reply that came during the lease.',
+                     'A reply that came during the lease.');
+             UPDATE threads SET message_count = message_count + 1, last_at = now(),
+                                content_version = content_version + 1
+             WHERE id = {id};"
+        ))
+        .await
+        .unwrap();
+}
+
+/// Each thread's state, the version extraction read, and its version now.
+async fn versions(db: &TestDb) -> Vec<(i64, String, Option<i32>, i32)> {
+    db.indexer()
+        .await
+        .unwrap()
+        .query(
+            "SELECT id, extraction_state, extracted_version, content_version FROM threads ORDER BY id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+        .collect()
+}
+
+#[tokio::test]
+async fn mail_that_comes_during_a_lease_leaves_the_thread_to_lease_again() {
+    let db = corpus(&[
+        (1, Some(10), "pending", false),
+        (2, Some(20), "pending", false),
+    ])
+    .await;
+    let indexer = indexer(&db, &[]);
+    let token = token_for(&indexer, 1).await;
+    reply(&db, 1).await;
+    let skipped = extraction::submit(
+        &indexer,
+        args(json!({ "lease_token": token, "thread_id": 1, "skip_reason": "Only an announcement so far." })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skipped["accepted"], true, "{skipped:#}");
+
+    let token = token_for(&indexer, 2).await;
+    reply(&db, 2).await;
+    let matched = extraction::match_extracts(
+        &indexer,
+        args(json!({ "lease_token": token, "drafts": [
+            { "thread_id": 2, "kind": "feature", "name": "Planner change", "description": "A change to the planner." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    let draft = matched["drafts"][0]["draft_id"].as_i64().unwrap();
+    let saved = extraction::submit(
+        &indexer,
+        args(json!({ "lease_token": token, "thread_id": 2,
+            "features": [{ "draft_id": draft, "action": "new", "slug": "planner-change", "name": "Planner change",
+                           "description": "A change to the planner.", "status": "proposed",
+                           "citations": [{ "message_id": "t2@example.org", "quote": "proposes a change to the planner" }] }] })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["accepted"], true, "{saved:#}");
+
+    assert_eq!(
+        versions(&db).await,
+        [
+            (1, "skipped".to_owned(), Some(1), 2),
+            (2, "extracted".to_owned(), Some(1), 2),
+        ],
+        "extraction records the version its lease read"
+    );
+    assert_eq!(
+        extraction_status(&indexer).await["threads_changed_since_extraction"],
+        2
+    );
+    assert_eq!(
+        lease_all(&indexer, 1).await.concat(),
+        leased(&[(1, "new_mail"), (2, "new_mail")]),
+        "the replies are new mail"
+    );
+}
+
+#[tokio::test]
+async fn a_lease_from_before_versions_records_the_version_at_submission() {
+    let db = corpus(&[(3, Some(10), "pending", false)]).await;
+    let indexer = indexer(&db, &[]);
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO extraction_leases (token, thread_ids, expires_at)
+             VALUES ('00000000-0000-4000-8000-000000000003', '{3}', now() + interval '20 minutes')",
+        )
+        .await
+        .unwrap();
+    reply(&db, 3).await;
+    let skipped = extraction::submit(
+        &indexer,
+        args(
+            json!({ "lease_token": "00000000-0000-4000-8000-000000000003", "thread_id": 3,
+                     "skip_reason": "Only an announcement so far." }),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skipped["accepted"], true, "{skipped:#}");
+    assert_eq!(versions(&db).await, [(3, "skipped".to_owned(), Some(2), 2)]);
+    assert!(lease(&indexer, 1).await.is_none());
+}
+
+#[tokio::test]
+async fn a_thread_that_mail_merged_away_during_its_lease_is_not_saved() {
+    let db = corpus(&[
+        (4, Some(10), "pending", false),
+        (5, Some(11), "pending", false),
+    ])
+    .await;
+    let indexer = indexer(&db, &[]);
+    let token = token_for(&indexer, 4).await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "UPDATE messages SET thread_id = 5 WHERE thread_id = 4;
+             DELETE FROM threads WHERE id = 4;
+             UPDATE threads SET message_count = 2, content_version = content_version + 1 WHERE id = 5;",
+        )
+        .await
+        .unwrap();
+    let error = extraction::submit(
+        &indexer,
+        args(json!({ "lease_token": token, "thread_id": 4, "skip_reason": "Only an announcement so far." })),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("isn't stored any more"),
+        "{error}"
+    );
+    let live: i64 = client
+        .query_one(
+            "SELECT count(*) FROM extraction_leases WHERE released_at IS NULL",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        live, 0,
+        "the lease, with nothing left to submit, is released"
+    );
+    assert_eq!(
+        lease_all(&indexer, 1).await.concat(),
+        leased(&[(5, "backfill")])
+    );
+}
