@@ -4,7 +4,8 @@
 #   deploy/scripts/run-job.sh probe | restore | history
 # history builds the commit history (scripts/history-build.mjs) in the probe
 # job's container, given 4 vCPU and 8 GiB.
-# Run after `terraform init` in deploy/terraform (it reads the outputs).
+# Run after `terraform init` in deploy/terraform (it reads the outputs). history
+# also needs jq.
 set -euo pipefail
 
 kind="${1:-}"
@@ -13,10 +14,8 @@ case "$kind" in
   *) echo "usage: $0 probe|restore|history" >&2; exit 2 ;;
 esac
 job_kind="$kind"
-overrides=()
 if [ "$kind" = history ]; then
   job_kind=probe
-  overrides=(--cpu 4 --memory 8Gi --command node --args scripts/history-build.mjs)
 fi
 cd "$(dirname "$0")/../terraform"
 subscription=$(terraform output -raw subscription_id)
@@ -26,6 +25,21 @@ workspace=$(terraform output -raw log_analytics_workspace_id)
 if [ -z "$job" ] || [ "$job" = "null" ]; then
   echo "There's no $kind job: set seed_image and apply first." >&2
   exit 1
+fi
+
+overrides=()
+if [ "$kind" = history ]; then
+  # An execution's template replaces the job's whole template, and the Azure
+  # CLI ignores --cpu, --memory, --command and --args without --image. So the
+  # execution gets a copy of the job's container, with its image, environment
+  # and secrets, that runs the build instead of the probe.
+  template=$(mktemp)
+  trap 'rm -f "$template"' EXIT
+  az containerapp job show --subscription "$subscription" --name "$job" --resource-group "$rg" \
+    --query properties.template --output json |
+    jq '{containers: [.containers[0] | {name, image, env,
+      command: ["node", "scripts/history-build.mjs"], resources: {cpu: 4, memory: "8Gi"}}]}' > "$template"
+  overrides=(--yaml "$template")
 fi
 
 execution=$(az containerapp job start --subscription "$subscription" --name "$job" --resource-group "$rg" \
