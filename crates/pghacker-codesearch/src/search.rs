@@ -158,6 +158,9 @@ pub struct SearchArgs {
     /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
+    /// Search the commit history instead of one version: `all`, a branch, tag or commit with its history (REL_17_STABLE), or a range A..B (B's history that isn't A's). Gives each line once per path and text, with the commit that added it, those that removed it, and the branches and releases that have it.
+    #[serde(default)]
+    pub history: Option<String>,
 }
 
 impl SearchArgs {
@@ -255,6 +258,12 @@ pub struct SearchResult {
     pub similar: Option<Similar>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Lines in history (with `history`), one per path and text.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<crate::history_search::HistoryHit>,
+    /// The commits a history search covered: `all` or the range.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
     pub elapsed_ms: u64,
 }
 
@@ -647,6 +656,25 @@ async fn search_inner(
         bail!("context is at most {MAX_CONTEXT} lines");
     }
     let plan = plan(args)?;
+    if args.history.is_some() {
+        if args.output != OutputMode::Lines || args.group_by != GroupBy::File || args.context > 0 {
+            bail!("a history search gives lines, without context or grouping by match");
+        }
+        if args
+            .paths
+            .to_vec()
+            .iter()
+            .any(|p| crate::snapshot::mount_of(p).is_some())
+        {
+            bail!("a history search takes paths from the root, such as src/backend");
+        }
+        let patterns = Patterns {
+            query: &plan.query,
+            also: &plan.also,
+            not: plan.not.as_ref(),
+        };
+        return crate::history_search::search(client, snapshot, args, &patterns, budget).await;
+    }
     let table = FileTable::view(client, snapshot, &args.paths.to_vec()).await?;
     let (files, whole) = search_scope(
         &table,
@@ -720,6 +748,8 @@ async fn search_inner(
         matches: Vec::new(),
         similar: None,
         notes: Vec::new(),
+        history: Vec::new(),
+        range: None,
         elapsed_ms: 0,
     };
     let terms_of = |f: &usize| (!plan.terms.is_empty()).then(|| cover.get(f).copied().unwrap_or(0));
@@ -941,6 +971,8 @@ async fn complement(
         matches: Vec::new(),
         similar: None,
         notes: Vec::new(),
+        history: Vec::new(),
+        range: None,
         elapsed_ms: 0,
     };
     let mut notes: BTreeMap<&'static str, ()> = BTreeMap::new();

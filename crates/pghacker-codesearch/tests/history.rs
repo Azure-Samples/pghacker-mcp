@@ -609,3 +609,154 @@ async fn virtual_folders_mount_other_commits() {
             .any(|p| p.contains("~v") || p.starts_with("/branch"))
     );
 }
+
+#[tokio::test]
+async fn history_search_finds_lines_across_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let commits = repository(dir.path());
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: dir.path().to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: vec!["src".into(), "contrib".into()],
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let head = pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", None)
+        .await
+        .unwrap();
+    let find = |history: &str, paths: Option<&str>| {
+        let (reader, head) = (&reader, head.clone());
+        let mut args = json!({"query": "json_from_cstring", "history": history});
+        if let Some(p) = paths {
+            args["paths"] = json!(p);
+        }
+        async move {
+            let args: SearchArgs = serde_json::from_value(args).unwrap();
+            search(reader, &head, &args).await.unwrap()
+        }
+    };
+    let all = find("all", None).await;
+    assert!(all.complete);
+    let texts: Vec<&str> = all.history.iter().map(|h| h.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec![
+            "\treturn json_from_cstring(json);",
+            "\treturn json_from_cstring_safe(json);"
+        ]
+    );
+    let (c2, b1, c0) = (&commits[0].2, &commits[1].2, &commits[2].2);
+    let original = &all.history[0];
+    assert_eq!(original.path, "src/backend/utils/adt/json.c");
+    assert_eq!(
+        (original.added.sha.as_str(), original.added.branch.as_str()),
+        (c0.as_str(), "master")
+    );
+    assert_eq!(original.line, 10);
+    // The branch replaced it; master still has it, renamed into jsonfuncs.c.
+    let removed: Vec<&str> = original.removed.iter().map(|c| c.sha.as_str()).collect();
+    assert_eq!(removed, vec![b1.as_str()]);
+    assert_eq!(original.branches, vec!["master"]);
+    let releases = original.releases.as_ref().unwrap();
+    assert_eq!((releases.first.as_str(), releases.count), ("REL_17_0", 1));
+    let fixed = &all.history[1];
+    assert_eq!(
+        (fixed.added.sha.as_str(), fixed.branches.clone()),
+        (b1.as_str(), vec!["REL_18_STABLE".to_owned()])
+    );
+    assert!(fixed.releases.is_none());
+
+    let texts = |r: &pghacker_codesearch::SearchResult| -> usize { r.history.len() };
+    assert_eq!(texts(&find("REL_17_0", None).await), 1);
+    assert_eq!(texts(&find("master", None).await), 1);
+    assert_eq!(texts(&find("REL_17_0..REL_18_STABLE", None).await), 2);
+    assert_eq!(
+        texts(&find(&format!("{}..{}", &c2[..8], &b1[..8]), None).await),
+        1
+    );
+    assert_eq!(texts(&find("all", Some("src/backend/utils")).await), 2);
+    assert_eq!(texts(&find("all", Some("src/include")).await), 0);
+    // grep over /history: each line once, at the first commit that has it.
+    let grep = |command: String| {
+        let (reader, head) = (&reader, head.clone());
+        async move {
+            let o = run(reader, &head, &command, Limits::default())
+                .await
+                .unwrap();
+            (String::from_utf8(o.stdout).unwrap(), o.stderr, o.status)
+        }
+    };
+    let (o, e, rc) = grep("grep -rn json_from_cstring /history".into()).await;
+    assert_eq!(
+        (o.as_str(), rc),
+        (
+            format!(
+                "/commit/{}/src/backend/utils/adt/json.c:10:\treturn json_from_cstring(json);\n\
+                 /commit/{}/src/backend/utils/adt/json.c:10:\treturn json_from_cstring_safe(json);\n",
+                &c0[..12],
+                &b1[..12]
+            )
+            .as_str(),
+            0
+        ),
+        "{e:?}"
+    );
+    let (o, _, _) =
+        grep("grep -rn json_from_cstring /history/REL_18_STABLE..master/src".into()).await;
+    assert_eq!(
+        o,
+        format!(
+            "/commit/{}/src/backend/utils/adt/jsonfuncs.c:10:\treturn json_from_cstring(json);\n",
+            &c2[..12]
+        )
+    );
+    let (o, _, _) = grep("grep -c json_from_cstring /history/REL_17_0".into()).await;
+    assert_eq!(
+        o,
+        format!("/commit/{}/src/backend/utils/adt/json.c:1\n", &c0[..12])
+    );
+    let (o, _, rc) = grep("grep -rl json_from /history/src/include".into()).await;
+    assert_eq!((o.as_str(), rc), ("", 1));
+    let error = run(
+        &reader,
+        &head,
+        "grep -rn json src /history",
+        Limits::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("/history"), "{error}");
+
+    let snap_args: SearchArgs =
+        serde_json::from_value(json!({"query": "x", "history": "all"})).unwrap();
+    let mut indexer = db.indexer().await.unwrap();
+    load_snapshot(
+        &mut indexer,
+        &SnapshotSpec {
+            repo: "postgres".into(),
+            git_ref: "master".into(),
+            sha: c2.clone(),
+            version: Some("19".into()),
+            paths: vec!["src".into()],
+            source: RepoSource::Local {
+                path: dir.path().to_owned(),
+            },
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let snap = resolve_snapshot(&reader, "postgres", Some("19"))
+        .await
+        .unwrap();
+    let error = search(&reader, &snap, &snap_args).await.unwrap_err();
+    assert!(error.to_string().contains("history"), "{error}");
+}

@@ -3,6 +3,7 @@
 //! all.
 
 pub mod format;
+pub mod history;
 pub mod options;
 pub mod shell;
 pub mod stages;
@@ -655,12 +656,6 @@ async fn run_inner(
     check_program(&words)?;
     let opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
     let compiled = compile(&opts)?;
-    let prepared = prepare(&opts, &table, &snapshot.repo, &cwd)?;
-    // GNU grep gives up at once when nothing can be selected: -m 0, or -v
-    // with one empty pattern.
-    let hopeless = (opts.max_count == Some(0)
-        || (opts.invert && opts.patterns == [""] && !opts.line && !opts.word))
-        && opts.mode != Mode::FilesWithoutMatch;
     // Later stages are checked before the search runs.
     let mut later = Vec::new();
     for stage in &script.stages[1..] {
@@ -668,106 +663,127 @@ async fn run_inner(
         check_stage(&words)?;
         later.push(words);
     }
-    let need_lines = opts.mode == Mode::Lines;
-    let need = if need_lines {
-        Need::Texts
-    } else {
-        Need::Counts
-    };
-    let prepared = if hopeless {
-        Prepared {
-            items: Vec::new(),
-            stderr: Vec::new(),
-            errors: false,
-            ..prepared
+    let history_operands = opts
+        .operands
+        .iter()
+        .filter(|o| history::is_history(o))
+        .count();
+    let (mut stdout, mut stderr, mut status) = if history_operands > 0 {
+        if history_operands < opts.operands.len() {
+            bail!("grep: /history can't be searched with other files");
+        }
+        match history::grep(client, snapshot, &opts, &compiled, budget).await? {
+            Some(printed) => printed,
+            None => return Ok(incomplete_output()),
         }
     } else {
-        prepared
-    };
-    let sel = selection(
-        client,
-        (snapshot, &table),
-        &opts,
-        &compiled,
-        &prepared,
-        need,
-        budget,
-    )
-    .await?;
-    if sel.incomplete {
-        return Ok(incomplete_output());
-    }
-
-    // Context lines, when the printed lines need them.
-    let mut extra: HashMap<(usize, i32), String> = HashMap::new();
-    if need_lines && (opts.before > 0 || opts.after > 0) {
-        let max = opts.max_count.map_or(usize::MAX, |m| m as usize);
-        let mut ranges = Vec::new();
-        for (&k, lines) in &sel.lines {
-            let last = table.files[k].line_count;
-            for (n, _) in lines.iter().take(max) {
-                let lo = (n - opts.before.max(0) as i32).max(1);
-                let hi = (n + opts.after.max(0) as i32).min(last);
-                ranges.push((table.files[k].id, lo, hi));
+        let prepared = prepare(&opts, &table, &snapshot.repo, &cwd)?;
+        // GNU grep gives up at once when nothing can be selected: -m 0, or -v
+        // with one empty pattern.
+        let hopeless = (opts.max_count == Some(0)
+            || (opts.invert && opts.patterns == [""] && !opts.line && !opts.word))
+            && opts.mode != Mode::FilesWithoutMatch;
+        let need_lines = opts.mode == Mode::Lines;
+        let need = if need_lines {
+            Need::Texts
+        } else {
+            Need::Counts
+        };
+        let prepared = if hopeless {
+            Prepared {
+                items: Vec::new(),
+                stderr: Vec::new(),
+                errors: false,
+                ..prepared
             }
-        }
-        let mut id_to_file: HashMap<i32, Vec<usize>> = HashMap::new();
-        for &k in sel.lines.keys() {
-            id_to_file.entry(table.files[k].id).or_default().push(k);
-        }
-        for ((id, n), text) in engine::line_ranges(
+        } else {
+            prepared
+        };
+        let sel = selection(
             client,
-            snapshot.history.as_ref(),
-            &engine::merge_ranges(ranges),
+            (snapshot, &table),
+            &opts,
+            &compiled,
+            &prepared,
+            need,
             budget,
         )
-        .await?
-        {
-            for &k in &id_to_file[&id] {
-                extra.insert((k, n), text.clone());
-            }
-        }
-    }
-
-    let mut printer = Printer::new(&opts, &compiled.matcher, prepared.with_filename);
-    for item in &prepared.items {
-        let k = item.file;
-        let f = &table.files[k];
-        let empty = Vec::new();
-        let lines = sel.lines.get(&k).unwrap_or(&empty);
-        let selected: Vec<i32> = lines.iter().map(|(n, _)| *n).collect();
-        let count = sel.invert_counts.then(|| {
-            (f.line_count as u64).saturating_sub(sel.matched.get(&k).copied().unwrap_or(0))
-        });
-        let by_line: HashMap<i32, &str> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
-        let text = |n: i32| {
-            by_line
-                .get(&n)
-                .map(|t| (*t).to_owned())
-                .or_else(|| extra.get(&(k, n)).cloned())
-        };
-        let found = printer.file(&item.display, &selected, count, f.line_count, &text);
-        if opts.mode == Mode::Quiet && found > 0 {
-            break;
-        }
-        if budget.exceeded() {
+        .await?;
+        if sel.incomplete {
             return Ok(incomplete_output());
         }
-    }
-    let selected_any = printer.selected > 0;
-    let listed = printer.listed;
-    let mut stdout = printer.out;
-    let mut status = if opts.mode == Mode::FilesWithoutMatch {
-        if listed > 0 { 0 } else { 1 }
-    } else if selected_any {
-        0
-    } else {
-        1
+
+        // Context lines, when the printed lines need them.
+        let mut extra: HashMap<(usize, i32), String> = HashMap::new();
+        if need_lines && (opts.before > 0 || opts.after > 0) {
+            let max = opts.max_count.map_or(usize::MAX, |m| m as usize);
+            let mut ranges = Vec::new();
+            for (&k, lines) in &sel.lines {
+                let last = table.files[k].line_count;
+                for (n, _) in lines.iter().take(max) {
+                    let lo = (n - opts.before.max(0) as i32).max(1);
+                    let hi = (n + opts.after.max(0) as i32).min(last);
+                    ranges.push((table.files[k].id, lo, hi));
+                }
+            }
+            let mut id_to_file: HashMap<i32, Vec<usize>> = HashMap::new();
+            for &k in sel.lines.keys() {
+                id_to_file.entry(table.files[k].id).or_default().push(k);
+            }
+            for ((id, n), text) in engine::line_ranges(
+                client,
+                snapshot.history.as_ref(),
+                &engine::merge_ranges(ranges),
+                budget,
+            )
+            .await?
+            {
+                for &k in &id_to_file[&id] {
+                    extra.insert((k, n), text.clone());
+                }
+            }
+        }
+
+        let mut printer = Printer::new(&opts, &compiled.matcher, prepared.with_filename);
+        for item in &prepared.items {
+            let k = item.file;
+            let f = &table.files[k];
+            let empty = Vec::new();
+            let lines = sel.lines.get(&k).unwrap_or(&empty);
+            let selected: Vec<i32> = lines.iter().map(|(n, _)| *n).collect();
+            let count = sel.invert_counts.then(|| {
+                (f.line_count as u64).saturating_sub(sel.matched.get(&k).copied().unwrap_or(0))
+            });
+            let by_line: HashMap<i32, &str> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
+            let text = |n: i32| {
+                by_line
+                    .get(&n)
+                    .map(|t| (*t).to_owned())
+                    .or_else(|| extra.get(&(k, n)).cloned())
+            };
+            let found = printer.file(&item.display, &selected, count, f.line_count, &text);
+            if opts.mode == Mode::Quiet && found > 0 {
+                break;
+            }
+            if budget.exceeded() {
+                return Ok(incomplete_output());
+            }
+        }
+        let selected_any = printer.selected > 0;
+        let listed = printer.listed;
+        let stdout = printer.out;
+        let mut status = if opts.mode == Mode::FilesWithoutMatch {
+            if listed > 0 { 0 } else { 1 }
+        } else if selected_any {
+            0
+        } else {
+            1
+        };
+        if prepared.errors && !(opts.mode == Mode::Quiet && selected_any) {
+            status = 2;
+        }
+        (stdout, prepared.stderr.clone(), status)
     };
-    if prepared.errors && !(opts.mode == Mode::Quiet && selected_any) {
-        status = 2;
-    }
-    let mut stderr = prepared.stderr.clone();
     if first.stderr_to_stdout() {
         let mut merged: Vec<u8> = stderr
             .iter()
@@ -826,7 +842,7 @@ async fn run_inner(
         stdout,
         stderr,
         status,
-        incomplete: sel.incomplete,
+        incomplete: false,
     })
 }
 

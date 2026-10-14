@@ -82,6 +82,37 @@ pub async fn attach(
     Ok(snapshot)
 }
 
+/// Where a row is alive: sorted, disjoint [lo, hi) spans, as `lo`, `hi`
+/// and `alive` store them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Spans(pub Vec<(i64, i64)>);
+
+impl Spans {
+    /// PostgreSQL's int8multirange text form: `{[1,5),[7,)}`.
+    pub fn parse(text: &str) -> Result<Self> {
+        let inner = text
+            .trim()
+            .strip_prefix('{')
+            .and_then(|t| t.strip_suffix('}'))
+            .with_context(|| format!("not a multirange: {text}"))?;
+        let mut out = Vec::new();
+        for part in inner.split("),").filter(|p| !p.is_empty()) {
+            let part = part.trim_end_matches(')');
+            let (lo, hi) = part
+                .strip_prefix('[')
+                .and_then(|p| p.split_once(','))
+                .with_context(|| format!("not a range: {part}"))?;
+            let hi = if hi.is_empty() { i64::MAX } else { hi.parse()? };
+            out.push((lo.parse()?, hi));
+        }
+        Ok(Spans(out))
+    }
+
+    pub fn contains(&self, addr: i64) -> bool {
+        self.0.iter().any(|&(a, b)| a <= addr && addr < b)
+    }
+}
+
 /// SQL that row `alias` is alive at the address in parameter `param`.
 pub fn alive_at(alias: &str, param: &str) -> String {
     format!(
@@ -455,6 +486,9 @@ mod tests {
         assert_eq!(cache.lines, 5);
         assert!(alive_at("l", "$1").contains("l.alive @> $1"));
         assert!(checked("pghacker_history").is_ok());
+        let spans = Spans::parse("{[1,5),[9,)}").unwrap();
+        assert_eq!(spans, Spans(vec![(1, 5), (9, i64::MAX)]));
+        assert!(spans.contains(4) && !spans.contains(5) && spans.contains(1 << 40));
         assert!(checked("x; DROP TABLE y").is_err());
     }
 }
