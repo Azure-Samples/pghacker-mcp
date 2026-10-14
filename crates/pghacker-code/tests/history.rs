@@ -91,6 +91,8 @@ fn fixture() -> Repo {
     r.write("bin.dat", b"\x00\x01");
     r.write("bom.txt", "\u{feff}with a bom\n".as_bytes());
     r.write("empty.txt", b"");
+    // Not UTF-8 (Latin-1) until c2.
+    r.write("latin1.txt", b"caf\xe9\nplain line\nmore\n");
     std::os::unix::fs::symlink("a.c", r.dir.path().join("link.c")).unwrap();
     r.commit("c0: the first files");
 
@@ -118,6 +120,7 @@ fn fixture() -> Repo {
     r.write("src/a.c", a.as_bytes());
     r.remove("empty.txt");
     r.write("bom.txt", b"with a bom\n");
+    r.write("latin1.txt", "café\nplain line\nmore\n".as_bytes());
     r.commit("c2: move a.c");
 
     r.git(&["checkout", "-q", "REL_1_STABLE"]);
@@ -203,6 +206,37 @@ async fn every_file_at_every_commit_rebuilds_to_its_blob() {
     assert!(verified.files > 40, "{verified:?}");
 
     let admin = db.admin().await.unwrap();
+    // Text that isn't UTF-8 is binary to the tools, but its lines are kept:
+    // the ASCII line is one instance across the change to UTF-8, and the
+    // Latin-1 line is read a byte per character.
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM pghacker_history.code_line_instances WHERE line = 'plain line'"
+        )
+        .await,
+        1
+    );
+    let cafe: Vec<i32> = admin
+        .query(
+            "SELECT bytes FROM pghacker_history.code_line_instances WHERE line = 'café' ORDER BY lo",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(cafe, [4, 5]);
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM pghacker_history.code_file_versions \
+             WHERE path = 'latin1.txt' AND is_binary AND line_count = 3"
+        )
+        .await,
+        1
+    );
     // A line no commit touched is one instance, across the rename too.
     assert_eq!(
         count(
@@ -533,6 +567,7 @@ async fn a_build_then_syncs_equals_one_build() {
     repo.git(&["mv", "src/a.c", "src/b.c"]);
     repo.remove("crlf.txt");
     repo.write("bom.txt", b"\x00now binary");
+    repo.write("latin1.txt", b"caf\xe9 again\nplain line\nmore\n");
     repo.commit("c7: rename, delete, binary");
     repo.write("crlf.txt", b"back\r\nagain\r\n");
     let s = std::fs::read_to_string(repo.dir.path().join("src/b.c")).unwrap();

@@ -64,6 +64,13 @@ fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {
         }
     }
     write("doc/README", "outside the loaded paths\n");
+    // Text that isn't UTF-8: binary to the tools, though the history keeps
+    // its lines.
+    std::fs::write(
+        dir.join("src/backend/utils/adt/latin1.c"),
+        b"/* json caf\xe9 */\nint json_latin1 = makeNode(Datum);\n",
+    )
+    .unwrap();
     git(dir, 1, &["add", "-A"]);
     git(dir, 1, &["commit", "-q", "-m", "c0"]);
     let c0 = git(dir, 1, &["rev-parse", "HEAD"]);
@@ -243,6 +250,8 @@ async fn history_and_snapshots_answer_alike() {
         // No match in the files named: alternative spellings and names.
         json!({"query": "jsn_out", "paths": "src/backend"}),
         json!({"query": "no_such_name", "paths": ["src/include", "contrib"]}),
+        // Its only near spelling is in a binary file (Latin-1 text).
+        json!({"query": "json_latin2"}),
     ];
     for (version, _, _) in &commits {
         let snap = resolve_snapshot(&reader, "postgres", Some(version))
@@ -324,6 +333,49 @@ async fn history_and_snapshots_answer_alike() {
             found.push(rows);
         }
         assert_eq!(found[0], found[1], "{version}");
+
+        // Raw candidates of the whole commit: none from binary files.
+        let make_node =
+            pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
+                patterns: &["makeNode".into()],
+                dialect: pghacker_codesearch::pattern::Dialect::Fixed,
+                ignore_case: false,
+                word: false,
+                line: false,
+                semantics: pghacker_codesearch::pattern::Semantics::LeftmostFirst,
+            })
+            .unwrap();
+        for scope_first in [true, false] {
+            let mut both = Vec::new();
+            for s in [&snap, &hist] {
+                let table = pghacker_codesearch::snapshot::FileTable::load(&reader, s)
+                    .await
+                    .unwrap();
+                let path_of: std::collections::HashMap<i32, String> =
+                    table.files.iter().map(|f| (f.id, f.path.clone())).collect();
+                let q = LineQuery {
+                    snapshot_id: s.id,
+                    history: s.history.as_ref(),
+                    mounted: false,
+                    file_ids: None,
+                    require: vec![&make_node.filter],
+                    reject: vec![],
+                    cap: MAX_CANDIDATES,
+                    scope_first,
+                };
+                let mut rows: Vec<(String, i32)> = candidates(&reader, &q, &Budget::new(None))
+                    .await
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|r| (path_of[&r.file_id].clone(), r.line_no))
+                    .collect();
+                rows.sort();
+                both.push(rows);
+            }
+            assert!(!both[0].is_empty());
+            assert_eq!(both[0], both[1], "{version} scope_first {scope_first}");
+        }
 
         // Capped, both engines give the first lines in tree order.
         for (scope_first, whole) in [(true, true), (false, true), (true, false), (false, false)] {

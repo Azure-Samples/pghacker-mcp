@@ -119,6 +119,9 @@ CREATE TABLE code_file_versions (
     alive          int8multirange,
     size           int4 NOT NULL,
     line_count     int4 NOT NULL,
+    -- Binary to the code tools: a NUL byte or invalid UTF-8. Without a NUL
+    -- its lines are kept all the same (lines that aren't UTF-8 read as
+    -- Latin-1), so blame and diffs follow them as git does.
     is_binary      boolean NOT NULL,
     -- Whether the file ends with a newline, and starts with a UTF-8 BOM, so
     -- its lines rebuild the blob exactly.
@@ -140,7 +143,8 @@ CREATE TABLE code_line_instances (
     hi       int8 NOT NULL,
     id       int4 PRIMARY KEY,
     lineage  int4 NOT NULL,
-    -- octet_length(line), for byte offsets.
+    -- The line's length in the file, for byte offsets: octet_length(line),
+    -- except for a line read as Latin-1, which is longer as text.
     bytes    int4 NOT NULL,
     alive    int8multirange,
     -- The line this one replaced one-for-one (in a hunk of as many lines

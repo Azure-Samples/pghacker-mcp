@@ -110,7 +110,7 @@ pub async fn create(client: &Client, schema: &str) -> Result<()> {
         ));
     }
     sql.push_str(&format!(
-        "CREATE UNLOGGED TABLE {s}.stage_text (id int4 NOT NULL, text text NOT NULL);
+        "CREATE UNLOGGED TABLE {s}.stage_text (id int4 NOT NULL, text text NOT NULL, bytes int4 NOT NULL);
          CREATE UNLOGGED TABLE {s}.stage_versions (
              id int4, lineage int4, path text, blob_sha text, lo int8, hi int8,
              alive text, size int4, line_count int4, is_binary bool,
@@ -127,21 +127,26 @@ pub async fn create(client: &Client, schema: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copies each new line's text as the walk produces it.
+/// Copies each new line's text and length as the walk produces them.
 pub async fn copy_texts(
     client: &Client,
     schema: &str,
-    mut rx: mpsc::Receiver<Vec<(u32, String)>>,
+    mut rx: mpsc::Receiver<Vec<(u32, String, u32)>>,
 ) -> Result<u64> {
     let s = schema_name(schema)?;
     let sink = client
-        .copy_in(&format!("COPY {s}.stage_text (id, text) FROM STDIN BINARY"))
+        .copy_in(&format!(
+            "COPY {s}.stage_text (id, text, bytes) FROM STDIN BINARY"
+        ))
         .await?;
-    let writer = BinaryCopyInWriter::new(sink, &[Type::INT4, Type::TEXT]);
+    let writer = BinaryCopyInWriter::new(sink, &[Type::INT4, Type::TEXT, Type::INT4]);
     let mut writer = std::pin::pin!(writer);
     while let Some(batch) = rx.recv().await {
-        for (id, text) in &batch {
-            writer.as_mut().write(&[&(*id as i32), text]).await?;
+        for (id, text, bytes) in &batch {
+            writer
+                .as_mut()
+                .write(&[&(*id as i32), text, &(*bytes as i32)])
+                .await?;
         }
     }
     Ok(writer.finish().await?)
@@ -515,7 +520,7 @@ pub async fn finish(client: &Client, schema: &str, built: &Built<'_>) -> Result<
                  SET work_mem = '256MB';
                  INSERT INTO {s}.code_line_instances
                      (weave, lo, hi, id, lineage, bytes, alive, replaces, line)
-                 SELECT m.weave, m.lo, m.hi, m.id, m.lineage, octet_length(t.text),
+                 SELECT m.weave, m.lo, m.hi, m.id, m.lineage, t.bytes,
                         m.alive::int8multirange, m.replaces, t.text
                  FROM {s}.stage_meta m JOIN {s}.stage_text t USING (id)
                  ORDER BY m.lineage, m.hi, m.weave;

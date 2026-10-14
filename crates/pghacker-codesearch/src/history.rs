@@ -130,7 +130,9 @@ pub async fn files(
     let rows = client
         .query(
             &format!(
-                "SELECT v.id, v.path, v.is_binary, v.line_count, v.size \
+                // A binary file has no lines to the tools, as in the snapshots.
+                "SELECT v.id, v.path, v.is_binary, \
+                        CASE WHEN v.is_binary THEN 0 ELSE v.line_count END, v.size \
                  FROM {s}.code_file_versions v WHERE {}",
                 alive_at("v", "$1")
             ),
@@ -179,7 +181,8 @@ pub async fn lineage_map(client: &impl GenericClient, h: &History) -> Result<Lin
     let map: HashMap<i32, i32> = client
         .query(
             &format!(
-                "SELECT v.lineage, v.id FROM {s}.code_file_versions v WHERE {}",
+                "SELECT v.lineage, v.id FROM {s}.code_file_versions v \
+                 WHERE {} AND NOT v.is_binary",
                 alive_at("v", "$1")
             ),
             &[&h.addr],
@@ -323,8 +326,10 @@ fn versions_sql(s: &str, ids: bool) -> String {
              WHERE id = ANY($1::int4[]) OFFSET 0)"
         )
     } else {
+        // Binary files' lines (text that isn't UTF-8) are never searched.
         format!(
-            "(SELECT v.id, v.lineage, v.lo FROM {s}.code_file_versions v WHERE {} OFFSET 0)",
+            "(SELECT v.id, v.lineage, v.lo FROM {s}.code_file_versions v \
+             WHERE {} AND NOT v.is_binary OFFSET 0)",
             alive_at("v", "$1")
         )
     }
@@ -496,7 +501,8 @@ async fn in_tree_order(
             let mut all: Vec<(i32, String)> = client
                 .query(
                     &format!(
-                        "SELECT v.id, v.path FROM {s}.code_file_versions v WHERE {}",
+                        "SELECT v.id, v.path FROM {s}.code_file_versions v \
+                         WHERE {} AND NOT v.is_binary",
                         alive_at("v", "$1")
                     ),
                     &[&h.addr],
@@ -617,8 +623,11 @@ pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
     Ok(if whole {
         format!(
             "(SELECT l.id, l.lineage, l.line FROM {s}.code_line_instances l \
-             WHERE {} AND {cond} OFFSET 0) l",
-            alive_at("l", "$1")
+             WHERE {} AND {cond} AND l.lineage NOT IN ( \
+                 SELECT b.lineage FROM {s}.code_file_versions b WHERE {} AND b.is_binary) \
+             OFFSET 0) l",
+            alive_at("l", "$1"),
+            alive_at("b", "$1")
         )
     } else {
         format!(

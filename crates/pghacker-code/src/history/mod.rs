@@ -68,10 +68,10 @@ pub fn open(git_dir: &Path) -> Result<gix::Repository> {
 
 const BATCH: usize = 20_000;
 
-/// Sends new lines' text to the COPY in batches.
+/// Sends new lines' text and lengths to the COPY in batches.
 struct ChannelSink {
-    batch: Vec<(u32, String)>,
-    tx: mpsc::Sender<Vec<(u32, String)>>,
+    batch: Vec<(u32, String, u32)>,
+    tx: mpsc::Sender<Vec<(u32, String, u32)>>,
 }
 
 impl ChannelSink {
@@ -87,8 +87,8 @@ impl ChannelSink {
 }
 
 impl LineSink for ChannelSink {
-    fn line(&mut self, id: u32, text: &str) -> Result<()> {
-        self.batch.push((id, text.to_owned()));
+    fn line(&mut self, id: u32, text: &str, bytes: u32) -> Result<()> {
+        self.batch.push((id, text.to_owned(), bytes));
         if self.batch.len() >= BATCH {
             self.flush()?;
         }
@@ -112,7 +112,7 @@ pub async fn built_paths(client: &tokio_postgres::Client, schema: &str) -> Resul
 pub fn walk_only(opts: &BuildOptions) -> Result<(Graph, Arena, WalkStats)> {
     let repo = open(&opts.git_dir)?;
     let graph = Graph::read(&repo, &opts.master)?;
-    let mut walker = Walker::new(&repo, &opts.paths, |_: u32, _: &str| Ok(()))?;
+    let mut walker = Walker::new(&repo, &opts.paths, |_: u32, _: &str, _: u32| Ok(()))?;
     walker.walk(&graph)?;
     let (ledger, stats) = walker.finish();
     Ok((graph, ledger.arena, stats))
@@ -126,7 +126,7 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
     store::create(&client, &schema).await?;
 
     let started = std::time::Instant::now();
-    let (tx, rx) = mpsc::channel::<Vec<(u32, String)>>(8);
+    let (tx, rx) = mpsc::channel::<Vec<(u32, String, u32)>>(8);
     let copy = {
         let schema = schema.clone();
         tokio::spawn(async move { store::copy_texts(&texts_client, &schema, rx).await })

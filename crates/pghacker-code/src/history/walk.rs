@@ -9,6 +9,7 @@
 //! linked list while building; its keys are numbered once at the end, so a
 //! bulk build never runs out of room between two keys.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,6 +45,8 @@ pub struct Version {
     pub deaths: Vec<i64>,
     pub size: i32,
     pub line_count: i32,
+    /// Binary to the code tools: a NUL byte, or not UTF-8 (whose lines are
+    /// kept all the same when there's no NUL).
     pub binary: bool,
     pub final_newline: bool,
     pub bom: bool,
@@ -60,7 +63,7 @@ pub struct FileChange {
     pub status: char,
     pub added: u32,
     pub removed: u32,
-    /// Either side is binary: no lines counted.
+    /// Either side has a NUL byte, binary as git sees it: no lines counted.
     pub binary: bool,
     /// The version the commit made (none when deleted) and the one it
     /// ended (none when added).
@@ -256,26 +259,43 @@ pub(crate) struct File {
     pub lineage: u32,
     pub version: u32,
     pub blob: ObjectId,
-    /// Its line instances, in order; empty for binary content.
+    /// Its line instances, in order; none with a NUL byte.
     pub lines: Arc<[u32]>,
+    /// A NUL byte.
     pub binary: bool,
 }
 
 pub(crate) type Files = HashMap<String, File>;
 
-/// A blob read by the loader's rules: binary with a NUL byte or invalid
-/// UTF-8; a leading BOM set aside; lines split after each `\n`.
+/// A blob read by the loader's rules: binary to the code tools with a NUL
+/// byte or invalid UTF-8. Without a NUL its lines are kept all the same, so
+/// blame and diffs follow them as git does; a line that isn't UTF-8 is read
+/// as Latin-1. A leading BOM is set aside (in UTF-8); lines split after
+/// each `\n`.
 struct Blob {
     data: Vec<u8>,
+    /// No NUL byte: lines to diff.
     text: bool,
+    utf8: bool,
     bom: bool,
 }
 
 impl Blob {
     fn new(data: Vec<u8>) -> Self {
-        let text = !data.contains(&0) && std::str::from_utf8(&data).is_ok();
-        let bom = text && data.starts_with(BOM);
-        Self { data, text, bom }
+        let text = !data.contains(&0);
+        let utf8 = text && std::str::from_utf8(&data).is_ok();
+        let bom = utf8 && data.starts_with(BOM);
+        Self {
+            data,
+            text,
+            utf8,
+            bom,
+        }
+    }
+
+    /// Binary as the code tools treat it.
+    fn binary(&self) -> bool {
+        !self.text || !self.utf8
     }
 
     fn body(&self) -> &[u8] {
@@ -299,21 +319,26 @@ impl Blob {
     }
 }
 
-/// A token's text: the line without its `\n`.
-fn line_text(token: &[u8]) -> &str {
+/// A token's text, the line without its `\n`, and its length in bytes: a
+/// line that isn't UTF-8 read as Latin-1, a byte per character, so its
+/// text is longer than the line.
+fn line_text(token: &[u8]) -> (Cow<'_, str>, u32) {
     let line = token.strip_suffix(b"\n").unwrap_or(token);
-    // The whole blob is UTF-8 and '\n' is a character boundary.
-    std::str::from_utf8(line).expect("a text blob's line is UTF-8")
+    let text = match std::str::from_utf8(line) {
+        Ok(text) => Cow::Borrowed(text),
+        Err(_) => Cow::Owned(line.iter().map(|&b| char::from(b)).collect()),
+    };
+    (text, line.len() as u32)
 }
 
-/// Where new lines' text goes.
+/// Where new lines' text goes, with each line's length in the file.
 pub trait LineSink {
-    fn line(&mut self, id: u32, text: &str) -> Result<()>;
+    fn line(&mut self, id: u32, text: &str, bytes: u32) -> Result<()>;
 }
 
-impl<F: FnMut(u32, &str) -> Result<()>> LineSink for F {
-    fn line(&mut self, id: u32, text: &str) -> Result<()> {
-        self(id, text)
+impl<F: FnMut(u32, &str, u32) -> Result<()>> LineSink for F {
+    fn line(&mut self, id: u32, text: &str, bytes: u32) -> Result<()> {
+        self(id, text, bytes)
     }
 }
 
@@ -324,6 +349,7 @@ pub trait Ledger {
     /// A new line instance right after `after` in its lineage's weave, or
     /// first when `after` is [`NONE`], replacing `replaces` one-for-one
     /// (or [`NONE`]).
+    /// A new line, `bytes` long in the file.
     fn new_instance(
         &mut self,
         lineage: u32,
@@ -331,6 +357,7 @@ pub trait Ledger {
         after: u32,
         replaces: u32,
         text: &str,
+        bytes: u32,
     ) -> Result<u32>;
     fn kill(&mut self, id: u32, at: i64);
     fn new_version(&mut self, version: Version) -> Result<u32>;
@@ -357,9 +384,10 @@ impl<S: LineSink> Ledger for ArenaLedger<S> {
         after: u32,
         replaces: u32,
         text: &str,
+        bytes: u32,
     ) -> Result<u32> {
         let id = self.arena.new_instance(lineage, born, after, replaces)?;
-        self.sink.line(id, text)?;
+        self.sink.line(id, text, bytes)?;
         Ok(id)
     }
 
@@ -809,25 +837,27 @@ impl<'r, L: Ledger> Walker<'r, L> {
         }
         for token in byte_lines(blob.body()) {
             delta.line(b'+', token);
-            after = self.born(lineage, after, NONE, at, line_text(token))?;
+            after = self.born(lineage, after, NONE, at, token)?;
             out.push(after);
         }
         Ok(out)
     }
 
+    /// A new instance for the line `token`.
     fn born(
         &mut self,
         lineage: u32,
         after: u32,
         replaces: u32,
         at: i64,
-        text: &str,
+        token: &[u8],
     ) -> Result<u32> {
+        let (text, bytes) = line_text(token);
         let id = self
             .ledger
-            .new_instance(lineage, at, after, replaces, text)?;
+            .new_instance(lineage, at, after, replaces, &text, bytes)?;
         self.stats.lines_added += 1;
-        self.stats.line_bytes += text.len() as u64;
+        self.stats.line_bytes += u64::from(bytes);
         Ok(id)
     }
 
@@ -900,7 +930,7 @@ impl<'r, L: Ledger> Walker<'r, L> {
                 let token = input.interner[input.after[j as usize]];
                 delta.line(b'+', token);
                 let replaces = if one_for_one { old_ids[b0 + i] } else { NONE };
-                after = self.born(file.lineage, after, replaces, at, line_text(token))?;
+                after = self.born(file.lineage, after, replaces, at, token)?;
                 out.push(after);
             }
             pos = b1;
@@ -927,7 +957,7 @@ impl<'r, L: Ledger> Walker<'r, L> {
             deaths: Vec::new(),
             size: i32::try_from(blob.data.len()).map_err(|_| anyhow!("{path} is too large"))?,
             line_count: lines as i32,
-            binary: !blob.text,
+            binary: blob.binary(),
             final_newline: blob.final_newline(),
             bom: blob.bom,
         })
@@ -952,19 +982,32 @@ mod tests {
             &[0xff, 0xfe, b'a'],
         ] {
             let blob = Blob::new(data.to_vec());
-            let lines: Vec<&str> = if blob.text {
-                byte_lines(blob.body()).map(line_text).collect()
+            let lines: Vec<String> = if blob.text {
+                byte_lines(blob.body())
+                    .map(|t| line_text(t).0.into_owned())
+                    .collect()
             } else {
                 vec![]
             };
             match crate::split_lines(data) {
                 Some((expected, final_newline)) => {
-                    assert!(blob.text, "{data:?}");
+                    assert!(!blob.binary(), "{data:?}");
                     assert_eq!(lines, expected, "{data:?}");
                     assert_eq!(blob.final_newline(), final_newline, "{data:?}");
                 }
-                None => assert!(!blob.text, "{data:?}"),
+                None => assert!(blob.binary(), "{data:?}"),
             }
         }
+        // Binary to the tools but not to git: lines read as Latin-1, each
+        // with its length in the file.
+        let blob = Blob::new(b"caf\xe9\nok\n".to_vec());
+        assert!(blob.text && blob.binary());
+        let lines: Vec<(String, u32)> = byte_lines(blob.body())
+            .map(|t| {
+                let (text, bytes) = line_text(t);
+                (text.into_owned(), bytes)
+            })
+            .collect();
+        assert_eq!(lines, [("café".to_owned(), 4), ("ok".to_owned(), 2)]);
     }
 }

@@ -51,6 +51,7 @@ struct NewLine {
     after: u32,
     replaces: u32,
     text: String,
+    bytes: u32,
 }
 
 /// A sync's ledger: one commit's effects, until they are written.
@@ -82,6 +83,7 @@ impl Ledger for MemLedger {
         after: u32,
         replaces: u32,
         text: &str,
+        bytes: u32,
     ) -> Result<u32> {
         let id = self.next_instance;
         if id >= i32::MAX as u32 {
@@ -95,6 +97,7 @@ impl Ledger for MemLedger {
             after,
             replaces,
             text: text.to_owned(),
+            bytes,
         });
         Ok(id)
     }
@@ -450,7 +453,8 @@ fn load_files(
     let mut files = Files::new();
     let rows = handle.block_on(tx.query(
         &format!(
-            "SELECT v.id, v.lineage, v.path, v.blob_sha, v.is_binary FROM {s}.code_file_versions v \
+            "SELECT v.id, v.lineage, v.path, v.blob_sha, v.is_binary AND v.line_count = 0 \
+             FROM {s}.code_file_versions v \
              WHERE v.path = ANY($1) AND v.lo <= $2 AND v.hi > $2 \
                AND (v.alive IS NULL OR v.alive @> $2)"
         ),
@@ -604,7 +608,7 @@ fn flush(handle: &Handle, tx: &Transaction<'_>, s: &str, ledger: &mut MemLedger)
         let lineage: Vec<i32> = lines.iter().map(|l| l.lineage as i32).collect();
         let lo: Vec<i64> = lines.iter().map(|l| l.born).collect();
         let hi: Vec<i64> = lines.iter().map(|l| addr::descendants(l.born).1).collect();
-        let bytes: Vec<i32> = lines.iter().map(|l| l.text.len() as i32).collect();
+        let bytes: Vec<i32> = lines.iter().map(|l| l.bytes as i32).collect();
         let replaces: Vec<Option<i32>> = lines
             .iter()
             .map(|l| (l.replaces != NONE).then_some(l.replaces as i32))

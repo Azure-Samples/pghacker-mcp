@@ -94,7 +94,8 @@ pub async fn verify(
         let rows = client
             .query(
                 &format!(
-                    "SELECT v.lineage, v.path, v.blob_sha, v.is_binary, v.final_newline, v.bom \
+                    "SELECT v.lineage, v.path, v.blob_sha, v.is_binary, v.final_newline, v.bom, \
+                            v.line_count \
                      FROM {s}.code_file_versions v WHERE {}",
                     alive_at("v")
                 ),
@@ -118,7 +119,8 @@ pub async fn verify(
                 )),
                 Some(_) => seen += 1,
             }
-            if !row.get::<_, bool>(3) {
+            // Text, or text that isn't UTF-8, whose lines are kept too.
+            if !row.get::<_, bool>(3) || row.get::<_, i32>(6) > 0 {
                 out.text_files += 1;
                 let previous = text.insert(lineage, (path, blob_id, row.get(4), row.get(5)));
                 if let Some((other, ..)) = previous {
@@ -136,7 +138,7 @@ pub async fn verify(
 
         let lineages: Vec<i32> = text.keys().copied().collect();
         let line_sql = format!(
-            "SELECT l.lineage, l.line FROM {s}.code_line_instances l \
+            "SELECT l.lineage, l.line, l.bytes FROM {s}.code_line_instances l \
              WHERE l.lineage = ANY($2) AND {} ORDER BY l.lineage, l.weave",
             alive_at("l")
         );
@@ -151,7 +153,12 @@ pub async fn verify(
             if *n > 0 {
                 buf.push(b'\n');
             }
-            buf.extend_from_slice(line.as_bytes());
+            // A line read as Latin-1 is longer as text than in the file.
+            if line.len() as i32 == row.get::<_, i32>(2) {
+                buf.extend_from_slice(line.as_bytes());
+            } else {
+                buf.extend(line.chars().map(|c| c as u32 as u8));
+            }
             *n += 1;
             out.lines += 1;
         }
