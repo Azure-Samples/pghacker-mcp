@@ -246,13 +246,29 @@ The code tools can read PostgreSQL's whole commit history instead of the snapsho
 
    It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.git` into a bare clone on the job's disk, builds the history into schema `pghacker_history`, and swaps it into `pghacker`. It then rebuilds every file of the branch heads and of 40 random commits and compares them with git. `ok` is true when nothing differed. Running it again rebuilds the history from scratch.
    - Once a history is installed, the indexer's hourly `code_history_sync` job fetches new commits into its own clone and applies them, whether or not the code tools read the history. The clone is about 850 MB in `PGHACKER_GIT_DIR`, fetched again after a restart.
-3. **The switch.** It waits for the engine benchmark to pass on production's data, as the [search design's rollout](../docs/search-design.md#rollout) requires: no wrong answers, and latency comparable to the snapshots'. The benchmark runs `pghacker-replay`, which the app image doesn't include. Then add `PGHACKER_CODE_HISTORY = "pghacker"` to `app_env` and apply.
+3. **The switch.** It waits for the engine benchmark to pass on production's data, as the [search design's rollout](../docs/search-design.md#rollout) requires: no wrong answers, and latency comparable to the snapshots'. Then add `PGHACKER_CODE_HISTORY = "pghacker"` to `app_env` and apply.
    - The new revision lists `blame`, `get_commit` and `search_commits`.
    - `search`, `grep`, `read_file` and `list_files` read any commit, and paths below `/branch/<name>/`, `/tag/<name>/` and `/commit/<rev>/`.
    - The next `resolve_anchors` run resolves mail's file anchors to those paths.
    - `add_source` for a version loads nothing: the history has it.
 
    Check `tools/list` (First deployment, step 9) and run the evaluation.
+
+The engine benchmark runs `pghacker-replay`, which the app image doesn't include, so it has an image of its own on the app's (`deploy/bench.Dockerfile`). From the repository root:
+
+```sh
+acr=$(terraform -chdir=deploy/terraform output -raw acr_name)
+az acr build --registry "$acr" --platform linux/amd64 --file deploy/bench.Dockerfile \
+  --image "pghacker-bench:$(git rev-parse --short=12 HEAD)" \
+  --build-arg "APP_IMAGE=$acr.azurecr.io/pghacker-mcp@sha256:<the app's digest>" .
+```
+
+A one-off execution of the probe job, given 4 vCPU and 8 GiB, runs `scripts/engine-bench.mjs`. It runs `pghacker-replay engines` as `pgh_reader` at every snapshot, with the history in `pghacker`: 8 calls at once for about half an hour, so watch the endpoint's latency. It logs each difference where both engines completed and each call only the history left incomplete; `ok` is true when there are none.
+
+```sh
+../scripts/run-job.sh bench "$acr.azurecr.io/pghacker-bench@sha256:<digest>" \
+  | jq '{ok, error, wrong, history_only_incomplete, all, by_workload}'
+```
 
 To switch back, remove `PGHACKER_CODE_HISTORY` and apply. The code tools read the snapshots again, and anchors resolve to them again. The history's tables stay and keep syncing.
 

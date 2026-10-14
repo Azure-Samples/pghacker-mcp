@@ -5,6 +5,8 @@
 //!
 //! Database `pghacker_bench` holds both: the 15 snapshots, loaded from a
 //! local clone, and that clone's whole history in schema pghacker_history.
+//! `--database` and `--schema` point the run elsewhere, such as a
+//! deployment's database with its history installed in pghacker.
 //! The workloads are the generated PG19 searches (as grep command lines and
 //! as searches), the profiling program's searches, and the grep command
 //! lines of the last study replay. Per-call records go to
@@ -226,6 +228,10 @@ pub struct RunOptions {
     pub heads: Option<usize>,
     pub passes: usize,
     pub study: bool,
+    /// The database to read, as pgh_reader.
+    pub database: String,
+    /// The history's schema.
+    pub schema: String,
 }
 
 #[derive(Clone)]
@@ -503,7 +509,7 @@ fn summarize(records: &[Record]) -> Value {
 
 /// Runs every workload at every head through both engines.
 pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
-    let reader_url = url(ctx.env.reader_database_url())?;
+    let reader_url = with_database(&ctx.env.reader_database_url()?, &opts.database)?;
     let reader = db::connect(&reader_url, "pghacker-replay").await?;
     let rows = reader
         .query(
@@ -522,7 +528,8 @@ pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
             sha: row.get(4),
             history: None,
         };
-        let hist = pghacker_codesearch::history::attach(&reader, snap.clone(), SCHEMA).await?;
+        let hist =
+            pghacker_codesearch::history::attach(&reader, snap.clone(), &opts.schema).await?;
         heads.push((snap, hist));
     }
     if let Some(n) = opts.heads {
@@ -530,6 +537,7 @@ pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
     }
 
     let mut works = Vec::new();
+    crate::pg19::ensure_tree(ctx).await?;
     for (family, command, args) in crate::pg19::workload(ctx, opts.pg19, opts.seed)? {
         works.push(Work {
             workload: "pg19-grep",

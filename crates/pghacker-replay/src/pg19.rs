@@ -5,7 +5,7 @@
 //! same command line in Docker.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -691,6 +691,42 @@ fn search_args(c: &Case, corpus: &Corpus) -> Result<SearchArgs> {
     Ok(args)
 }
 
+/// The PG19 subset's snapshot, fetched from GitHub.
+fn spec(ctx: &Ctx) -> SnapshotSpec {
+    SnapshotSpec {
+        repo: "postgres".into(),
+        git_ref: REF.into(),
+        sha: SHA.into(),
+        version: Some("19".into()),
+        paths: strings(&PATHS),
+        source: RepoSource::Remote {
+            url: URL.into(),
+            cache_dir: ctx.root.join(".runtime").join("git"),
+        },
+        source_id: None,
+    }
+}
+
+/// Where the subset's files are materialized.
+fn tree_dir(ctx: &Ctx) -> PathBuf {
+    ctx.runtime
+        .join("trees")
+        .join(format!("postgres-{}", &SHA[..12]))
+}
+
+/// Materializes the subset's files when they're missing, for a replay that
+/// runs without `pg19` first, such as the engines' on a deployment.
+pub async fn ensure_tree(ctx: &Ctx) -> Result<()> {
+    let tree = tree_dir(ctx);
+    if !tree.is_dir() {
+        let spec = spec(ctx);
+        let written =
+            tokio::task::spawn_blocking(move || pghacker_code::materialize(&spec, &tree)).await??;
+        println!("materialized {written} files of the PG19 subset");
+    }
+    Ok(())
+}
+
 /// The generated searches as (family, grep command line, search
 /// arguments), from the PG19 subset tree that `pg19` materializes: a
 /// workload for other replays.
@@ -699,10 +735,7 @@ pub fn workload(
     count: usize,
     seed: u64,
 ) -> Result<Vec<(String, String, Option<SearchArgs>)>> {
-    let tree = ctx
-        .runtime
-        .join("trees")
-        .join(format!("postgres-{}", &SHA[..12]));
+    let tree = tree_dir(ctx);
     if !tree.is_dir() {
         bail!(
             "run `pghacker-replay pg19` first: it materializes {}",
@@ -854,18 +887,7 @@ async fn check(
 
 pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> {
     let started = Instant::now();
-    let spec = SnapshotSpec {
-        repo: "postgres".into(),
-        git_ref: REF.into(),
-        sha: SHA.into(),
-        version: Some("19".into()),
-        paths: strings(&PATHS),
-        source: RepoSource::Remote {
-            url: URL.into(),
-            cache_dir: ctx.root.join(".runtime").join("git"),
-        },
-        source_id: None,
-    };
+    let spec = spec(ctx);
     let mut indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
     let t = Instant::now();
     let mut stats = pghacker_code::load_snapshot(&mut indexer, &spec).await?;
@@ -881,10 +903,7 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
         stats.lines
     );
     vacuum(ctx).await?;
-    let tree = ctx
-        .runtime
-        .join("trees")
-        .join(format!("postgres-{}", &SHA[..12]));
+    let tree = tree_dir(ctx);
     let (s, tr) = (spec.clone(), tree.clone());
     let written =
         tokio::task::spawn_blocking(move || pghacker_code::materialize(&s, &tr)).await??;

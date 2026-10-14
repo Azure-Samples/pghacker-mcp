@@ -80,6 +80,13 @@ enum Command {
         /// Add the grep command lines of the last study replay.
         #[arg(long)]
         study: bool,
+        /// The database with the snapshots and the history, read as
+        /// pgh_reader: the app's on a deployment.
+        #[arg(long, default_value = engines::DATABASE)]
+        database: String,
+        /// The history's schema: a build's, or pghacker once installed.
+        #[arg(long, default_value = engines::SCHEMA)]
+        schema: String,
     },
     /// Loads the PG19 subset and replays generated searches.
     Pg19 {
@@ -265,6 +272,8 @@ async fn main() -> Result<()> {
             heads,
             passes,
             study,
+            database,
+            schema,
         } => {
             engines::run(
                 &ctx,
@@ -275,6 +284,8 @@ async fn main() -> Result<()> {
                     heads,
                     passes,
                     study,
+                    database,
+                    schema,
                 },
             )
             .await
