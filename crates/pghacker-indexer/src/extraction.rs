@@ -1662,6 +1662,100 @@ pub async fn merge_extracts(indexer: &Indexer, args: MergeExtractsArgs) -> Resul
     Ok(json!({ "merge_id": merge_id, "moved": moved }))
 }
 
+/// Refuses to undo author merge `merge_id` while its `into` author no longer
+/// holds what the merge moved: a later merge folded `into` into another
+/// author, or the messages moved on. Undoing it then would take the names
+/// and counts from `into` while the messages, addresses and names sit with
+/// another author. Locks the merge's messages first, which merge_authors
+/// moves first: a merge of `into` running alongside finishes before the
+/// check, or waits until the undo is done.
+async fn undo_author_allowed(
+    client: &impl GenericClient,
+    merge_id: i64,
+    into_id: i64,
+    messages: &[i64],
+) -> Result<()> {
+    // Locked whole: with the author test in the query, PostgreSQL would lock
+    // only the rows that pass it as of the snapshot, and so not wait for a
+    // merge that is moving them.
+    let moved_on: Vec<i64> = client
+        .query(
+            "SELECT id, author_id FROM messages WHERE id = ANY ($1) FOR NO KEY UPDATE",
+            &[&messages],
+        )
+        .await?
+        .iter()
+        .filter(|row| row.get::<_, Option<i64>>(1) != Some(into_id))
+        .map(|row| row.get(0))
+        .collect();
+    let merged_into: Option<i64> = client
+        .query_opt("SELECT merged_into FROM authors WHERE id = $1", &[&into_id])
+        .await?
+        .and_then(|row| row.get(0));
+    if let Some(next) = merged_into {
+        // The merges from into_id on, the last one first.
+        let later: Vec<String> = client
+            .query(
+                "WITH RECURSIVE chain (id, merged_into, depth) AS (
+                     SELECT id, merged_into, 0 FROM authors WHERE id = $1
+                     UNION ALL
+                     SELECT a.id, a.merged_into, c.depth + 1
+                     FROM chain c JOIN authors a ON a.id = c.merged_into
+                     WHERE c.depth < 32
+                 )
+                 SELECT c.id, c.merged_into,
+                        (SELECT max(l.id) FROM merge_log l
+                         WHERE l.kind = 'author' AND l.from_id = c.id AND l.into_id = c.merged_into
+                           AND l.reverted_at IS NULL)
+                 FROM chain c WHERE c.merged_into IS NOT NULL ORDER BY c.depth DESC",
+                &[&into_id],
+            )
+            .await?
+            .iter()
+            .map(|row| match row.get::<_, Option<i64>>(2) {
+                Some(merge) => format!("merge {merge}"),
+                None => format!(
+                    "author {}'s merge into author {} (not in the log)",
+                    row.get::<_, i64>(0),
+                    row.get::<_, i64>(1)
+                ),
+            })
+            .collect();
+        let order = match later.len() {
+            1 => later.concat(),
+            _ => format!("{},", later.join(", then ")),
+        };
+        return Err(anyhow!(
+            "author {into_id} has since been merged into author {next}, so merge {merge_id} can't be \
+             undone yet: undo {order} first"
+        ));
+    }
+    if !moved_on.is_empty() {
+        let later: Option<i64> = client
+            .query_one(
+                "SELECT max(l.id) FROM merge_log l
+                 WHERE l.kind = 'author' AND l.reverted_at IS NULL AND l.id > $1
+                   AND EXISTS (SELECT FROM unnest($2::int8[]) AS m (id)
+                               WHERE l.moved -> 'messages' @> to_jsonb(m.id))",
+                &[&merge_id, &moved_on],
+            )
+            .await?
+            .get(0);
+        let n = moved_on.len();
+        return Err(match later {
+            Some(later) => anyhow!(
+                "{n} of the messages that merge {merge_id} moved to author {into_id} belong to other \
+                 authors now, so it can't be undone yet: undo merge {later} first"
+            ),
+            None => anyhow!(
+                "{n} of the messages that merge {merge_id} moved to author {into_id} belong to other \
+                 authors now, and no later merge in the log moved them, so it can't be undone"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Undoes a merge from the log.
 pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value> {
     let mut client = indexer.tools.get().await?;
@@ -1685,6 +1779,7 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
     };
     match kind.as_str() {
         "author" => {
+            undo_author_allowed(&*tx, args.merge_id, into_id, &list("messages")).await?;
             tx.execute(
                 "UPDATE messages SET author_id = $1 WHERE id = ANY ($2)",
                 &[&from_id, &list("messages")],

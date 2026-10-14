@@ -142,7 +142,8 @@ pub static TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "undo_merge",
-        description: "Undoes a merge by its merge_id.",
+        description: "Undoes a merge by its merge_id. An author merge is undone only while its into_id author \
+            holds what it moved: undo the later merges of that author first, as the error names them.",
         effect: DESTRUCTIVE,
         schema: schema::<UndoMergeArgs>,
     },

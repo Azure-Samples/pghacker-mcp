@@ -887,6 +887,166 @@ async fn merges_are_logged_and_undone() {
 }
 
 #[tokio::test]
+async fn chained_author_merges_are_undone_last_first() {
+    let (db, indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "INSERT INTO authors (id, display_name, message_count) VALUES (4, 'Carol Committer', 0)",
+        )
+        .await
+        .unwrap();
+    // Whose each message, address and name is, and who is merged into whom.
+    let state = async || -> Vec<String> {
+        client
+            .query(
+                "SELECT 'message ' || id || ' ' || author_id FROM messages
+                 UNION ALL SELECT 'email ' || email || ' ' || author_id FROM author_emails
+                 UNION ALL SELECT 'name ' || author_id || ' ' || name || ' ' || count FROM author_names
+                 UNION ALL SELECT 'author ' || id || ' ' || coalesce(merged_into::text, '-') FROM authors
+                 ORDER BY 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    };
+    let before = state().await;
+    let merge = async |from: i64, into: i64| -> i64 {
+        extraction::merge_authors(
+            &indexer,
+            args(json!({ "from_id": from, "into_id": into, "reason": "Same person, another address" })),
+        )
+        .await
+        .unwrap()["merge_id"]
+            .as_i64()
+            .unwrap()
+    };
+    let undo = async |merge: i64| {
+        extraction::undo_merge(&indexer, args(json!({ "merge_id": merge }))).await
+    };
+    let first = merge(3, 2).await;
+    let second = merge(2, 1).await;
+    let third = merge(1, 4).await;
+    let merged = state().await;
+
+    // Undoing the first would take Bob R.'s name and address from author 2,
+    // which gave them on: the later merges go first, last first.
+    assert_eq!(
+        undo(first).await.unwrap_err().to_string(),
+        format!(
+            "author 2 has since been merged into author 1, so merge {first} can't be undone yet: \
+             undo merge {third}, then merge {second}, first"
+        )
+    );
+    assert_eq!(
+        undo(second).await.unwrap_err().to_string(),
+        format!(
+            "author 1 has since been merged into author 4, so merge {second} can't be undone yet: \
+             undo merge {third} first"
+        )
+    );
+    assert_eq!(state().await, merged, "refusing changes nothing");
+    undo(third).await.unwrap();
+    undo(second).await.unwrap();
+
+    // Nor while one of its messages belongs to another author.
+    client
+        .execute("UPDATE messages SET author_id = 1 WHERE id = 103", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        undo(first).await.unwrap_err().to_string(),
+        format!(
+            "1 of the messages that merge {first} moved to author 2 belong to other authors now, \
+             and no later merge in the log moved them, so it can't be undone"
+        )
+    );
+    client
+        .execute("UPDATE messages SET author_id = 2 WHERE id = 103", &[])
+        .await
+        .unwrap();
+    undo(first).await.unwrap();
+
+    assert_eq!(state().await, before);
+    assert_eq!(miscounted_names(&client).await, 0);
+    let miscounted: i64 = client
+        .query_one(
+            "SELECT count(*) FROM authors a
+             WHERE a.message_count <> (SELECT count(*) FROM messages m WHERE m.author_id = a.id)",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(miscounted, 0);
+}
+
+#[tokio::test]
+async fn an_undo_waits_for_a_merge_of_its_into_author() {
+    use std::time::{Duration, Instant};
+    let (db, indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    let first = extraction::merge_authors(
+        &indexer,
+        args(json!({ "from_id": 3, "into_id": 2, "reason": "Same person, work address" })),
+    )
+    .await
+    .unwrap()["merge_id"]
+        .as_i64()
+        .unwrap();
+    // Author 2's merge into author 1 has moved the messages, Bob R.'s among
+    // them, and not yet marked author 2 merged.
+    let merging = db.indexer().await.unwrap();
+    merging
+        .batch_execute("BEGIN; UPDATE messages SET author_id = 1 WHERE author_id = 2")
+        .await
+        .unwrap();
+    let undo = tokio::spawn({
+        let indexer = indexer.clone();
+        async move { extraction::undo_merge(&indexer, args(json!({ "merge_id": first }))).await }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let waiting: i64 = client
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND application_name = 'pghacker-indexer tools'
+                   AND wait_event_type = 'Lock'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if waiting == 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the undo didn't wait");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    merging
+        .batch_execute("UPDATE authors SET merged_into = 1 WHERE id = 2; COMMIT")
+        .await
+        .unwrap();
+    let error = format!("{:#}", undo.await.unwrap().unwrap_err());
+    assert_eq!(
+        error,
+        format!(
+            "author 2 has since been merged into author 1, so merge {first} can't be undone yet: \
+             undo author 2's merge into author 1 (not in the log) first"
+        )
+    );
+    let author: i64 = client
+        .query_one("SELECT author_id FROM messages WHERE id = 103", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(author, 1, "the undo changed nothing");
+}
+
+#[tokio::test]
 async fn stale_counts_are_repaired() {
     let (db, _indexer) = corpus().await;
     let client = db.indexer().await.unwrap();

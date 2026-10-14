@@ -45,5 +45,8 @@ authors WHERE merged_into IS NULL GROUP BY 1 HAVING count(*) > 1`, and
 messages make it clear it is one person; `merge_authors` into the identity
 with more messages.
 
-Every merge is logged; `undo_merge` reverses a mistake. Report each merge
-(kind, from, into, reason) and the pairs you judged distinct.
+Every merge is logged; `undo_merge` reverses a mistake. Undo author merges
+in reverse order: an author merged into another since can't give back what
+an earlier merge gave it, and the error names the merge to undo first.
+Report each merge (kind, from, into, reason) and the pairs you judged
+distinct.
