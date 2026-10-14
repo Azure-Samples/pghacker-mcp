@@ -1323,13 +1323,13 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     assert_eq!(listed["history"], *history);
 }
 
-#[tokio::test]
-async fn restoring_addresses_queues_jobs_that_restore_them() {
-    use std::time::{Duration, Instant};
-    use tokio_util::sync::CancellationToken;
-    let db = TestDb::create().await.unwrap();
-    let indexer = indexer(&db).await;
-    // A month and a raw message from a thread page, in the cache: no network.
+/// Erin's message from a month and Dave's from a thread page, each its
+/// author's only one, in the cache (no network) and stored as ingest once
+/// stored them; with Erin's and Dave's authors.
+async fn stored_before_addresses(
+    db: &TestDb,
+    indexer: &Indexer,
+) -> (tokio_postgres::Client, i64, i64) {
     let month = "From list-owner+archive@lists.example.org Mon Jun 01 10:00:00 2026
 From: \"erin@example.org\" <erin@example.org>
 Subject: Ping frank@example.org
@@ -1377,7 +1377,6 @@ Write to dave@example.org.
             .unwrap();
         tx.commit().await.unwrap();
     }
-    // As ingest once stored them.
     client
         .batch_execute(
             "UPDATE messages SET subject = 'Ping [email]', from_name = 'erin',
@@ -1393,8 +1392,6 @@ Write to dave@example.org.
         )
         .await
         .unwrap();
-    // Erin's message is restored while merged into Dave, and the merge is
-    // undone after.
     let row = client
         .query_one(
             "SELECT (SELECT author_id FROM messages WHERE message_id = 'j1@example.org'),
@@ -1403,7 +1400,63 @@ Write to dave@example.org.
         )
         .await
         .unwrap();
-    let (erin, dave): (i64, i64) = (row.get(0), row.get(1));
+    (client, row.get(0), row.get(1))
+}
+
+/// Senders' names whose count isn't their author's messages under the name.
+async fn miscounted_names(client: &tokio_postgres::Client) -> i64 {
+    client
+        .query_one(
+            "WITH m AS (SELECT author_id, from_name AS name, count(*)::int AS n FROM messages GROUP BY 1, 2)
+             SELECT count(*) FROM m FULL JOIN author_names an ON an.author_id = m.author_id AND an.name = m.name
+             WHERE m.n IS DISTINCT FROM an.count",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Erin's and Dave's messages restored: subject, sender's name, and their
+/// author's display name.
+async fn assert_restored(client: &tokio_postgres::Client) {
+    let restored: Vec<(String, String, String)> = client
+        .query(
+            "SELECT m.subject, m.from_name, a.display_name FROM messages m JOIN authors a ON a.id = m.author_id
+             ORDER BY m.message_id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        restored,
+        [
+            (
+                "Ping frank@example.org".to_owned(),
+                "erin@example.org".to_owned(),
+                "erin@example.org".to_owned()
+            ),
+            (
+                "Seed by dave@example.org".to_owned(),
+                "dave@example.org".to_owned(),
+                "dave@example.org".to_owned()
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn restoring_addresses_queues_jobs_that_restore_them() {
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let (client, erin, dave) = stored_before_addresses(&db, &indexer).await;
+    // Erin's message is restored while merged into Dave, and the merge is
+    // undone after.
     let merged = extraction::merge_authors(
         &indexer,
         args(json!({ "from_id": erin, "into_id": dave, "reason": "Same person, another address" })),
@@ -1444,45 +1497,44 @@ Write to dave@example.org.
     extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
         .await
         .unwrap();
-    // Names count each message under its sender's name as stored.
-    let miscounted: i64 = client
-        .query_one(
-            "WITH m AS (SELECT author_id, from_name AS name, count(*)::int AS n FROM messages GROUP BY 1, 2)
-             SELECT count(*) FROM m FULL JOIN author_names an ON an.author_id = m.author_id AND an.name = m.name
-             WHERE m.n IS DISTINCT FROM an.count",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert_eq!(miscounted, 0);
-    let restored: Vec<(String, String, String)> = client
-        .query(
-            "SELECT m.subject, m.from_name, a.display_name FROM messages m JOIN authors a ON a.id = m.author_id
-             ORDER BY m.message_id",
-            &[],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
-        .collect();
-    assert_eq!(
-        restored,
-        [
-            (
-                "Ping frank@example.org".to_owned(),
-                "erin@example.org".to_owned(),
-                "erin@example.org".to_owned()
-            ),
-            (
-                "Seed by dave@example.org".to_owned(),
-                "dave@example.org".to_owned(),
-                "dave@example.org".to_owned()
-            ),
-        ]
-    );
+    assert_eq!(miscounted_names(&client).await, 0);
+    assert_restored(&client).await;
     // Finished ones are queued again.
     let requeued = addresses::queue_restore(&client).await.unwrap();
     assert_eq!((requeued.months, requeued.batches), (1, 1));
+}
+
+#[tokio::test]
+async fn names_stay_counted_through_a_restore_then_a_merge() {
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let (client, erin, dave) = stored_before_addresses(&db, &indexer).await;
+    let month = pghacker_mail::ingest::restore_mbox_month(
+        &indexer.pool,
+        &indexer.archive,
+        "pgsql-hackers",
+        "2026-06",
+    )
+    .await
+    .unwrap();
+    let pages = pghacker_mail::ingest::restore_messages(
+        &indexer.pool,
+        &indexer.archive,
+        &["t1@example.org".to_owned()],
+    )
+    .await
+    .unwrap();
+    assert_eq!((month.restored, pages.restored), (1, 1));
+    let merged = extraction::merge_authors(
+        &indexer,
+        args(json!({ "from_id": erin, "into_id": dave, "reason": "Same person, another address" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(miscounted_names(&client).await, 0);
+    extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
+        .await
+        .unwrap();
+    assert_eq!(miscounted_names(&client).await, 0);
+    assert_restored(&client).await;
 }

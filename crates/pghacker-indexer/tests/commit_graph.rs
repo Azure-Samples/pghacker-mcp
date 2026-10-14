@@ -875,6 +875,87 @@ async fn a_names_committer_changes_while_its_first_commit_does() {
 }
 
 #[tokio::test]
+async fn restored_addresses_change_whose_name_a_committer_has() {
+    // Ingest once stored Tom's name and the second Bob Twice's without the
+    // addresses they wrote in them. Given back, Tom Lane's name is no
+    // author's, and Bob Twice's is one author's.
+    let (_db, h, mut client) = installed().await;
+    let committers = async |client: &Client| -> Vec<(String, String)> {
+        client
+            .query(
+                "SELECT name, author_key FROM graph_committers ORDER BY 1",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect()
+    };
+    assert_eq!(
+        committers(&client).await,
+        [("tom lane".to_owned(), "author:1".to_owned())]
+    );
+    // The second Bob Twice writes as Robert Twice more often, so his display
+    // name stays, and no trigger sees his rename: restoring records his key.
+    client
+        .batch_execute(
+            "INSERT INTO author_names (author_id, name, count) VALUES (3, 'Robert Twice', 2);
+             UPDATE authors SET display_name = 'Robert Twice', message_count = 3 WHERE id = 3;",
+        )
+        .await
+        .unwrap();
+    converged(&mut client).await;
+    let tx = client.transaction().await.unwrap();
+    for (from, id) in [
+        (
+            "Tom Lane (tgl@example.org) <tgl@example.org>",
+            "m2@example.org",
+        ),
+        (
+            "bob twice (bob@example.org) <bob@example.org>",
+            "m3@example.org",
+        ),
+    ] {
+        let raw = format!("From: {from}\nSubject: Re: JSON_TABLE crash\nMessage-ID: <{id}>\n\n");
+        let message = pghacker_mail::parse::parse(raw.as_bytes()).unwrap();
+        assert_eq!(
+            pghacker_mail::store::restore_addresses(&tx, &message)
+                .await
+                .unwrap(),
+            pghacker_mail::store::Restored::Restored { thread_id: 10 }
+        );
+    }
+    tx.commit().await.unwrap();
+    assert_eq!(
+        entries(&client).await,
+        BTreeSet::from([
+            (None, "author:1".to_owned(), None),
+            (None, "author:3".to_owned(), None)
+        ])
+    );
+
+    converged(&mut client).await;
+    assert_eq!(
+        committers(&client).await,
+        [("bob twice".to_owned(), "author:2".to_owned())]
+    );
+    for sha in [&h.c0, &h.b1, &h.c2] {
+        assert!(starts(&client, "COMMITTED", &commit(sha)).await.is_empty());
+    }
+    assert_eq!(
+        starts(&client, "COMMITTED", &commit(&h.c1)).await,
+        ["author:2"]
+    );
+    assert_eq!(
+        props(&client, "author:1").await["name"],
+        "Tom Lane (tgl@example.org)"
+    );
+    assert_eq!(props(&client, "author:3").await["name"], "Robert Twice");
+    reconciled(&mut client).await;
+}
+
+#[tokio::test]
 async fn a_full_sync_repairs_what_an_older_image_leaves() {
     let (_db, _h, mut client) = installed().await;
     // An older image's full sync drops the counts of the labels it doesn't
