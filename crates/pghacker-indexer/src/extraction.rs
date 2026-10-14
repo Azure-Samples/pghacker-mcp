@@ -367,7 +367,9 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
     let ids: Vec<i64> = match &args.thread_ids {
         Some(ids) if !ids.is_empty() => tx
             .query(
-                &format!("SELECT t.id FROM threads t WHERE t.id = ANY ($1) AND {free} ORDER BY t.id"),
+                &format!(
+                    "SELECT t.id FROM threads t WHERE t.id = ANY ($1) AND {free} ORDER BY t.id"
+                ),
                 &[ids],
             )
             .await?
@@ -379,7 +381,8 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
                 &format!(
                     "SELECT t.id FROM threads t
                      WHERE (t.extraction_state = 'pending'
-                            OR (t.extraction_state = 'extracted' AND t.extracted_version < t.content_version))
+                            OR (t.extraction_state IN ('extracted', 'skipped')
+                                AND t.extracted_version < t.content_version))
                        AND t.message_count > 0 AND {free}
                      ORDER BY (t.extraction_state = 'pending') DESC, t.message_count DESC, t.id
                      LIMIT $1"

@@ -85,8 +85,8 @@ merge true duplicates." Report its merges.
 ## 3. Freshness
 
 A followed list's new mail arrives with the hourly refresh of its current
-month. A thread whose content changes after extraction shows up in
-`threads_changed_since_extraction`, and extraction leases it again.
+month. A thread whose content changes after it was extracted or skipped shows
+up in `threads_changed_since_extraction`, and extraction leases it again.
 
 ## Reporting
 

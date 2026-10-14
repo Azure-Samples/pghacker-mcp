@@ -99,7 +99,8 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
                     (SELECT count(*) FROM threads WHERE extraction_state = 'pending'),
                     (SELECT count(*) FROM threads WHERE extraction_state = 'extracted'),
                     (SELECT count(*) FROM threads WHERE extraction_state = 'skipped'),
-                    (SELECT count(*) FROM threads WHERE extraction_state = 'extracted' AND extracted_version < content_version),
+                    (SELECT count(*) FROM threads
+                     WHERE extraction_state IN ('extracted', 'skipped') AND extracted_version < content_version),
                     (SELECT count(*) FROM extraction_leases WHERE released_at IS NULL AND expires_at > now()),
                     (SELECT count(*) FROM features WHERE merged_into IS NULL),
                     (SELECT count(*) FROM decisions WHERE merged_into IS NULL),
