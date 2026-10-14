@@ -268,6 +268,6 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 - **Front Door's ranges** change now and then. Every apply reads the `AzureFrontDoor.Backend` tag again.
 - **Limits.**
   - The app has 4 vCPU and 8 GiB of memory; each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
-  - HorizonDB has 4 vCores (`horizondb_vcores`).
+  - HorizonDB has 32 vCores (`horizondb_vcores`).
   - `gpt-6-luna` has the subscription's whole 1M tokens per minute in westus3.
   - The ephemeral disk holds the git clones only while a snapshot loads, and no mbox files.
