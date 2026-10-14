@@ -14,9 +14,15 @@ pub struct Settings {
     pub database_url: String,
     /// Where the MCP server listens: `PGHACKER_INDEXER_ADDR`.
     pub addr: String,
-    /// Concurrent job workers: `PGHACKER_WORKERS`.
+    /// Concurrent job workers: `PGHACKER_WORKERS`. They have connections of
+    /// their own, one each and two to spare.
     pub workers: usize,
-    pub pool_size: usize,
+    /// Connections for tool calls, apart from the workers' so that no call
+    /// can keep the jobs waiting: `PGHACKER_TOOL_CONNECTIONS`, 8 by default.
+    pub tool_connections: usize,
+    /// How long a tool call's statement may run before it's cancelled:
+    /// `PGHACKER_TOOL_TIMEOUT_SECONDS`, 30 by default.
+    pub tool_timeout: Duration,
     /// The test slices: `PGHACKER_SLICES`.
     pub slices_path: PathBuf,
     /// The HTTP cache: `PGHACKER_CACHE_DIR`.
@@ -46,7 +52,10 @@ impl Settings {
                 .get_or("PGHACKER_INDEXER_ADDR", "127.0.0.1:3101")
                 .to_owned(),
             workers,
-            pool_size: workers + 6,
+            tool_connections: env.parse_or("PGHACKER_TOOL_CONNECTIONS", 8usize)?.max(1),
+            tool_timeout: Duration::from_secs(
+                env.parse_or("PGHACKER_TOOL_TIMEOUT_SECONDS", 30u64)?.max(1),
+            ),
             slices_path: env
                 .get_or("PGHACKER_SLICES", "config/test-slices.toml")
                 .into(),

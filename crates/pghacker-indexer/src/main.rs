@@ -330,7 +330,8 @@ async fn run(env: &Env) -> Result<()> {
         "pghacker-indexer",
         env!("CARGO_PKG_VERSION"),
         tools::INSTRUCTIONS,
-    );
+    )
+    .cancel_on_disconnect();
     let app = router(server, indexer.settings.allowed_hosts.clone());
     let addr = indexer.settings.addr.clone();
     let served = tokio::spawn(async move { serve(app, &addr).await });

@@ -12,7 +12,7 @@ use crate::jobs::kind;
 const MONTHS_LISTED: i64 = 24;
 
 pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
-    let client = indexer.pool.get().await?;
+    let client = indexer.tools.get().await?;
     let jobs: Vec<Value> = client
         .query(
             "SELECT kind,

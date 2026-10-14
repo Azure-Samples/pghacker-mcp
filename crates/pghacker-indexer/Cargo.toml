@@ -34,5 +34,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true

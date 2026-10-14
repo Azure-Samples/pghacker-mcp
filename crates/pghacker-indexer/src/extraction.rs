@@ -27,6 +27,8 @@ const MESSAGE_CHARS: usize = 8_000;
 /// A new extract at or above these similarities to an existing one needs `distinct_because`.
 pub const SEMANTIC_DUPLICATE: f64 = 0.85;
 pub const NAME_DUPLICATE: f64 = 0.6;
+/// How long a find_duplicates call waits for room before it fails as busy.
+const FIND_DUPLICATES_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NextBatchArgs {
@@ -346,7 +348,7 @@ pub async fn next_batch(indexer: &Indexer, args: NextBatchArgs) -> Result<Value>
             .unwrap_or(LEASE_MINUTES.unsigned_abs())
             .clamp(5, 180),
     );
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     tx.batch_execute("SELECT pg_advisory_xact_lock(hashtext('pghacker.extraction_leases'))")
         .await?;
@@ -584,7 +586,7 @@ async fn messages_page(client: &impl GenericClient, thread_id: i64, offset: u32)
 }
 
 pub async fn read_messages(indexer: &Indexer, args: ReadMessagesArgs) -> Result<Value> {
-    let client = indexer.pool.get().await?;
+    let client = indexer.tools.get().await?;
     let lease = lease(&**client, &args.lease_token).await?;
     if !lease.thread_ids.contains(&args.thread_id) {
         return Err(anyhow!("thread {} isn't in this lease", args.thread_id));
@@ -708,7 +710,7 @@ pub async fn match_extracts(indexer: &Indexer, args: MatchArgs) -> Result<Value>
     if args.drafts.is_empty() || args.drafts.len() > 40 {
         return Err(anyhow!("send 1 to 40 drafts"));
     }
-    let client = indexer.pool.get().await?;
+    let client = indexer.tools.get().await?;
     let lease_record = lease(&**client, &args.lease_token).await?;
     let token = lease_token(&args.lease_token)?;
     for draft in &args.drafts {
@@ -801,7 +803,7 @@ struct Draft {
 /// Validates and applies one thread's extracts, all or nothing. Errors list
 /// every problem so the caller can fix them and resubmit.
 pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let lease_record = lease(&**client, &args.lease_token).await?;
     let token = lease_token(&args.lease_token)?;
     if !lease_record.thread_ids.contains(&args.thread_id) {
@@ -1467,7 +1469,7 @@ pub async fn merge_authors(indexer: &Indexer, args: MergeAuthorsArgs) -> Result<
     if args.from_id == args.into_id {
         return Err(anyhow!("from_id and into_id are the same author"));
     }
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     let found: i64 = tx
         .query_one(
@@ -1570,7 +1572,7 @@ pub async fn merge_extracts(indexer: &Indexer, args: MergeExtractsArgs) -> Resul
     if args.from_id == args.into_id {
         return Err(anyhow!("from_id and into_id are the same"));
     }
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     let table = match args.kind {
         DraftKind::Feature => "features",
@@ -1662,7 +1664,7 @@ pub async fn merge_extracts(indexer: &Indexer, args: MergeExtractsArgs) -> Resul
 
 /// Undoes a merge from the log.
 pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value> {
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     let row = tx
         .query_opt(
@@ -1830,7 +1832,15 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
         DraftKind::Decision => ("decisions", "title", "outcome"),
     };
     let kind = args.kind.as_str();
-    let client = indexer.pool.get().await?;
+    let _permit = tokio::time::timeout(FIND_DUPLICATES_WAIT, indexer.find_duplicates.acquire())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "find_duplicates is already running {} times; try again in a minute",
+                crate::FIND_DUPLICATES_AT_ONCE
+            )
+        })??;
+    let client = indexer.tools.get().await?;
     let rows = client
         .query(
             &format!(
@@ -1902,7 +1912,7 @@ pub async fn mark_distinct(indexer: &Indexer, args: MarkDistinctArgs) -> Result<
         DraftKind::Decision => "decisions",
     };
     let kind = args.kind.as_str();
-    let client = indexer.pool.get().await?;
+    let client = indexer.tools.get().await?;
     let found: i64 = client
         .query_one(
             &format!("SELECT count(*) FROM {table} WHERE id IN ($1, $2) AND merged_into IS NULL"),

@@ -64,7 +64,29 @@ pub fn root_store(ca_file: Option<&Path>) -> Result<RootCertStore> {
 
 /// A pool for `url`, named `application_name` in pg_stat_activity.
 pub fn pool(url: &str, max_size: usize, application_name: &str) -> Result<Pool> {
+    let config: Config = url.parse().context("the database URL is invalid")?;
+    build_pool(config, max_size, application_name)
+}
+
+/// A pool for `url` whose connections start with `options`, the startup
+/// parameter, after any the URL gives: settings such as `-c
+/// statement_timeout=30000`, which hold for the connection's life.
+pub fn pool_with_options(
+    url: &str,
+    max_size: usize,
+    application_name: &str,
+    options: &str,
+) -> Result<Pool> {
     let mut config: Config = url.parse().context("the database URL is invalid")?;
+    let options = match config.get_options().map(str::trim) {
+        Some(given) if !given.is_empty() => format!("{given} {options}"),
+        _ => options.to_owned(),
+    };
+    config.options(options);
+    build_pool(config, max_size, application_name)
+}
+
+fn build_pool(mut config: Config, max_size: usize, application_name: &str) -> Result<Pool> {
     config.application_name(application_name);
     let manager = Manager::from_config(
         config,

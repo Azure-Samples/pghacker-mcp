@@ -137,7 +137,7 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
     ensure!(!name.is_empty(), "name is empty");
     let source_kind = args.kind;
     if source_kind == SourceKind::PostgresVersion {
-        let client = indexer.pool.get().await?;
+        let client = indexer.tools.get().await?;
         let schema = pghacker_core::code::history_schema();
         return in_history(&**client, schema, &name, &args).await;
     }
@@ -146,7 +146,7 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
         SourcesMode::Open => list_plan(indexer, &name, &args).await?,
     };
 
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     let source_id = upsert(&*tx, source_kind, &name, &plan.config).await?;
     let mut queued = Vec::new();
@@ -560,7 +560,7 @@ async fn upsert(
 }
 
 pub async fn remove_source(indexer: &Indexer, args: RemoveSourceArgs) -> Result<Value> {
-    let mut client = indexer.pool.get().await?;
+    let mut client = indexer.tools.get().await?;
     let tx = client.transaction().await?;
     let Some(row) = tx
         .query_opt(
@@ -586,7 +586,7 @@ pub async fn remove_source(indexer: &Indexer, args: RemoveSourceArgs) -> Result<
 }
 
 pub async fn list_sources(indexer: &Indexer) -> Result<Value> {
-    let client = indexer.pool.get().await?;
+    let client = indexer.tools.get().await?;
     let rows = client
         .query(
             "SELECT s.id, s.kind, s.name, s.config, s.enabled, s.created_at,

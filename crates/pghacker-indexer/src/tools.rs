@@ -160,6 +160,18 @@ fn output(result: anyhow::Result<Value>) -> Result<Output, ErrorData> {
     })
 }
 
+/// Runs a change of sources on a task of its own, which finishes even if its
+/// client goes away, as before calls could be abandoned: a source asked for
+/// is added or removed, with its jobs, however long the archive takes to
+/// list its months.
+async fn detached(
+    change: impl Future<Output = anyhow::Result<Value>> + Send + 'static,
+) -> anyhow::Result<Value> {
+    tokio::spawn(change)
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!("the change of sources failed: {error}")))
+}
+
 impl Tools for Indexer {
     fn specs(&self) -> &'static [ToolSpec] {
         TOOLS
@@ -168,8 +180,14 @@ impl Tools for Indexer {
     async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
         use crate::{extraction, sources, status};
         match name {
-            "add_source" => output(sources::add_source(self, parse(name, arguments)?).await),
-            "remove_source" => output(sources::remove_source(self, parse(name, arguments)?).await),
+            "add_source" => {
+                let (indexer, args) = (self.clone(), parse(name, arguments)?);
+                output(detached(async move { sources::add_source(&indexer, args).await }).await)
+            }
+            "remove_source" => {
+                let (indexer, args) = (self.clone(), parse(name, arguments)?);
+                output(detached(async move { sources::remove_source(&indexer, args).await }).await)
+            }
             "list_sources" => output(sources::list_sources(self).await),
             "ingest_status" => output(status::ingest_status(self).await),
             "next_extraction_batch" => {

@@ -1,9 +1,11 @@
 //! The MCP plumbing over HTTP, as clients use it: a legacy client's
 //! initialize then tools/list and tools/call without a session, structured
-//! results, tool errors, unknown tools, Host validation, and ping from
-//! clients of either protocol.
+//! results, tool errors, unknown tools, Host validation, ping from clients of
+//! either protocol, and calls whose clients give up.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use pghacker_core::mcp::{
     Effect, McpServer, Output, ToolSpec, Tools, failed, parse, router, schema,
@@ -50,7 +52,11 @@ impl Tools for Echo {
 }
 
 async fn serve(hosts: Option<Vec<String>>) -> String {
-    let app = router(McpServer::new(Echo, "echo", "1", "Echo tools."), hosts);
+    serve_server(McpServer::new(Echo, "echo", "1", "Echo tools."), hosts).await
+}
+
+async fn serve_server<T: Tools>(server: McpServer<T>, hosts: Option<Vec<String>>) -> String {
+    let app = router(server, hosts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -249,4 +255,86 @@ async fn hosts_outside_the_allowed_list_are_refused() {
         .await
         .unwrap();
     assert!(response.status().is_client_error(), "{}", response.status());
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct NoArgs {}
+
+/// A tool that never finishes, and says when its call is dropped.
+#[derive(Clone)]
+struct Hang {
+    dropped: Arc<AtomicBool>,
+}
+
+static HANG: &[ToolSpec] = &[ToolSpec {
+    name: "hang",
+    description: "Never finishes.",
+    effect: Effect::Read,
+    schema: schema::<NoArgs>,
+}];
+
+struct OnDrop(Arc<AtomicBool>);
+
+impl Drop for OnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Tools for Hang {
+    fn specs(&self) -> &'static [ToolSpec] {
+        HANG
+    }
+
+    async fn call(&self, _name: &str, _arguments: Value) -> Result<Output, ErrorData> {
+        let _dropped = OnDrop(self.dropped.clone());
+        std::future::pending::<()>().await;
+        Ok(Output::Text(String::new()))
+    }
+}
+
+/// Calls `hang` from a client that gives up after a moment; returns whether
+/// the call was dropped within two seconds after.
+async fn hang_dropped(cancel_on_disconnect: bool) -> bool {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let mut server = McpServer::new(
+        Hang {
+            dropped: dropped.clone(),
+        },
+        "hang",
+        "1",
+        "Hangs.",
+    );
+    if cancel_on_disconnect {
+        server = server.cancel_on_disconnect();
+    }
+    let base = serve_server(server, None).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let answer = client
+        .post(format!("{base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "hang", "arguments": {} } }))
+        .send()
+        .await;
+    assert!(answer.is_err(), "hang answered");
+    for _ in 0..20 {
+        if dropped.load(Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_call_is_dropped_when_its_client_gives_up_if_the_server_cancels_on_disconnect() {
+    assert!(hang_dropped(true).await, "the abandoned call ran on");
+    assert!(
+        !hang_dropped(false).await,
+        "without cancel_on_disconnect, a call runs on as it always has"
+    );
 }

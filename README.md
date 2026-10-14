@@ -195,6 +195,17 @@ not compared yet. An extract stored before its embedding is compared again
 once it has one, and one whose merge is undone is compared again with the
 extracts that came meanwhile.
 
+### Tool calls' limits
+
+The indexer's tool calls have database connections of their own, apart from
+the job workers', so that no call can keep the jobs waiting: 8 by default
+(`PGHACKER_TOOL_CONNECTIONS`). Each statement of a call may run 30 seconds
+(`PGHACKER_TOOL_TIMEOUT_SECONDS`), and a call that waits 10 seconds for a
+connection fails as busy. When a call's client goes away, the indexer cancels
+the call's statements and closes their connections. `add_source` and
+`remove_source` run to the end regardless: a change of sources, once asked
+for, is made.
+
 ### Commit history
 
 The commit history stores every line of every commit of every branch once

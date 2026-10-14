@@ -34,6 +34,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::calls::abandonable;
+
 /// A tool: its name, its description for agents, what it does to data, and
 /// its arguments' schema.
 pub struct ToolSpec {
@@ -123,6 +125,7 @@ pub struct McpServer<T> {
     tools: T,
     list: Arc<Vec<Tool>>,
     info: Arc<ServerConfig>,
+    cancel_on_disconnect: bool,
 }
 
 impl<T: Tools> McpServer<T> {
@@ -135,7 +138,18 @@ impl<T: Tools> McpServer<T> {
             tools,
             list: Arc::new(list),
             info: Arc::new(info),
+            cancel_on_disconnect: false,
         }
+    }
+
+    /// Abandons a call when its client goes away, rather than running it on
+    /// unobserved: its future is dropped, and the statements it runs on a
+    /// [`CallPool`](crate::calls::CallPool)'s connections are cancelled. Only
+    /// for tools that may stop at any await, such as tools that leave no
+    /// session setting changed across one.
+    pub fn cancel_on_disconnect(mut self) -> Self {
+        self.cancel_on_disconnect = true;
+        self
     }
 }
 
@@ -159,7 +173,7 @@ impl<T: Tools> ServerHandler for McpServer<T> {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.to_string();
         if !self.tools.specs().iter().any(|spec| spec.name == name) {
@@ -170,7 +184,21 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         }
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let started = Instant::now();
-        let outcome = self.tools.call(&name, arguments).await;
+        let outcome = if self.cancel_on_disconnect {
+            // rmcp cancels the request's token when the client disconnects
+            // before the answer.
+            tokio::select! {
+                biased;
+                outcome = abandonable(self.tools.call(&name, arguments)) => outcome,
+                () = context.ct.cancelled() => {
+                    let ms = started.elapsed().as_millis() as u64;
+                    tracing::info!(tool = %name, ms, "tool call abandoned: the client went away");
+                    return Err(ErrorData::internal_error("the client went away", None));
+                }
+            }
+        } else {
+            self.tools.call(&name, arguments).await
+        };
         let ms = started.elapsed().as_millis() as u64;
         let result = match outcome {
             Ok(Output::Json(value)) => {
