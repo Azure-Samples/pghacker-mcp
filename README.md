@@ -188,6 +188,10 @@ npm run smoke            # with the app running: both MCP servers, the portal, t
 npm run eval             # with the corpus built: the 20-question evaluation (eval/questions.json, results in eval/RESULTS.md)
 ```
 
+Rust integration tests read the local database configuration from `.env`, with
+process variables taking precedence. The Rust-created operator fixture forwards
+its scoped reader URL to Node; exporting `PGH_READER_PASSWORD` is not required.
+
 The code-search exactness replay lives in `crates/pghacker-replay`, against its own `pghacker_replay` database:
 
 ```bash

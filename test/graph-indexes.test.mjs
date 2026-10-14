@@ -163,9 +163,16 @@ test("the CLI reports canary incompleteness, uses mapping ownership, and refuses
   const db = fixtureUrl();
   const directory = mkdtempSync(path.join(tmpdir(), "pgh-index-manifest-"));
   const manifestPath = path.join(directory, "scope.json");
-  const reader = new URL(db);
-  reader.username = "pgh_reader";
-  reader.password = process.env.PGH_READER_PASSWORD;
+  let reader;
+  try {
+    reader = new URL(process.env.PGHACKER_INDEX_TEST_READER_URL);
+  } catch {
+    throw new Error("Rust fixture must provide PGHACKER_INDEX_TEST_READER_URL");
+  }
+  const owner = new URL(db);
+  if (reader.host !== owner.host || reader.pathname !== owner.pathname || reader.username !== "pgh_reader") {
+    throw new Error("Reader fixture URL must match the owned database and use pgh_reader");
+  }
   const env = { ...process.env, PGHACKER_ADMIN_DATABASE_URL: db, PGHACKER_INDEXER_DATABASE_URL: reader.toString() };
   const cli = (args, override = {}) => run(process.execPath, ["scripts/graph-indexes.mjs", ...args],
     { env: { ...env, ...override }, timeoutMs: 30000 });

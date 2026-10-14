@@ -169,6 +169,8 @@ async fn operator_protocol_and_recovery_are_exercised_on_a_private_fixture() {
         ])
         .current_dir(root)
         .env("PGHACKER_INDEX_TEST_URL", &db.admin_url)
+        .env("PGHACKER_INDEX_TEST_READER_URL", &db.reader_url)
+        .env_remove("PGH_READER_PASSWORD")
         .output()
         .await
         .unwrap();
