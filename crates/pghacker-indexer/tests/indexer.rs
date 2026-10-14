@@ -4,7 +4,7 @@
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, extraction, graph, jobs, sources};
+use pghacker_indexer::{Indexer, duplicates, extraction, graph, jobs, sources};
 use serde_json::{Value, json};
 
 const FIXTURE: &str = r#"
@@ -56,6 +56,17 @@ async fn corpus() -> (TestDb, Indexer) {
 
 fn args<T: serde::de::DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).unwrap()
+}
+
+/// find_duplicates once the duplicates job has compared every extract.
+async fn find_duplicates(indexer: &Indexer, kind: &str) -> Value {
+    let mut client = indexer.pool.get().await.unwrap();
+    duplicates::refresh(&mut client, std::time::Duration::from_secs(60))
+        .await
+        .unwrap();
+    extraction::find_duplicates(indexer, args(json!({ "kind": kind })))
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -723,9 +734,7 @@ async fn judged_distinct_pairs_are_not_offered_as_duplicates() {
         ]
     );
     for kind in ["feature", "decision"] {
-        let found = extraction::find_duplicates(&indexer, args(json!({ "kind": kind })))
-            .await
-            .unwrap();
+        let found = find_duplicates(&indexer, kind).await;
         assert!(found["pairs"].as_array().unwrap().is_empty(), "{found:#}");
         assert_eq!(found["judged_distinct"], 1);
     }
@@ -735,9 +744,7 @@ async fn judged_distinct_pairs_are_not_offered_as_duplicates() {
         .execute("DELETE FROM distinct_pairs WHERE kind = 'feature'", &[])
         .await
         .unwrap();
-    let found = extraction::find_duplicates(&indexer, args(json!({ "kind": "feature" })))
-        .await
-        .unwrap();
+    let found = find_duplicates(&indexer, "feature").await;
     let pair = &found["pairs"][0];
     assert_eq!(
         (pair["a"]["id"].as_i64(), pair["b"]["id"].as_i64()),
@@ -750,9 +757,7 @@ async fn judged_distinct_pairs_are_not_offered_as_duplicates() {
         .unwrap();
     assert_eq!(marked["recorded"], true, "{marked:#}");
     assert_eq!(marked["pair"], json!([feature, added]));
-    let found = extraction::find_duplicates(&indexer, args(json!({ "kind": "feature" })))
-        .await
-        .unwrap();
+    let found = find_duplicates(&indexer, "feature").await;
     assert!(found["pairs"].as_array().unwrap().is_empty(), "{found:#}");
     let again = extraction::mark_distinct(&indexer, args(verdict))
         .await
@@ -836,9 +841,7 @@ async fn merges_are_logged_and_undone() {
         .execute("INSERT INTO feature_threads VALUES (99, 11)", &[])
         .await
         .unwrap();
-    let duplicates = extraction::find_duplicates(&indexer, args(json!({ "kind": "feature" })))
-        .await
-        .unwrap();
+    let duplicates = find_duplicates(&indexer, "feature").await;
     assert_eq!(
         duplicates["pairs"].as_array().unwrap().len(),
         1,

@@ -112,8 +112,10 @@ pub static TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "find_duplicates",
-        description: "Lists pairs of features or decisions that look like the same thing, by semantic search or name, \
-            except pairs already judged different: by an extractor's distinct_because or by mark_distinct.",
+        description: "Lists pairs of features or decisions that look like the same thing, by semantic similarity \
+            or name, except pairs already judged different: by an extractor's distinct_because or by \
+            mark_distinct. The indexer finds the pairs as extracts arrive; pending counts the extracts it hasn't \
+            compared yet.",
         effect: READ,
         schema: schema::<FindDuplicatesArgs>,
     },

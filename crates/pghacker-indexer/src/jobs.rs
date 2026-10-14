@@ -22,6 +22,7 @@ pub mod kind {
     pub const MAIL_REFRESH: &str = "mail_refresh";
     pub const CODE_HISTORY_SYNC: &str = "code_history_sync";
     pub const PATCH_LINES: &str = "patch_lines";
+    pub const DUPLICATES: &str = "duplicates";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -35,10 +36,15 @@ pub const RECURRING: &[(&str, Duration)] = &[
     // New commits on every branch, hourly.
     (kind::CODE_HISTORY_SYNC, Duration::from_secs(3600)),
     (kind::PATCH_LINES, Duration::from_secs(60)),
+    // New features and decisions, compared for find_duplicates.
+    (kind::DUPLICATES, Duration::from_secs(60)),
 ];
 
 /// How long a graph sync job applies batches of changes before it yields.
 const GRAPH_SYNC_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long a duplicates job compares extracts before it yields.
+const DUPLICATES_BUDGET: Duration = Duration::from_secs(10);
 
 /// Patches a patch_lines run indexes.
 const PATCH_LINES_BATCH: i64 = 200;
@@ -363,6 +369,19 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
                 result: serde_json::to_value(indexed)?,
             })
         }
+        kind::DUPLICATES => {
+            let mut client = indexer.pool.get().await?;
+            let report = crate::duplicates::refresh(&mut client, DUPLICATES_BUDGET).await?;
+            let after = if report.more {
+                Duration::ZERO
+            } else {
+                recurring_interval(kind::DUPLICATES)
+            };
+            Ok(Outcome::Again {
+                after,
+                result: serde_json::to_value(report)?,
+            })
+        }
         other => Err(anyhow!("unknown job kind {other}")),
     }
 }
@@ -442,6 +461,7 @@ const RECURRING_KINDS: &[&str] = &[
     kind::MAIL_REFRESH,
     kind::CODE_HISTORY_SYNC,
     kind::PATCH_LINES,
+    kind::DUPLICATES,
 ];
 
 /// The job kinds worker `worker` of `workers` claims: only these, when given.
@@ -477,7 +497,11 @@ async fn worker_loop(
                 }
                 if !matches!(
                     job.kind.as_str(),
-                    kind::EMBED | kind::RESOLVE_ANCHORS | kind::GRAPH_SYNC | kind::MAIL_REFRESH
+                    kind::EMBED
+                        | kind::RESOLVE_ANCHORS
+                        | kind::GRAPH_SYNC
+                        | kind::MAIL_REFRESH
+                        | kind::DUPLICATES
                 ) || !ok
                 {
                     tracing::info!(job = job.id, kind = %job.kind, key = %job.key, ok, ms = started.elapsed().as_millis() as u64, "job finished");

@@ -64,7 +64,7 @@ pub enum DraftKind {
 }
 
 impl DraftKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Feature => "feature",
             Self::Decision => "decision",
@@ -267,9 +267,10 @@ pub struct UndoMergeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindDuplicatesArgs {
     pub kind: DraftKind,
-    /// Minimum semantic similarity, 0 to 1. Default 0.85.
+    /// Minimum semantic similarity, 0.8 to 1. Default 0.85.
     #[serde(default)]
     pub min_similarity: Option<f64>,
+    /// Pairs to list, 1 to 100. Default 20.
     #[serde(default)]
     pub limit: Option<u32>,
 }
@@ -1388,6 +1389,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     tx.commit().await?;
     release_if_done(&**client, token).await?;
     crate::jobs::wake(&**client, crate::jobs::kind::GRAPH_SYNC).await?;
+    crate::jobs::wake(&**client, crate::jobs::kind::DUPLICATES).await?;
     Ok(json!({
         "accepted": true,
         "thread_id": args.thread_id,
@@ -1793,6 +1795,13 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
                 )
                 .await?;
             }
+            // Extracts that came while it was merged weren't compared with
+            // it: compare it again.
+            tx.execute(
+                "DELETE FROM duplicate_checks WHERE kind = $1 AND extract_id = $2",
+                &[&kind, &from_id],
+            )
+            .await?;
         }
         other => return Err(anyhow!("cannot undo a {other} merge")),
     }
@@ -1803,16 +1812,18 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
     .await?;
     tx.commit().await?;
     crate::jobs::wake(&**client, crate::jobs::kind::GRAPH_SYNC).await?;
+    crate::jobs::wake(&**client, crate::jobs::kind::DUPLICATES).await?;
     Ok(json!({ "merge_id": args.merge_id, "undone": true }))
 }
 
 /// Pairs of features or decisions that look like the same thing, except
-/// pairs already judged different.
+/// pairs already judged different: the duplicates job's candidates whose two
+/// extracts are both live.
 pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Result<Value> {
     let min = args
         .min_similarity
         .unwrap_or(SEMANTIC_DUPLICATE)
-        .clamp(0.0, 1.0);
+        .clamp(crate::duplicates::SEMANTIC_FLOOR, 1.0);
     let limit = i64::from(args.limit.unwrap_or(20).clamp(1, 100));
     let (table, label, summary) = match args.kind {
         DraftKind::Feature => ("features", "name", "description"),
@@ -1823,15 +1834,14 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
     let rows = client
         .query(
             &format!(
-                "SELECT a.id, a.{label}, a.{summary}, b.id, b.{label}, b.{summary},
-                        (1 - (a.embedding <=> b.embedding))::float8 AS semantic,
-                        similarity(a.{label}, b.{label})::float8 AS name_similarity
-                 FROM {table} a JOIN {table} b ON a.id < b.id
-                 WHERE a.merged_into IS NULL AND b.merged_into IS NULL
-                   AND ((a.embedding IS NOT NULL AND b.embedding IS NOT NULL AND 1 - (a.embedding <=> b.embedding) >= $1::float8)
-                        OR similarity(a.{label}, b.{label}) >= $2::float8)
-                   AND NOT EXISTS (SELECT FROM distinct_pairs p WHERE p.kind = $4 AND p.low_id = a.id AND p.high_id = b.id)
-                 ORDER BY greatest(coalesce(1 - (a.embedding <=> b.embedding), 0), similarity(a.{label}, b.{label})) DESC
+                "SELECT a.id, a.{label}, a.{summary}, b.id, b.{label}, b.{summary}, c.semantic, c.name_similarity
+                 FROM duplicate_candidates c
+                 JOIN {table} a ON a.id = c.low_id AND a.merged_into IS NULL
+                 JOIN {table} b ON b.id = c.high_id AND b.merged_into IS NULL
+                 WHERE c.kind = $4 AND (c.semantic >= $1 OR c.name_similarity >= $2)
+                   AND NOT EXISTS (SELECT FROM distinct_pairs p
+                                   WHERE p.kind = c.kind AND p.low_id = c.low_id AND p.high_id = c.high_id)
+                 ORDER BY greatest(coalesce(c.semantic, 0), c.name_similarity) DESC, c.low_id, c.high_id
                  LIMIT $3"
             ),
             &[&min, &NAME_DUPLICATE, &limit, &kind],
@@ -1855,11 +1865,25 @@ pub async fn find_duplicates(indexer: &Indexer, args: FindDuplicatesArgs) -> Res
         )
         .await?
         .get(0);
+    let pending = crate::duplicates::pending(&**client, args.kind).await?;
+    let mut next = "Merge true duplicates with merge_extracts (from the less complete into the more complete), \
+                    and record every pair that differs with mark_distinct. Pairs already judged different \
+                    (judged_distinct) aren't listed."
+        .to_owned();
+    if pending > 0 {
+        let (noun, verb) = if pending == 1 {
+            (kind.to_owned(), "isn't")
+        } else {
+            (format!("{kind}s"), "aren't")
+        };
+        next.push_str(&format!(
+            " {pending} {noun} {verb} compared yet: the indexer compares them in the background, \
+             so later calls may list more pairs."
+        ));
+    }
     Ok(
-        json!({ "kind": kind, "pairs": pairs, "judged_distinct": judged,
-               "next": "Merge true duplicates with merge_extracts (from the less complete into the more complete), \
-                        and record every pair that differs with mark_distinct. Pairs already judged different \
-                        (judged_distinct) aren't listed." }),
+        json!({ "kind": kind, "min_similarity": min, "pairs": pairs, "judged_distinct": judged,
+               "pending": pending, "next": next }),
     )
 }
 

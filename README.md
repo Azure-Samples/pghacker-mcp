@@ -94,7 +94,7 @@ not make the full graph sync incremental or establish its total runtime.
 | --- | --- |
 | Sources and progress | `add_source`, `remove_source`, `list_sources`, `ingest_status` |
 | Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
-| Repair | `find_duplicates` (skips pairs already judged different), `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
+| Repair | `find_duplicates` (pairs the indexer finds as extracts arrive; skips pairs already judged different), `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
 
 Results cite Message-IDs, verbatim quotes and file paths. Email addresses are used only to match authors: they live in a table the reader can't access, and bodies are stored with addresses redacted.
 
@@ -181,6 +181,19 @@ is installed, after a `TRUNCATE` (as a corpus restore does), weekly as a
 reconcile that warns if it finds drift, and on request with
 `pghacker-indexer graph-reconcile`. `ingest_status` shows the label counts the
 sync keeps, the changes waiting and the last full sync.
+
+### How duplicates are found
+
+The `duplicates` job compares each new feature and decision with the live
+ones of its kind, by its embedding's nearest neighbours (the HNSW index) and
+by its name's trigrams, and keeps the pairs at least 0.8 alike by embedding
+or 0.6 by name (`duplicate_candidates`). Each pair is compared once, when the
+later of its two arrives, so the work grows with the new extracts rather than
+with every pair. `find_duplicates` lists the kept pairs whose two extracts are
+both live, except pairs judged different, and `pending` counts the extracts
+not compared yet. An extract stored before its embedding is compared again
+once it has one, and one whose merge is undone is compared again with the
+extracts that came meanwhile.
 
 ### Commit history
 

@@ -1,10 +1,11 @@
 //! pghacker-indexer: async workers that retrieve sources (monthly mbox
 //! archives, seed threads, the commit history's new commits), embed chunks,
-//! resolve anchors and project the tables into the AGE graph; and the MCP
-//! tools that crawler sessions use to manage sources, watch progress and
-//! submit extracts.
+//! resolve anchors, find duplicate candidates among the extracts and
+//! project the tables into the AGE graph; and the MCP tools that crawler
+//! sessions use to manage sources, watch progress and submit extracts.
 
 pub mod anchors;
+pub mod duplicates;
 pub mod embedding;
 pub mod extraction;
 pub mod graph;
