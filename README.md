@@ -74,6 +74,7 @@ not make the full graph sync incremental or establish its total runtime.
 | `PILOTSWARM_WORKER_CONCURRENCY` | Session turns the worker runs at once (default 8). |
 | `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
 | `PGHACKER_AGENT_MCP_URL` | Another pghacker-mcp for the local agents, such as a deployment's public `/mcp`, to evaluate it. |
+| `PGHACKER_CODE_HISTORY` | The schema of a commit-history build for the code tools to read instead of the snapshots: `pghacker` once installed. Unset, they read the snapshots. |
 
 `config/test-slices.toml` chooses the months, seed threads and code paths that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months, threads or commit instead, and `follow` keeps a list current (deploy/README.md).
 
@@ -195,11 +196,17 @@ cargo run --release -p pghacker-indexer -- history verify --git-dir .runtime/pos
     --schema pghacker --heads --sample 40
 ```
 
-Then set `PGHACKER_CODE_HISTORY=pghacker`. The hourly `code_history_sync` job
+Then set `PGHACKER_CODE_HISTORY=pghacker` in `.env` and restart: `npm start`
+passes it to the indexer and pghacker-mcp (in Azure, `app_env`; see
+[deploy/README.md](deploy/README.md#commit-history)). `history build --fetch`
+fetches or updates the bare clone from `--url` itself, as the Azure job does.
+The hourly `code_history_sync` job
 fetches and applies new commits, and refreshes back-patch groups and the
 links from commits to threads; `history sync` and `history regroup` do it by
 hand. The `patch_lines` job indexes the mail's patches for `search_patches`
-whether or not the history is installed.
+whether or not the history is installed. With the history on, `add_source`
+for a PostgreSQL version loads no snapshot: it names the commit the history
+already has, or starts the sync when the history lacks it.
 
 In the `pghacker-replay` crate's `perf_tuning/` folder, `history_parity`
 checks a build in `pghacker_bench` against git on random commits:

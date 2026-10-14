@@ -2560,6 +2560,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "pghacker-codesearch",
  "pghacker-core",
  "pgvector",
  "regex",

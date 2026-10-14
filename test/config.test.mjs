@@ -208,6 +208,17 @@ test("each process gets only the credentials it needs", () => {
   }
 });
 
+test("PGHACKER_CODE_HISTORY, from .env or the shell, reaches the indexer and pghacker-mcp only", () => {
+  const services = (text, inherited = {}) => serviceEnvironments(parseLocalConfig(`${initialEnv(password)}${text}`), inherited);
+  for (const env of Object.values(services(""))) assert.equal("PGHACKER_CODE_HISTORY" in env, false);
+  const fromFile = services("PGHACKER_CODE_HISTORY=pghacker_history\n", { PGHACKER_CODE_HISTORY: "pghacker" });
+  assert.equal(fromFile.indexer.PGHACKER_CODE_HISTORY, "pghacker_history");
+  assert.equal(fromFile.mcp.PGHACKER_CODE_HISTORY, "pghacker_history");
+  assert.equal("PGHACKER_CODE_HISTORY" in fromFile.bootstrap, false);
+  assert.equal(services("", { PGHACKER_CODE_HISTORY: "pghacker" }).mcp.PGHACKER_CODE_HISTORY, "pghacker");
+  assert.throws(() => services("PGHACKER_CODE_HISTORY=pghacker.code\n"), /must name a schema/);
+});
+
 test("the plugin's agents load with the MCP servers they name", async () => {
   const { loadAgentFiles } = await import("pilotswarm-sdk");
   const agents = Object.fromEntries(loadAgentFiles(path.join(APP_ROOT, "plugin", "agents")).map((agent) => [agent.name, agent]));

@@ -3,11 +3,11 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use pghacker_core::code::{LATEST_FIRST, newest_first};
+use pghacker_core::code::{LATEST_FIRST, history_schema, newest_first};
 use pghacker_core::{EDGE_LABELS, GRAPH, VERTEX_LABELS};
 
 /// Each vertex label's properties.
@@ -69,6 +69,123 @@ async fn label_count(
 }
 
 pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
+    describe(client, history_schema()).await
+}
+
+/// How the code tools read snapshots.
+const SNAPSHOT_NOTE: &str = "A snapshot is the tree as of committed_at: for a release branch, what \
+    that release contains; work committed to master after the branch point goes to a later release. \
+    The code tools read a version's default, its latest snapshot; name a release (18.3), a ref from \
+    other_refs or a commit SHA as the version to read another, and no version for the newest release \
+    line.";
+
+/// How the code tools, and SQL, read the commit history.
+const HISTORY_NOTE: &str = "The code tools read the commit history: every commit of every branch \
+    and tag. version names a major version (its stable branch), a release (18.3, its tag), a branch, \
+    tag or commit SHA, a branch or tag as of a date (REL_17_STABLE@2024-06-01) or commits back \
+    (master~3); without one, `default`. Paths below /branch/<name>/, /tag/<name>/ or /commit/<rev>/ \
+    read those trees in the same call. blame, get_commit and search_commits answer as git blame, git \
+    show and git log. In SQL, code_commits.addr places a commit: master's k-th commit is k * 2^32, \
+    and a branch's commits follow the master commit it forks from. A file version (code_file_versions) \
+    or line instance (code_line_instances) is in commit X's tree when lo <= X AND X < hi AND \
+    (alive IS NULL OR alive @> X); a version's lines are its lineage's instances alive at its lo, in \
+    weave order.";
+
+/// SQL over the commit history.
+const HISTORY_SQL: &[&str] = &[
+    "SELECT c.sha, c.committed_at, c.author_name, c.subject FROM code_commit_files f JOIN code_commits c ON c.addr = f.addr WHERE f.path = 'src/backend/parser/parse_jsontable.c' ORDER BY c.committed_at DESC LIMIT 10",
+    "SELECT c.sha, c.subject, t.subject AS thread FROM code_commits c JOIN code_commit_threads ct ON ct.sha = c.sha JOIN threads t ON t.id = ct.thread_id WHERE c.subject ~* 'JSON_TABLE' ORDER BY c.committed_at LIMIT 10",
+    "SELECT v.path, v.line_count FROM code_refs r JOIN code_file_versions v ON v.lo <= r.addr AND r.addr < v.hi AND (v.alive IS NULL OR v.alive @> r.addr) WHERE r.kind = 'branch' AND r.name = 'REL_17_STABLE' AND v.path LIKE 'src/backend/parser/%' ORDER BY v.path",
+];
+
+/// The commit history in `schema`, in brief: None until one is built.
+async fn history_loaded(client: &impl GenericClient, schema: &str) -> Result<Value> {
+    let s = format!("\"{}\"", schema.replace('"', "\"\""));
+    let row = client
+        .query_opt(
+            &format!(
+                "SELECT h.master, h.url, h.paths, h.head, h.built_at, h.synced_at,
+                        (SELECT count(*) FROM {s}.code_commits),
+                        (SELECT coalesce(array_agg(name ORDER BY name), '{{}}') FROM {s}.code_refs WHERE kind = 'branch'),
+                        (SELECT count(*) FROM {s}.code_refs WHERE kind = 'tag')
+                 FROM {s}.code_history h"
+            ),
+            &[],
+        )
+        .await
+        .with_context(|| format!("cannot read the commit history in schema {schema}"))?;
+    let Some(row) = row else {
+        return Ok(Value::Null);
+    };
+    // The commit the code tools read without a version.
+    let default = pghacker_codesearch::rev::resolve(client, schema, "postgres", None)
+        .await
+        .ok()
+        .map(|d| json!({ "ref": d.git_ref, "sha": d.sha }));
+    let paths: Vec<String> = row.get(2);
+    Ok(json!({
+        "repo": "postgres",
+        "url": row.get::<_, Option<String>>(1),
+        "paths": if paths.is_empty() { json!("the whole tree") } else { json!(paths) },
+        "master": row.get::<_, String>(0),
+        "head": row.get::<_, Option<String>>(3),
+        "built_at": row.get::<_, chrono::DateTime<chrono::Utc>>(4),
+        "synced_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(5),
+        "commits": row.get::<_, i64>(6),
+        "branches": row.get::<_, Vec<String>>(7),
+        "tags": row.get::<_, i64>(8),
+        "default": default,
+    }))
+}
+
+/// The loaded snapshots: one entry per version, newest first: its default
+/// snapshot, the latest (the newest commit), and the refs of the others,
+/// which stay readable.
+async fn snapshots_loaded(client: &impl GenericClient) -> Result<Value> {
+    let mut code: Vec<(String, Option<String>, Value, Vec<String>)> = Vec::new();
+    for row in client
+        .query(
+            &format!(
+                "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
+                 FROM code_snapshots WHERE state = 'ready' ORDER BY {LATEST_FIRST}"
+            ),
+            &[],
+        )
+        .await?
+    {
+        let (repo, version, git_ref): (String, Option<String>, String) =
+            (row.get(0), row.get(1), row.get(2));
+        match code
+            .iter_mut()
+            .find(|(r, v, ..)| *r == repo && *v == version)
+        {
+            Some((.., others)) => others.push(git_ref),
+            None => {
+                let latest = json!({ "ref": git_ref, "sha": row.get::<_, String>(3),
+                                     "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
+                                     "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
+                                     "lines": row.get::<_, i64>(6) });
+                code.push((repo, version, latest, Vec::new()));
+            }
+        }
+    }
+    code.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| newest_first(a.1.as_deref().unwrap_or(""), b.1.as_deref().unwrap_or("")))
+    });
+    Ok(Value::Array(
+        code
+        .into_iter()
+        .map(|(repo, version, latest, others)| {
+            json!({ "repo": repo, "version": version, "default": latest, "other_refs": others })
+        })
+        .collect(),
+    ))
+}
+
+/// get_ontology. With `history`, the code tools read the commit history in
+/// that schema: `loaded.code` describes it instead of the snapshots.
+pub async fn describe(client: &impl GenericClient, history: Option<&str>) -> Result<Value> {
     let kept: HashMap<String, i64> = client
         .query("SELECT label, count FROM graph_label_counts", &[])
         .await?
@@ -122,45 +239,17 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
             &[],
         )
         .await?;
-    // One entry per version, newest first: its default snapshot, the latest
-    // (the newest commit), and the refs of the others, which stay readable.
-    let mut code: Vec<(String, Option<String>, Value, Vec<String>)> = Vec::new();
-    for row in client
-        .query(
-            &format!(
-                "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
-                 FROM code_snapshots WHERE state = 'ready' ORDER BY {LATEST_FIRST}"
-            ),
-            &[],
-        )
-        .await?
-    {
-        let (repo, version, git_ref): (String, Option<String>, String) =
-            (row.get(0), row.get(1), row.get(2));
-        match code
-            .iter_mut()
-            .find(|(r, v, ..)| *r == repo && *v == version)
-        {
-            Some((.., others)) => others.push(git_ref),
-            None => {
-                let latest = json!({ "ref": git_ref, "sha": row.get::<_, String>(3),
-                                     "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
-                                     "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
-                                     "lines": row.get::<_, i64>(6) });
-                code.push((repo, version, latest, Vec::new()));
-            }
-        }
+    let (code, code_note) = match history {
+        Some(schema) => (history_loaded(client, schema).await?, HISTORY_NOTE),
+        None => (snapshots_loaded(client).await?, SNAPSHOT_NOTE),
+    };
+    let mut sql = vec![
+        "SELECT a.display_name, count(*) FROM messages m JOIN authors a ON a.id = m.author_id GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
+        "SELECT f.slug, f.status, f.release, count(ft.thread_id) AS threads FROM features f LEFT JOIN feature_threads ft ON ft.feature_id = f.id WHERE f.merged_into IS NULL GROUP BY f.id ORDER BY threads DESC",
+    ];
+    if history.is_some() {
+        sql.extend(HISTORY_SQL);
     }
-    code.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| newest_first(a.1.as_deref().unwrap_or(""), b.1.as_deref().unwrap_or("")))
-    });
-    let code: Vec<Value> = code
-        .into_iter()
-        .map(|(repo, version, latest, others)| {
-            json!({ "repo": repo, "version": version, "default": latest, "other_refs": others })
-        })
-        .collect();
     Ok(json!({
         "graph": {
             "name": GRAPH,
@@ -177,10 +266,7 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (t:Thread)-[:DISCUSSES]->(f:Feature) RETURN f.name, count(t) ORDER BY count(t) DESC LIMIT 10 $$) AS (feature agtype, threads agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (m:Message)-[:MENTIONS]->(f:File)-[:PART_OF]->(s:Subsystem {name: 'parser'}) RETURN f.path, count(m) ORDER BY count(m) DESC LIMIT 10 $$) AS (path agtype, mentions agtype)",
             ],
-            "sql": [
-                "SELECT a.display_name, count(*) FROM messages m JOIN authors a ON a.id = m.author_id GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
-                "SELECT f.slug, f.status, f.release, count(ft.thread_id) AS threads FROM features f LEFT JOIN feature_threads ft ON ft.feature_id = f.id WHERE f.merged_into IS NULL GROUP BY f.id ORDER BY threads DESC",
-            ],
+            "sql": sql,
         },
         "search_modes": {
             "fulltext": "BM25 ranking of the words (pg_textsearch)",
@@ -206,10 +292,7 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
             },
             "embeddings": { "chunks_embedded": coverage.get::<_, i64>(10), "chunks": coverage.get::<_, i64>(11) },
             "code": code,
-            "code_note": "A snapshot is the tree as of committed_at: for a release branch, what that release contains; \
-                          work committed to master after the branch point goes to a later release. The code tools read \
-                          a version's default, its latest snapshot; name a release (18.3), a ref from other_refs or a \
-                          commit SHA as the version to read another, and no version for the newest release line.",
+            "code_note": code_note,
         },
     }))
 }

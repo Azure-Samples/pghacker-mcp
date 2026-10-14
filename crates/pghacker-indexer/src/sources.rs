@@ -155,6 +155,12 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
     let name = args.name.trim().to_owned();
     ensure!(!name.is_empty(), "name is empty");
     let source_kind = args.kind;
+    if source_kind == SourceKind::PostgresVersion
+        && let Some(schema) = pghacker_core::code::history_schema()
+    {
+        let client = indexer.pool.get().await?;
+        return in_history(&**client, schema, &name, &args).await;
+    }
     let plan = match (indexer.settings.sources, args.kind) {
         (SourcesMode::TestSlices, SourceKind::MailingList) => {
             test_list_plan(indexer, &name, &args)?
@@ -495,6 +501,106 @@ fn stable_branch(name: &str) -> String {
         "master".to_owned()
     } else {
         format!("REL_{name}_STABLE")
+    }
+}
+
+/// A PostgreSQL version when the code tools read the commit history in
+/// `schema`: it holds every branch, tag and commit, so nothing is loaded.
+/// The commit the version names (its `sha`, else its `branch`, else its
+/// stable branch, else master), or, when the history lacks it, the history
+/// sync is asked to run now.
+pub async fn in_history(
+    client: &impl GenericClient,
+    schema: &str,
+    name: &str,
+    args: &AddSourceArgs,
+) -> Result<Value> {
+    ensure!(
+        name == "master" || (name.len() <= 2 && name.bytes().all(|b| b.is_ascii_digit())),
+        "name must be a major version, such as 19, or master"
+    );
+    let s = pghacker_code::history::store::readable_schema(schema)?;
+    let history = client
+        .query_opt(&format!("SELECT url, paths FROM {s}.code_history"), &[])
+        .await
+        .with_context(|| format!("cannot read the commit history in schema {s}"))?
+        .with_context(|| format!("schema {s} has no commit history installed"))?;
+    let (url, paths): (Option<String>, Vec<String>) = (history.get(0), history.get(1));
+    let (wanted, found) = match (&args.sha, &args.branch) {
+        (Some(sha), _) => {
+            let sha = sha.trim().to_ascii_lowercase();
+            ensure!(
+                is_full_sha(&sha),
+                "sha must be a full 40-character commit SHA"
+            );
+            let found = client
+                .query_opt(
+                    &format!("SELECT sha, sha, committed_at FROM {s}.code_commits WHERE sha = $1"),
+                    &[&sha],
+                )
+                .await?;
+            (format!("commit {sha}"), found)
+        }
+        (None, branch) => {
+            let refs = match branch {
+                Some(branch) => {
+                    validate_ref(branch)?;
+                    vec![branch.clone()]
+                }
+                None => vec![stable_branch(name), "master".to_owned()],
+            };
+            let found = client
+                .query_opt(
+                    &format!(
+                        "SELECT r.name, c.sha, c.committed_at FROM {s}.code_refs r \
+                         JOIN {s}.code_commits c ON c.addr = r.addr WHERE r.name = ANY($1) \
+                         ORDER BY array_position($1, r.name), r.kind LIMIT 1"
+                    ),
+                    &[&refs],
+                )
+                .await?;
+            (refs[0].clone(), found)
+        }
+    };
+    let whole = |paths: &[String]| {
+        if paths.is_empty() {
+            json!("the whole tree")
+        } else {
+            json!(paths)
+        }
+    };
+    match found {
+        Some(row) => {
+            let (revision, sha, at): (String, String, DateTime<Utc>) =
+                (row.get(0), row.get(1), row.get(2));
+            Ok(json!({
+                "covered": true,
+                "revision": revision,
+                "sha": sha,
+                "committed_at": at,
+                "paths": whole(&paths),
+                "jobs_queued": 0,
+                "note": format!(
+                    "The commit history already holds every branch, tag and commit of PostgreSQL, \
+                     so nothing is loaded: the code tools read {revision} at {}.", &sha[..12]
+                ),
+                "next": "Name the version (a major version, release, branch, tag or commit SHA) \
+                         in search, grep, read_file, list_files or blame.",
+            }))
+        }
+        None => {
+            jobs::wake(client, kind::CODE_HISTORY_SYNC).await?;
+            Ok(json!({
+                "covered": false,
+                "jobs_queued": 0,
+                "note": format!(
+                    "The commit history has no {wanted}. Its sync runs now, fetching every new \
+                     branch, tag and commit from {}; if {wanted} is there, the code tools read it \
+                     afterwards. list_sources shows the last sync.",
+                    url.as_deref().unwrap_or("its clone")
+                ),
+            }))
+        }
     }
 }
 

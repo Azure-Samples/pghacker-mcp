@@ -47,6 +47,8 @@ pub static TOOLS: &[ToolSpec] = &[
             first); seed_threads add whole threads; follow retrieves the current month again every hour. A \
             PostgreSQL version's code (kind postgres_version, name 19 or master): a branch or tag (default \
             REL_<n>_STABLE, or master), its current commit or a given sha, the whole tree or chosen paths. \
+            When the code tools read the commit history (list_sources shows it), a version is already there: \
+            nothing is loaded, and the reply names its commit, or wakes the history's sync when it lacks it. \
             list_sources says what this deployment allows: the configured test slices only, or any source.",
         effect: WRITE,
         schema: schema::<AddSourceArgs>,

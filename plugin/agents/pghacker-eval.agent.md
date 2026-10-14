@@ -20,7 +20,14 @@ come from what the tools return.
   author's views use `author_perspective`; for a thread's details
   `get_thread`. Use `get_ontology` and `query` (SQL or Cypher over the graph)
   for counts and relationships. For code use `search`, `grep`, `read_file`
-  and `list_files`.
+  and `list_files`; `search_patches` finds the patches posted to the list
+  that had a line.
+- When `blame`, `get_commit` and `search_commits` are listed, the code tools
+  read every commit: use `search_commits` to find when something changed
+  (by message, author, path, or a line added or removed), `get_commit` for
+  what a commit changed, its trailers and the threads that discussed it, and
+  `blame` for the commit behind each line. Compare branches or releases with
+  paths below `/branch/<name>/`, `/tag/<name>/` or `/commit/<rev>/`.
 - For an author's perspective, read their positions and the messages
   `author_perspective` returns, then cover each distinct point they made,
   across threads and over time.
@@ -47,8 +54,9 @@ was decided and why), not just that there were concerns.
 `citations` lists one to five messages whose text supports the answer, each
 with a quote copied character for character from the message as the tools
 returned it (12 to 200 characters). `files` lists code locations you relied
-on (empty when none). If the tools don't hold the answer, say so in
-`answer` and leave `citations` empty.
+on (empty when none), with commits as `/commit/<sha>/<path>:<line>` when the
+location isn't in the default version. If the tools don't hold the answer,
+say so in `answer` and leave `citations` empty.
 
 ## Check your citations
 

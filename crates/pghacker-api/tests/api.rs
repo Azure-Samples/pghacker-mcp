@@ -347,6 +347,84 @@ async fn searches_extracts_with_citations() {
 }
 
 #[tokio::test]
+async fn describes_the_commit_history_when_the_code_tools_read_it() {
+    let db = corpus().await;
+    let reader = db.reader().await.unwrap();
+    let out = ontology::describe(&reader, Some("pghacker")).await.unwrap();
+    assert_eq!(
+        out["loaded"]["code"],
+        Value::Null,
+        "no history is built yet"
+    );
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO code_history (master, url, head)
+               VALUES ('master', 'https://git.postgresql.org/git/postgresql.git', repeat('a', 40));
+             INSERT INTO code_lanes (id, name, fork_addr, lo, hi, head_addr) VALUES
+               (0, 'master', NULL, 0, 1099511627776, 8589934592),
+               (1, 'REL_19_STABLE', 4294967296, 4294967297, 4311744513, 4294967297);
+             INSERT INTO code_commits (addr, sha, lane, committed_at, authored_at, author_name,
+                                       committer_name, subject, message) VALUES
+               (4294967296, repeat('b', 40), 0, '2026-01-01', '2026-01-01', 'A', 'A', 'b', 'b'),
+               (8589934592, repeat('a', 40), 0, '2026-02-01', '2026-02-01', 'A', 'A', 'a', 'a'),
+               (4294967297, repeat('c', 40), 1, '2026-03-01', '2026-03-01', 'A', 'A', 'c', 'c');
+             INSERT INTO code_refs (kind, name, addr) VALUES
+               ('branch', 'master', 8589934592), ('branch', 'REL_19_STABLE', 4294967297),
+               ('tag', 'REL_19_0', 4294967297);",
+        )
+        .await
+        .unwrap();
+    let out = ontology::describe(&reader, Some("pghacker")).await.unwrap();
+    let code = &out["loaded"]["code"];
+    assert_eq!((&code["commits"], &code["tags"]), (&json!(3), &json!(1)));
+    let mut branches: Vec<&str> = code["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap())
+        .collect();
+    branches.sort();
+    assert_eq!(branches, ["REL_19_STABLE", "master"]);
+    // The commit the code tools read without a version.
+    assert_eq!(
+        code["default"],
+        json!({ "ref": "REL_19_STABLE", "sha": "c".repeat(40) })
+    );
+    assert_eq!(code["paths"], "the whole tree");
+    assert_eq!(code["url"], "https://git.postgresql.org/git/postgresql.git");
+    let note = out["loaded"]["code_note"].as_str().unwrap();
+    for needed in [
+        "/branch/<name>/",
+        "REL_17_STABLE@",
+        "alive @> X",
+        "git blame",
+    ] {
+        assert!(note.contains(needed), "{needed}");
+    }
+    // The history's SQL examples run as pgh_reader.
+    let sql = out["examples"]["sql"].as_array().unwrap();
+    assert_eq!(sql.len(), 5);
+    for q in sql {
+        let q = q.as_str().unwrap();
+        if let Err(error) = reader.query(q, &[]).await {
+            panic!("{q}: {error}");
+        }
+    }
+    // Without the history, the snapshots, as before.
+    let out = ontology::describe(&reader, None).await.unwrap();
+    assert!(out["loaded"]["code"].is_array());
+    assert!(
+        out["loaded"]["code_note"]
+            .as_str()
+            .unwrap()
+            .contains("other_refs")
+    );
+    assert_eq!(out["examples"]["sql"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn describes_the_ontology() {
     let db = corpus().await;
     db.indexer()

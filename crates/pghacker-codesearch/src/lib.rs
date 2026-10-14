@@ -109,3 +109,10 @@ pub const LIST_FILES_DESCRIPTION: &str = "\
 List folders and files of the loaded PostgreSQL source: path (default the root), a glob such \
 as *.c or nodes/*.h, and depth (default 1). The result names the version and commit and the \
 folders loaded (loaded_paths); paths are relative to the source root.";
+
+/// What search, grep, read_file and list_files add to their descriptions
+/// when they read the commit history.
+pub const HISTORY_NOTE: &str = "\
+Every commit is readable: version also takes a branch or tag as of a date \
+(REL_17_STABLE@2024-06-01) or commits back (master~3), and paths below /branch/<name>/, \
+/tag/<name>/ or /commit/<rev>/ read those trees in the same call.";

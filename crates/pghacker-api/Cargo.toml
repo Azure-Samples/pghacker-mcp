@@ -11,6 +11,7 @@ publish.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 pgvector.workspace = true
+pghacker-codesearch.workspace = true
 pghacker-core.workspace = true
 regex.workspace = true
 schemars.workspace = true

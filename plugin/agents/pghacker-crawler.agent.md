@@ -35,6 +35,10 @@ this deployment can add:
   `follow: true` to retrieve the list's current month again every hour; and
   any PostgreSQL version's code (`19`, `master`) at a branch, tag or commit,
   the whole tree unless the user names paths.
+- When the code tools read the commit history (`list_sources.history`),
+  every branch, tag and commit is already there: `add_source` for a version
+  loads nothing and names the commit (`covered`), or, for one the history
+  lacks, starts its sync.
 
 Add what the user asks for. Confirm the scope before a large addition: a
 whole archive is decades of mail, and a model extracts every thread in it,

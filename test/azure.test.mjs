@@ -110,6 +110,18 @@ test("agents use the internal pghacker-mcp listener; the public one is rate-limi
   assert.equal(environments.swarm.PILOTSWARM_WORKER_CONCURRENCY, "20");
 });
 
+test("PGHACKER_CODE_HISTORY switches the indexer and pghacker-mcp, and nothing else, to the commit history", () => {
+  const off = processEnvironments(readAzureConfig(ENV));
+  for (const env of Object.values(off)) assert.equal("PGHACKER_CODE_HISTORY" in env, false);
+  const on = processEnvironments(readAzureConfig({ ...ENV, PGHACKER_CODE_HISTORY: " pghacker " }));
+  for (const [name, env] of Object.entries(on)) {
+    assert.equal(env.PGHACKER_CODE_HISTORY, ["indexer", "mcp"].includes(name) ? "pghacker" : undefined, name);
+  }
+  for (const bad of ["Pghacker", "pghacker; DROP", "1history", "a".repeat(64)]) {
+    assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_CODE_HISTORY: bad }), /must name a schema/, bad);
+  }
+});
+
 test("oauth2-proxy signs in the team for the portal, passes /mcp through, and gets no secret in its arguments", () => {
   const args = oauth2ProxyArgs(readAzureConfig(ENV));
   for (const expected of [

@@ -18,7 +18,7 @@ use pghacker_core::mcp::{McpServer, router, serve};
 use pghacker_core::{db, telemetry};
 
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
-use crate::tools::{INSTRUCTIONS, Server};
+use crate::tools::{Server, instructions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
         Server::new(pool, embedder, query),
         "pghacker-mcp",
         env!("CARGO_PKG_VERSION"),
-        INSTRUCTIONS,
+        instructions(),
     );
     let mut app = router(server.clone(), allowed_hosts)
         .layer(middleware::from_fn_with_state(limit, ratelimit::limit));

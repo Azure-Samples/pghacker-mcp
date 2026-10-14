@@ -105,6 +105,10 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
   if (serve && !github.org && !github.team && github.users.length === 0) {
     throw new Error("Set PGHACKER_GITHUB_ORG and PGHACKER_GITHUB_TEAM, or PGHACKER_GITHUB_USERS: the portal must not admit every GitHub user.");
   }
+  const history = value(env, "PGHACKER_CODE_HISTORY");
+  if (history !== undefined && !/^[a-z_][a-z0-9_]{0,62}$/.test(history)) {
+    throw new Error("PGHACKER_CODE_HISTORY must name a schema, such as pghacker.");
+  }
   return {
     root,
     dataDir,
@@ -141,6 +145,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
       max,
       perSession: integer(env, "PGHACKER_CRAWL_PER_SESSION", 8, { max: 50 }),
     },
+    // The schema whose commit history the code tools read; unset, the snapshots.
+    code: { history },
     github: {
       ...github,
       clientId: env.OAUTH2_PROXY_CLIENT_ID,
@@ -251,6 +257,7 @@ export function processEnvironments(config) {
   const files = layout(config);
   const embed = embedEnvironment(config.foundry);
   const rust = { RUST_LOG: config.pass.RUST_LOG ?? "info,tokio_postgres=warn,rmcp=warn" };
+  const history = config.code?.history ? { PGHACKER_CODE_HISTORY: config.code.history } : {};
   const services = base(config, files.services.home, USERS.services);
   const agent = base(config, files.agent.home, USERS.agent);
   const crawlModel = `azure-foundry:${config.foundry.luna}`;
@@ -270,6 +277,7 @@ export function processEnvironments(config) {
       ...services,
       ...rust,
       ...embed,
+      ...history,
       PGHACKER_INDEXER_DATABASE_URL: urls.indexer,
       PGHACKER_INDEXER_ADDR: `127.0.0.1:${PORTS.indexer}`,
       PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),
@@ -326,6 +334,7 @@ export function processEnvironments(config) {
       ...services,
       ...rust,
       ...embed,
+      ...history,
       PGHACKER_READER_DATABASE_URL: urls.reader,
       PGHACKER_MCP_ADDR: `127.0.0.1:${PORTS.mcp}`,
       PGHACKER_MCP_INTERNAL_ADDR: `127.0.0.1:${PORTS.mcpInternal}`,

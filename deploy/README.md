@@ -233,6 +233,29 @@ migration still fail strict restore compatibility: regenerate them with the
 approved new image rather than weakening the check. `docs/design.md` is not
 part of this change.
 
+## Commit history
+
+The code tools can read PostgreSQL's whole commit history instead of the snapshots ([README](../README.md#commit-history), [the search design](../docs/search-design.md)). Turning it on takes three changes, each approved on its own:
+
+1. **An image with migrations `0011_code_history` and `0012_patch_lines`** (Updates). They add the history's tables, empty, and the patch lines. The `patch_lines` job then indexes the mail's patches for `search_patches` in the background, in batches. The code tools still read the snapshots.
+2. **The build.** A one-off execution of the probe job, given 4 vCPU and 8 GiB, runs `scripts/history-build.mjs`:
+
+   ```sh
+   ../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
+   ```
+
+   It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.git` into a bare clone on the job's disk, builds the history into schema `pghacker_history`, and swaps it into `pghacker`. It then rebuilds every file of the branch heads and of 40 random commits and compares them with git. `ok` is true when nothing differed. Running it again rebuilds the history from scratch.
+   - Once a history is installed, the indexer's hourly `code_history_sync` job fetches new commits into its own clone and applies them, whether or not the code tools read the history. The clone is about 850 MB in `PGHACKER_GIT_DIR`, fetched again after a restart.
+3. **The switch.** It waits for the engine benchmark to pass on production's data, as the [search design's rollout](../docs/search-design.md#rollout) requires: no wrong answers, and latency comparable to the snapshots'. The benchmark runs `pghacker-replay`, which the app image doesn't include. Then add `PGHACKER_CODE_HISTORY = "pghacker"` to `app_env` and apply.
+   - The new revision lists `blame`, `get_commit` and `search_commits`.
+   - `search`, `grep`, `read_file` and `list_files` read any commit, and paths below `/branch/<name>/`, `/tag/<name>/` and `/commit/<rev>/`.
+   - The next `resolve_anchors` run resolves mail's file anchors to those paths.
+   - `add_source` for a version loads nothing: the history has it.
+
+   Check `tools/list` (First deployment, step 9) and run the evaluation.
+
+To switch back, remove `PGHACKER_CODE_HISTORY` and apply. The code tools read the snapshots again, and anchors resolve to them again. The history's tables stay and keep syncing.
+
 ## Production mode in use
 
 Ask a **pghacker Crawler** session in the portal, for example:
@@ -270,4 +293,4 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
   - The app has 4 vCPU and 8 GiB of memory; each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
   - HorizonDB has 32 vCores (`horizondb_vcores`).
   - `gpt-6-luna` has the subscription's whole 1M tokens per minute in westus3.
-  - The ephemeral disk holds the git clones only while a snapshot loads, and no mbox files.
+  - The ephemeral disk holds the commit history's clone (about 850 MB, once a history is installed), git clones only while a snapshot loads, and no mbox files.

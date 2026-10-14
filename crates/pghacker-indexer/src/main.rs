@@ -71,6 +71,10 @@ enum History {
         /// Where syncs fetch new commits from.
         #[arg(long)]
         url: Option<String>,
+        /// Fetch every branch and tag from --url into --git-dir first,
+        /// creating a bare clone there if there's none.
+        #[arg(long, requires = "url")]
+        fetch: bool,
     },
     /// Applies the clone's new commits to the history.
     Sync {
@@ -161,7 +165,14 @@ async fn history(env: &Env, action: History) -> Result<()> {
             dry_run,
             install,
             url,
+            fetch,
         } => {
+            if fetch {
+                let repo_url = url.clone().context("--fetch needs --url")?;
+                let dir = git_dir.clone();
+                tokio::task::spawn_blocking(move || history::fetch::update_clone(&repo_url, &dir))
+                    .await??;
+            }
             let opts = history::BuildOptions {
                 git_dir,
                 master,

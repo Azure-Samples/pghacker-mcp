@@ -1,6 +1,6 @@
 //! pghacker-mcp's tools: mail and graph search, read-only SQL, and code search.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use rmcp::ErrorData;
 use serde::Deserialize;
@@ -26,6 +26,28 @@ semantic search or both; search_patches finds lines in the patches posted, by th
 read-only SQL and Cypher. Code: search (first-class code search), grep (grep command lines), read_file and \
 list_files over the PostgreSQL source loaded (see list_files or get_ontology). Cite Message-IDs and file paths \
 with line numbers in answers.";
+
+/// The instructions when the code tools read the commit history.
+pub const HISTORY_INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and \
+code with citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
+(search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full \
+text, semantic search or both; search_patches finds lines in the patches posted, by thread, and the commits that \
+added them. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
+read-only SQL and Cypher. Code, over every commit of every branch and tag: search (first-class code search), \
+grep (grep command lines), read_file and list_files read the version named (a major version, release, branch, \
+tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) and paths below \
+/branch/<name>/, /tag/<name>/ or /commit/<rev>/; blame, get_commit and search_commits answer as git blame, \
+git show and git log, with the threads that discussed each commit. Cite Message-IDs, commit SHAs and file \
+paths with line numbers in answers.";
+
+/// The server's instructions: the history's when the code tools read it.
+pub fn instructions() -> &'static str {
+    if code::history::schema_from_env().is_some() {
+        HISTORY_INSTRUCTIONS
+    } else {
+        INSTRUCTIONS
+    }
+}
 
 pub static TOOLS: &[ToolSpec] = &[
     ToolSpec {
@@ -130,13 +152,36 @@ pub static TOOLS: &[ToolSpec] = &[
 /// How many of TOOLS, at the end, need the commit history.
 const HISTORY_TOOLS: usize = 3;
 
-/// The tools served: the history's only with PGHACKER_CODE_HISTORY.
+/// The tools served: the history's only with PGHACKER_CODE_HISTORY, when
+/// the code tools' and query's descriptions also say how to reach it.
 pub fn served() -> &'static [ToolSpec] {
-    if code::history::schema_from_env().is_some() {
+    static WITH_HISTORY: LazyLock<Vec<ToolSpec>> = LazyLock::new(|| {
         TOOLS
+            .iter()
+            .map(|tool| ToolSpec {
+                name: tool.name,
+                description: with_history(tool),
+                effect: tool.effect,
+                schema: tool.schema,
+            })
+            .collect()
+    });
+    if code::history::schema_from_env().is_some() {
+        &WITH_HISTORY
     } else {
         &TOOLS[..TOOLS.len() - HISTORY_TOOLS]
     }
+}
+
+/// A tool's description when the code tools read the commit history.
+fn with_history(tool: &ToolSpec) -> &'static str {
+    let note = match tool.name {
+        "search" | "grep" | "read_file" | "list_files" => code::HISTORY_NOTE,
+        sql::NAME => sql::HISTORY_NOTE,
+        _ => return tool.description,
+    };
+    // Built once per tool, for the life of the process.
+    Box::leak(format!("{} {note}", tool.description).into_boxed_str())
 }
 
 /// The server's state. Cheap to clone.
@@ -296,5 +341,38 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert_eq!(names, ["blame", "get_commit", "search_commits"]);
+    }
+
+    #[test]
+    fn with_the_history_the_code_tools_and_query_say_how_to_reach_it() {
+        for tool in TOOLS {
+            let described = with_history(tool);
+            assert!(described.starts_with(tool.description), "{}", tool.name);
+            let note = match tool.name {
+                "search" | "grep" | "read_file" | "list_files" => Some(code::HISTORY_NOTE),
+                "query" => Some(sql::HISTORY_NOTE),
+                _ => None,
+            };
+            match note {
+                Some(note) => assert!(described.ends_with(note), "{}", tool.name),
+                None => assert_eq!(described, tool.description, "{}", tool.name),
+            }
+        }
+        for needed in [
+            "/branch/<name>/",
+            "/tag/<name>/",
+            "/commit/<rev>/",
+            "REL_17_STABLE@",
+        ] {
+            assert!(code::HISTORY_NOTE.contains(needed), "{needed}");
+            assert!(HISTORY_INSTRUCTIONS.contains(needed), "{needed}");
+        }
+        for tool in &TOOLS[TOOLS.len() - HISTORY_TOOLS..] {
+            assert!(HISTORY_INSTRUCTIONS.contains(tool.name), "{}", tool.name);
+            assert!(!INSTRUCTIONS.contains(tool.name), "{}", tool.name);
+        }
+        for table in ["code_commits", "code_commit_threads", "code_line_instances"] {
+            assert!(sql::HISTORY_NOTE.contains(table), "{table}");
+        }
     }
 }

@@ -227,6 +227,20 @@ function embedEnvironment(config, inherited) {
 }
 
 /**
+ * PGHACKER_CODE_HISTORY, from .env or the shell: the schema whose commit
+ * history the code tools read (pghacker once installed), for the indexer
+ * and pghacker-mcp alike. Unset, they read the snapshots.
+ */
+export function codeHistoryEnvironment(config, inherited = process.env) {
+  const schema = String(config.values.PGHACKER_CODE_HISTORY ?? inherited.PGHACKER_CODE_HISTORY ?? "").trim();
+  if (!schema) return {};
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(schema)) {
+    throw new Error("PGHACKER_CODE_HISTORY must name a schema, such as pghacker.");
+  }
+  return { PGHACKER_CODE_HISTORY: schema };
+}
+
+/**
  * The environments of the Rust services, each with only what it needs:
  * bootstrap gets the administrator's URL; the indexer pgh_indexer's; pghacker-mcp pgh_reader's.
  */
@@ -238,6 +252,7 @@ export function serviceEnvironments(config, inherited = process.env) {
   const indexerUrl = roleDatabaseUrl(config, "pgh_indexer", config.values.PGH_INDEXER_PASSWORD);
   const readerUrl = roleDatabaseUrl(config, "pgh_reader", config.values.PGH_READER_PASSWORD);
   const embed = embedEnvironment(config, inherited);
+  const history = codeHistoryEnvironment(config, inherited);
   const runtime = (name) => path.join(config.runtimeDir, name);
   return {
     bootstrap: {
@@ -250,6 +265,7 @@ export function serviceEnvironments(config, inherited = process.env) {
     indexer: {
       ...base,
       ...embed,
+      ...history,
       PGHACKER_INDEXER_DATABASE_URL: indexerUrl,
       PGHACKER_INDEXER_ADDR: `${LOCAL_HOST}:${config.indexerPort}`,
       PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),
@@ -259,6 +275,7 @@ export function serviceEnvironments(config, inherited = process.env) {
     mcp: {
       ...base,
       ...embed,
+      ...history,
       PGHACKER_READER_DATABASE_URL: readerUrl,
       PGHACKER_MCP_ADDR: `${LOCAL_HOST}:${config.mcpPort}`,
       // Every local agent and script reaches pghacker-mcp from 127.0.0.1 and

@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
 # Starts one of the deployment's jobs, waits for it to finish, and prints its
 # one-line JSON report, which Log Analytics receives a few minutes later.
-#   deploy/scripts/run-job.sh probe | restore
+#   deploy/scripts/run-job.sh probe | restore | history
+# history builds the commit history (scripts/history-build.mjs) in the probe
+# job's container, given 4 vCPU and 8 GiB.
 # Run after `terraform init` in deploy/terraform (it reads the outputs).
 set -euo pipefail
 
 kind="${1:-}"
 case "$kind" in
-  probe | restore) ;;
-  *) echo "usage: $0 probe|restore" >&2; exit 2 ;;
+  probe | restore | history) ;;
+  *) echo "usage: $0 probe|restore|history" >&2; exit 2 ;;
 esac
+job_kind="$kind"
+overrides=()
+if [ "$kind" = history ]; then
+  job_kind=probe
+  overrides=(--cpu 4 --memory 8Gi --command node --args scripts/history-build.mjs)
+fi
 cd "$(dirname "$0")/../terraform"
 subscription=$(terraform output -raw subscription_id)
 rg=$(terraform output -raw resource_group_name)
-job=$(terraform output -raw "${kind}_job_name")
+job=$(terraform output -raw "${job_kind}_job_name")
 workspace=$(terraform output -raw log_analytics_workspace_id)
 if [ -z "$job" ] || [ "$job" = "null" ]; then
   echo "There's no $kind job: set seed_image and apply first." >&2
@@ -21,7 +29,7 @@ if [ -z "$job" ] || [ "$job" = "null" ]; then
 fi
 
 execution=$(az containerapp job start --subscription "$subscription" --name "$job" --resource-group "$rg" \
-  --query name --output tsv)
+  ${overrides[@]+"${overrides[@]}"} --query name --output tsv)
 echo "Started $execution; waiting for it to finish." >&2
 while :; do
   state=$(az containerapp job execution show --subscription "$subscription" --name "$job" --resource-group "$rg" \
