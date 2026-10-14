@@ -46,7 +46,7 @@ The failures, by cause:
   - q21: the gold gave the commit's date in New Zealand, 7 April 2023, and the answer the UTC date, 6 April.
   - q23: the answer said master's fix first shipped in 18beta2, which is right; the gold said only 18.0.
   - q30: two fixes for relations dropped during a subscription refresh landed on 26 August 2026, and the answer described the other (05f37b2b5eac). The question now says the crash was reported in May 2026.
-- Question problems in the original questions, not changed here:
-  - q20: the gold counts (about 240, 160 and 125 messages) predate the corpus's growth to the whole archive. The answer's gram.y (6,243), parse_utilcmd.c (2,032) and parse_expr.c (1,789) match its anchors now.
-  - q12: the gold says the fix relies on the subscription's AccessExclusiveLock. The commit (45cf7b1e5bf9) also stops the running sequencesync worker before resetting the sequences, as the answer said, and the judge counted that against it.
+- Question problems in the original questions, fixed afterwards; rerun alone, both passed with judge scores of 1.0:
+  - q20: the gold counts (about 240, 160 and 125 messages) predated the corpus's growth to the whole archive. The answer's gram.y (6,243), parse_utilcmd.c (2,032) and parse_expr.c (1,789) match its anchors and graph, which the gold now gives.
+  - q12: the gold said the fix relies on the subscription's AccessExclusiveLock. The commit (45cf7b1e5bf9) also stops the running sequencesync worker before resetting the sequences, as the answer said, and the judge counted that against it. The gold now gives both.
 - q01 failed here and again alone (judge scores 0.55 and 0.65). Both answers named the RMT and Andrew Dunstan's revert, citing the RMT's thread, but not the objection to subtransactions in expression evaluation, which the corpus holds. It passed on 2026-10-09: answer quality, not a tool fault.
