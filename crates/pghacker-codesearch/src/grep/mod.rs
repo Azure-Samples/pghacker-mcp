@@ -540,6 +540,7 @@ async fn selection(
     let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
         snapshot_id: snapshot.id,
+        history: snapshot.history.as_ref(),
         file_ids: Some(&ids),
         require,
         reject: if invert_lines {
@@ -682,8 +683,13 @@ async fn run_inner(
         }
         let id_to_file: HashMap<i32, usize> =
             sel.lines.keys().map(|&k| (table.files[k].id, k)).collect();
-        for ((id, n), text) in
-            engine::line_ranges(client, &engine::merge_ranges(ranges), budget).await?
+        for ((id, n), text) in engine::line_ranges(
+            client,
+            snapshot.history.as_ref(),
+            &engine::merge_ranges(ranges),
+            budget,
+        )
+        .await?
         {
             extra.insert((id_to_file[&id], n), text);
         }

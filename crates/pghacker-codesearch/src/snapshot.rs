@@ -19,6 +19,9 @@ pub struct Snapshot {
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub sha: String,
+    /// Where to read the commit in the history, when the history serves it.
+    #[serde(skip)]
+    pub history: Option<crate::history::History>,
 }
 
 /// The snapshot of `repo` that a code tool reads. `version` names a major
@@ -51,6 +54,7 @@ pub async fn resolve_snapshot(
             version: row.get(2),
             git_ref: row.get(3),
             sha: row.get(4),
+            history: None,
         })
         .collect();
     let wanted = version.map(str::trim).filter(|v| !v.is_empty());
@@ -59,7 +63,10 @@ pub async fn resolve_snapshot(
         Some(v) => named(&snapshots, v),
     };
     if let Some(snapshot) = found {
-        return Ok(snapshot.clone());
+        return match crate::history::schema_from_env() {
+            Some(schema) => crate::history::attach(client, snapshot.clone(), schema).await,
+            None => Ok(snapshot.clone()),
+        };
     }
     let mut versions: Vec<&str> = snapshots
         .iter()
@@ -170,14 +177,34 @@ pub struct FileTable {
     pub loaded_paths: Vec<String>,
 }
 
+fn cached(key: &CacheKey) -> Option<Arc<FileTable>> {
+    CACHE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, t)| t.clone())
+}
+
+fn remember(key: CacheKey, table: FileTable) -> Arc<FileTable> {
+    let table = Arc::new(table);
+    let mut cache = CACHE.lock().unwrap();
+    cache.retain(|(k, _)| *k != key);
+    cache.push((key, table.clone()));
+    if cache.len() > 16 {
+        cache.remove(0);
+    }
+    table
+}
+
 /// Compares paths component by component.
 pub fn tree_cmp(a: &str, b: &str) -> Ordering {
     a.split('/').cmp(b.split('/'))
 }
 
-/// (database, snapshot id, loaded_at): a snapshot's files never change
-/// once it is ready.
-type CacheKey = (String, i32, String);
+/// (database, snapshot id or history commit, loaded_at or build): a
+/// snapshot's files never change once it is ready.
+type CacheKey = (String, String, String);
 type Cache = Mutex<Vec<(CacheKey, Arc<FileTable>)>>;
 
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -185,6 +212,18 @@ static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(Vec::new()));
 impl FileTable {
     /// The snapshot's file table, cached per database and load.
     pub async fn load(client: &impl GenericClient, snapshot: &Snapshot) -> Result<Arc<FileTable>> {
+        if let Some(h) = &snapshot.history {
+            let key: CacheKey = (
+                h.build.clone(),
+                format!("{}@{}", h.schema, h.addr),
+                String::new(),
+            );
+            if let Some(table) = cached(&key) {
+                return Ok(table);
+            }
+            let (files, loaded_paths) = crate::history::files(client, h).await?;
+            return Ok(remember(key, FileTable::new(files, loaded_paths)));
+        }
         let row = client
             .query_opt(
                 "SELECT current_database()::text, coalesce(loaded_at::text, ''), paths \
@@ -194,15 +233,9 @@ impl FileTable {
             .await
             .context("cannot read code_snapshots")?
             .with_context(|| format!("snapshot {} does not exist", snapshot.id))?;
-        let key: CacheKey = (row.get(0), snapshot.id, row.get(1));
+        let key: CacheKey = (row.get(0), snapshot.id.to_string(), row.get(1));
         let loaded_paths: Vec<String> = row.get(2);
-        if let Some(table) = CACHE
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, t)| t.clone())
-        {
+        if let Some(table) = cached(&key) {
             return Ok(table);
         }
         let rows = client
@@ -223,14 +256,7 @@ impl FileTable {
                 size: row.get(4),
             })
             .collect();
-        let table = Arc::new(FileTable::new(files, loaded_paths));
-        let mut cache = CACHE.lock().unwrap();
-        cache.retain(|(k, _)| *k != key);
-        cache.push((key, table.clone()));
-        if cache.len() > 16 {
-            cache.remove(0);
-        }
-        Ok(table)
+        Ok(remember(key, FileTable::new(files, loaded_paths)))
     }
 
     pub fn new(mut files: Vec<FileEntry>, loaded_paths: Vec<String>) -> Self {

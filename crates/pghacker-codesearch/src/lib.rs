@@ -12,6 +12,7 @@ pub mod engine;
 pub mod files;
 pub mod glob;
 pub mod grep;
+pub mod history;
 pub mod pattern;
 pub mod search;
 pub mod snapshot;

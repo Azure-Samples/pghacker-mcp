@@ -810,6 +810,7 @@ async fn load_repos(ctx: &Ctx, study_dir: &Path) -> Result<HashMap<String, Arc<R
                     version: None,
                     git_ref: "main".into(),
                     sha,
+                    history: None,
                 },
                 tree,
                 tracked,

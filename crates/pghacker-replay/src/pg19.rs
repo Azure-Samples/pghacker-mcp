@@ -851,6 +851,7 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
         version: Some("19".into()),
         git_ref: REF.into(),
         sha: SHA.into(),
+        history: None,
     };
     let reader = db::connect(&ctx.reader_url()?, "pghacker-replay").await?;
     let files: Vec<String> = reader

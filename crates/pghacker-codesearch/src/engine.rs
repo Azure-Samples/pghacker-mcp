@@ -94,6 +94,8 @@ pub fn is_timeout(error: &tokio_postgres::Error) -> bool {
 /// `require` filter and none of the exact `reject` filters.
 pub struct LineQuery<'a> {
     pub snapshot_id: i32,
+    /// Read the commit history instead of the snapshot's lines.
+    pub history: Option<&'a crate::history::History>,
     pub file_ids: Option<&'a [i32]>,
     pub require: Vec<&'a Filter>,
     pub reject: Vec<&'a Filter>,
@@ -156,6 +158,13 @@ pub fn line_sql(q: &LineQuery<'_>) -> (String, Vec<Param>) {
         };
         format!("SELECT l.file_id, l.line_no, l.line FROM code_lines l WHERE {scope}")
     };
+    push_filters(&mut sql, &mut params, q);
+    sql.push_str(&format!(" LIMIT {}", q.cap + 1));
+    (sql, params)
+}
+
+/// Appends the query's text filters on `l.line`.
+pub(crate) fn push_filters(sql: &mut String, params: &mut Vec<Param>, q: &LineQuery<'_>) {
     let ors = |conds: &[crate::pattern::Cond], params: &mut Vec<Param>| -> String {
         let parts: Vec<String> = conds
             .iter()
@@ -180,39 +189,41 @@ pub fn line_sql(q: &LineQuery<'_>) -> (String, Vec<Param>) {
     };
     for filter in &q.require {
         if let Filter::Any { conds, .. } = filter {
-            let or = ors(conds, &mut params);
+            let or = ors(conds, params);
             sql.push_str(&format!(" AND ({or})"));
         }
     }
     for filter in &q.reject {
         match filter {
             Filter::Any { conds, exact: true } => {
-                let or = ors(conds, &mut params);
+                let or = ors(conds, params);
                 sql.push_str(&format!(" AND NOT ({or})"));
             }
             Filter::All { exact: true } => sql.push_str(" AND false"),
             _ => {}
         }
     }
-    sql.push_str(&format!(" LIMIT {}", q.cap + 1));
-    (sql, params)
 }
 
-/// Reads candidate lines, streaming, until the cap or the statement timeout.
-pub async fn candidates(
+/// Streams the query's rows through `map` until the cap or the statement
+/// timeout, noting either in `out`.
+pub(crate) async fn stream_rows<T>(
     client: &impl GenericClient,
-    q: &LineQuery<'_>,
+    sql: &str,
+    params: &[Param],
+    cap: usize,
     budget: &Budget,
-) -> Result<Candidates> {
-    let (sql, params) = line_sql(q);
-    let mut out = Candidates::default();
+    out: &mut Candidates,
+    map: impl Fn(&tokio_postgres::Row) -> T,
+) -> Result<Vec<T>> {
+    let mut rows = Vec::new();
     if !budget.apply(client).await? {
         out.timed_out = true;
-        return Ok(out);
+        return Ok(rows);
     }
     let stream = match client
         .query_raw(
-            sql.as_str(),
+            sql,
             params.iter().map(|p| p.as_ref() as &(dyn ToSql + Sync)),
         )
         .await
@@ -220,7 +231,7 @@ pub async fn candidates(
         Ok(stream) => stream,
         Err(error) if is_timeout(&error) => {
             out.timed_out = true;
-            return Ok(out);
+            return Ok(rows);
         }
         Err(error) => return Err(error).context("the line query failed"),
     };
@@ -228,7 +239,7 @@ pub async fn candidates(
     loop {
         match stream.try_next().await {
             Ok(Some(row)) => {
-                if out.rows.len() == q.cap {
+                if rows.len() == cap {
                     out.capped = true;
                     break;
                 }
@@ -236,11 +247,7 @@ pub async fn candidates(
                     out.timed_out = true;
                     break;
                 }
-                out.rows.push(Row {
-                    file_id: row.get(0),
-                    line_no: row.get(1),
-                    line: row.get(2),
-                });
+                rows.push(map(&row));
             }
             Ok(None) => break,
             Err(error) if is_timeout(&error) => {
@@ -250,12 +257,33 @@ pub async fn candidates(
             Err(error) => return Err(error).context("the line query failed"),
         }
     }
+    Ok(rows)
+}
+
+/// Reads candidate lines, streaming, until the cap or the statement timeout.
+pub async fn candidates(
+    client: &impl GenericClient,
+    q: &LineQuery<'_>,
+    budget: &Budget,
+) -> Result<Candidates> {
+    if let Some(h) = q.history {
+        return crate::history::candidates(client, q, h, budget).await;
+    }
+    let (sql, params) = line_sql(q);
+    let mut out = Candidates::default();
+    out.rows = stream_rows(client, &sql, &params, q.cap, budget, &mut out, |row| Row {
+        file_id: row.get(0),
+        line_no: row.get(1),
+        line: row.get(2),
+    })
+    .await?;
     Ok(out)
 }
 
 /// Lines `lo..=hi` of files, as (file id, line number) → text.
 pub async fn line_ranges(
     client: &impl GenericClient,
+    history: Option<&crate::history::History>,
     ranges: &[(i32, i32, i32)],
     budget: &Budget,
 ) -> Result<HashMap<(i32, i32), String>> {
@@ -265,6 +293,11 @@ pub async fn line_ranges(
     }
     if !budget.apply(client).await? {
         bail!("the code-search time budget ran out before reading context; narrow the search");
+    }
+    if let Some(h) = history {
+        return crate::history::line_ranges(client, h, ranges)
+            .await
+            .context("cannot read context lines");
     }
     let ids: Vec<i32> = ranges.iter().map(|r| r.0).collect();
     let los: Vec<i32> = ranges.iter().map(|r| r.1).collect();
@@ -338,6 +371,7 @@ mod tests {
         let ids = [1, 2];
         let q = LineQuery {
             snapshot_id: 7,
+            history: None,
             file_ids: Some(&ids),
             require: vec![&positive],
             reject: vec![&negative, &inexact],
@@ -378,6 +412,7 @@ mod tests {
         assert!(!scope_first(1_000_000, &[&weak, &strong]));
         let mut q = LineQuery {
             snapshot_id: 7,
+            history: None,
             file_ids: None,
             require: vec![&weak],
             reject: vec![],

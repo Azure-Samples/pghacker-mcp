@@ -21,6 +21,8 @@ use tokio_postgres::Client;
 use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::Type;
 
+pub mod history;
+
 /// Where a repository comes from.
 #[derive(Clone, Debug)]
 pub enum RepoSource {
@@ -112,7 +114,7 @@ pub fn subsystem_of(path: &str) -> Option<String> {
     }
 }
 
-fn in_paths(path: &str, prefixes: &[String]) -> bool {
+pub(crate) fn in_paths(path: &str, prefixes: &[String]) -> bool {
     prefixes.is_empty()
         || prefixes.iter().any(|prefix| {
             let prefix = prefix.trim_end_matches('/');

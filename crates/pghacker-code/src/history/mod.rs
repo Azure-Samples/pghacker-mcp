@@ -1,0 +1,267 @@
+//! Commit history: every line of every commit, stored once.
+//!
+//! Each line instance is one row with the addresses of the commits it is
+//! alive in; each file version is one row the same way. A commit's tree is
+//! the versions alive at its address, and a version's lines are its
+//! lineage's instances alive there, in weave order. See [`addr`] for commit
+//! addresses, [`graph`] for lanes, [`walk`] for the builder, [`store`] for
+//! the tables and [`verify`] for the rebuild checks.
+//!
+//! This is the Phase 0 prototype: it builds into a schema of its own so it
+//! can be measured against the snapshots before replacing them.
+
+pub mod addr;
+pub mod graph;
+pub mod store;
+pub mod verify;
+pub mod walk;
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use tokio::sync::mpsc;
+
+use graph::Graph;
+use walk::{Arena, LineSink, WalkStats, Walker};
+
+/// What to build.
+#[derive(Clone, Debug)]
+pub struct BuildOptions {
+    /// A clone with every branch and tag (bare or not).
+    pub git_dir: PathBuf,
+    /// The branch the others fork from.
+    pub master: String,
+    pub schema: String,
+    /// Path prefixes to keep; empty keeps the whole tree.
+    pub paths: Vec<String>,
+}
+
+/// What a build did.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct BuildStats {
+    pub walk: WalkStats,
+    pub stored: store::Stored,
+    pub lanes: usize,
+    pub refs: usize,
+    pub texts: u64,
+    pub walk_secs: u64,
+    pub write_secs: u64,
+    pub finish_secs: u64,
+}
+
+/// Opens a clone for the walk, with a generous object cache.
+pub fn open(git_dir: &Path) -> Result<gix::Repository> {
+    let mut repo =
+        gix::open(git_dir).with_context(|| format!("cannot open {}", git_dir.display()))?;
+    repo.object_cache_size_if_unset(256 << 20);
+    Ok(repo)
+}
+
+const BATCH: usize = 20_000;
+
+/// Sends new lines' text to the COPY in batches.
+struct ChannelSink {
+    batch: Vec<(u32, String)>,
+    tx: mpsc::Sender<Vec<(u32, String)>>,
+}
+
+impl ChannelSink {
+    fn flush(&mut self) -> Result<()> {
+        if self.batch.is_empty() {
+            return Ok(());
+        }
+        let full = std::mem::replace(&mut self.batch, Vec::with_capacity(BATCH));
+        self.tx
+            .blocking_send(full)
+            .map_err(|_| anyhow!("the text COPY stopped"))
+    }
+}
+
+impl LineSink for ChannelSink {
+    fn line(&mut self, id: u32, text: &str) -> Result<()> {
+        self.batch.push((id, text.to_owned()));
+        if self.batch.len() >= BATCH {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// The path prefixes a build kept.
+pub async fn built_paths(client: &tokio_postgres::Client, schema: &str) -> Result<Vec<String>> {
+    let s = store::schema_name(schema)?;
+    let row = client
+        .query_opt(
+            &format!("SELECT paths FROM {s}.history_build WHERE finished_at IS NOT NULL"),
+            &[],
+        )
+        .await
+        .with_context(|| format!("schema {s} has no history build"))?
+        .with_context(|| format!("the build in schema {s} didn't finish"))?;
+    Ok(row.get(0))
+}
+
+/// Walks the history without storing it: the graph and the arena, to
+/// measure or simulate.
+pub fn walk_only(opts: &BuildOptions) -> Result<(Graph, Arena, WalkStats)> {
+    let repo = open(&opts.git_dir)?;
+    let graph = Graph::read(&repo, &opts.master)?;
+    let mut walker = Walker::new(&repo, &opts.paths, |_: u32, _: &str| Ok(()))?;
+    walker.walk(&graph)?;
+    let (arena, stats, _) = walker.finish();
+    Ok((graph, arena, stats))
+}
+
+/// Builds the history into `opts.schema` afresh.
+pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats> {
+    let mut client = pghacker_core::db::connect(database_url, "pghacker-history").await?;
+    let texts_client = pghacker_core::db::connect(database_url, "pghacker-history-texts").await?;
+    let schema = store::schema_name(&opts.schema)?.to_owned();
+    store::create(&client, &schema).await?;
+    client
+        .execute(
+            &format!("INSERT INTO {schema}.history_build (master, paths) VALUES ($1, $2)"),
+            &[&opts.master, &opts.paths],
+        )
+        .await?;
+
+    let started = std::time::Instant::now();
+    let (tx, rx) = mpsc::channel::<Vec<(u32, String)>>(8);
+    let copy = {
+        let schema = schema.clone();
+        tokio::spawn(async move { store::copy_texts(&texts_client, &schema, rx).await })
+    };
+    let walk_opts = opts.clone();
+    let walked = tokio::task::spawn_blocking(move || -> Result<(Graph, Arena, WalkStats)> {
+        let repo = open(&walk_opts.git_dir)?;
+        let graph = Graph::read(&repo, &walk_opts.master)?;
+        tracing::info!(
+            commits = graph.commits.len(),
+            lanes = graph.lanes.len(),
+            refs = graph.refs.len(),
+            "read the commit graph"
+        );
+        let sink = ChannelSink {
+            batch: Vec::with_capacity(BATCH),
+            tx,
+        };
+        let mut walker = Walker::new(&repo, &walk_opts.paths, sink)?;
+        walker.walk(&graph)?;
+        let (arena, stats, mut sink) = walker.finish();
+        sink.flush()?;
+        Ok((graph, arena, stats))
+    })
+    .await
+    .context("the walk panicked")?;
+    let texts = copy.await.context("the text COPY panicked")?;
+    let (graph, arena, walk_stats) = walked?;
+    let texts = texts?;
+    let walk_secs = started.elapsed().as_secs();
+    if texts != arena.instances() as u64 {
+        bail!("copied {texts} lines of {}", arena.instances());
+    }
+    tracing::info!(
+        instances = arena.instances(),
+        versions = arena.versions.len(),
+        lineages = arena.lineages.len(),
+        secs = walk_secs,
+        "walked the history"
+    );
+
+    let started = std::time::Instant::now();
+    let stored = store::write(&mut client, &schema, &graph, &arena).await?;
+    let write_secs = started.elapsed().as_secs();
+    let lanes = graph.lanes.len();
+    let refs = graph.refs.len();
+    let head = graph.commits[*graph.lanes[0].commits.last().context("master is empty")?]
+        .id
+        .to_string();
+    drop(arena);
+    drop(graph);
+    let started = std::time::Instant::now();
+    store::finish(&client, &schema).await?;
+    let stats = BuildStats {
+        walk: walk_stats,
+        stored,
+        lanes,
+        refs,
+        texts,
+        walk_secs,
+        write_secs,
+        finish_secs: started.elapsed().as_secs(),
+    };
+    client
+        .execute(
+            &format!(
+                "UPDATE {schema}.history_build SET finished_at = now(), head = $1, stats = $2"
+            ),
+            &[&head, &serde_json::to_value(&stats)?],
+        )
+        .await?;
+    Ok(stats)
+}
+
+/// Which commits to check against git.
+#[derive(Clone, Debug, Default)]
+pub struct VerifyOptions {
+    pub git_dir: PathBuf,
+    pub schema: String,
+    /// Revisions, as git names them.
+    pub revs: Vec<String>,
+    /// This many commits more, picked at random.
+    pub sample: u32,
+    /// Every branch head too.
+    pub heads: bool,
+    /// Also compare index and sequential scans.
+    pub scans: bool,
+}
+
+/// Rebuilds every file at the chosen commits and checks it against git.
+pub async fn verify_build(database_url: &str, opts: &VerifyOptions) -> Result<verify::Verified> {
+    let client = pghacker_core::db::connect(database_url, "pghacker-history").await?;
+    let s = store::schema_name(&opts.schema)?;
+    let paths = built_paths(&client, s).await?;
+    let repo = open(&opts.git_dir)?;
+    let mut commits = Vec::new();
+    for rev in &opts.revs {
+        let id = repo
+            .rev_parse_single(rev.as_str())
+            .with_context(|| format!("no revision {rev}"))?
+            .object()?
+            .peel_to_commit()?
+            .id;
+        commits.push(id);
+    }
+    let mut shas: Vec<String> = Vec::new();
+    if opts.heads {
+        for row in client
+            .query(
+                &format!(
+                    "SELECT c.sha FROM {s}.code_refs r JOIN {s}.code_commits c ON c.addr = r.addr \
+                     WHERE r.kind = 'branch' ORDER BY r.name"
+                ),
+                &[],
+            )
+            .await?
+        {
+            shas.push(row.get(0));
+        }
+    }
+    if opts.sample > 0 {
+        for row in client
+            .query(
+                &format!("SELECT sha FROM {s}.code_commits ORDER BY random() LIMIT $1"),
+                &[&i64::from(opts.sample)],
+            )
+            .await?
+        {
+            shas.push(row.get(0));
+        }
+    }
+    for sha in shas {
+        commits.push(gix::ObjectId::from_hex(sha.as_bytes())?);
+    }
+    let mut seen = std::collections::HashSet::new();
+    commits.retain(|id| seen.insert(*id));
+    verify::verify(&client, s, &repo, &paths, &commits, opts.scans).await
+}

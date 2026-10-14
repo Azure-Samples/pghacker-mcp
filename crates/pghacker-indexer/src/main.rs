@@ -1,6 +1,9 @@
 //! pghacker-indexer's command line: `bootstrap` (as the database's
 //! administrator), `serve` (workers and the MCP server), `status`,
-//! `graph-reconcile` and the local-only `reset`.
+//! `graph-reconcile`, the local-only `reset`, and `history` (the
+//! commit-history prototype).
+
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -37,6 +40,51 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// The commit-history prototype: builds it into a schema of its own and
+    /// checks it against git (as the administrator).
+    History {
+        #[command(subcommand)]
+        action: History,
+    },
+}
+
+#[derive(Subcommand)]
+enum History {
+    /// Walks every branch and tag of a clone into the schema, afresh.
+    Build {
+        /// A clone with every branch and tag.
+        #[arg(long)]
+        git_dir: PathBuf,
+        #[arg(long, default_value = "pghacker_history")]
+        schema: String,
+        #[arg(long, default_value = "master")]
+        master: String,
+        /// A path prefix to keep (repeatable); none keeps the whole tree.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Walk without storing, and print the walk's numbers.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Rebuilds every file at commits and checks it against git.
+    Verify {
+        #[arg(long)]
+        git_dir: PathBuf,
+        #[arg(long, default_value = "pghacker_history")]
+        schema: String,
+        /// A revision to check (repeatable).
+        #[arg(long = "rev")]
+        revs: Vec<String>,
+        /// This many commits more, picked at random.
+        #[arg(long, default_value_t = 0)]
+        sample: u32,
+        /// Every branch head too.
+        #[arg(long)]
+        heads: bool,
+        /// Also compare index and sequential scans.
+        #[arg(long)]
+        scans: bool,
+    },
 }
 
 #[tokio::main]
@@ -71,7 +119,70 @@ async fn main() -> Result<()> {
             migrate::reset(&admin).await?;
             bootstrap(&env).await
         }
+        Command::History { action } => history(&env, action).await,
     }
+}
+
+async fn history(env: &Env, action: History) -> Result<()> {
+    use pghacker_code::history;
+    let json = match action {
+        History::Build {
+            git_dir,
+            schema,
+            master,
+            paths,
+            dry_run,
+        } => {
+            let opts = history::BuildOptions {
+                git_dir,
+                master,
+                schema,
+                paths,
+            };
+            if dry_run {
+                let started = std::time::Instant::now();
+                let (graph, arena, stats) =
+                    tokio::task::spawn_blocking(move || history::walk_only(&opts)).await??;
+                let widest = (0..arena.heads.len() as u32)
+                    .map(|l| (arena.weave(l).len(), l))
+                    .max()
+                    .map(|(n, l)| (n, arena.lineages[l as usize].path.clone()));
+                serde_json::json!({
+                    "walk": stats,
+                    "commits": graph.commits.len(),
+                    "lanes": graph.lanes.len(),
+                    "refs": graph.refs.len(),
+                    "instances": arena.instances(),
+                    "versions": arena.versions.len(),
+                    "lineages": arena.lineages.len(),
+                    "widest_lineage": widest,
+                    "secs": started.elapsed().as_secs(),
+                })
+            } else {
+                serde_json::to_value(history::build(&env.admin_database_url()?, &opts).await?)?
+            }
+        }
+        History::Verify {
+            git_dir,
+            schema,
+            revs,
+            sample,
+            heads,
+            scans,
+        } => {
+            let opts = history::VerifyOptions {
+                git_dir,
+                schema,
+                revs,
+                sample,
+                heads,
+                scans,
+            };
+            serde_json::to_value(history::verify_build(&env.admin_database_url()?, &opts).await?)?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
 }
 
 async fn bootstrap(env: &Env) -> Result<()> {

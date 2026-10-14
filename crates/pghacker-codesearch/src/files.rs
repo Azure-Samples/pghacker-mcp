@@ -188,19 +188,33 @@ pub async fn read_file(
         bail!("end_line {wanted_end} is before start_line {start}");
     }
     let end = wanted_end.min(start + MAX_READ_LINES - 1);
-    let rows = client
-        .query(
-            "SELECT line_no, line FROM code_lines WHERE file_id = $1 \
-             AND line_no BETWEEN $2 AND $3 ORDER BY line_no",
-            &[&file.id, &(start as i32), &(end as i32)],
-        )
-        .await
-        .context("cannot read the file's lines")?;
+    let rows: Vec<(i32, String)> = match &snapshot.history {
+        Some(h) => {
+            let mut lines: Vec<(i32, String)> =
+                crate::history::line_ranges(client, h, &[(file.id, start as i32, end as i32)])
+                    .await
+                    .context("cannot read the file's lines")?
+                    .into_iter()
+                    .map(|((_, n), line)| (n, line))
+                    .collect();
+            lines.sort_unstable_by_key(|(n, _)| *n);
+            lines
+        }
+        None => client
+            .query(
+                "SELECT line_no, line FROM code_lines WHERE file_id = $1 \
+                 AND line_no BETWEEN $2 AND $3 ORDER BY line_no",
+                &[&file.id, &(start as i32), &(end as i32)],
+            )
+            .await
+            .context("cannot read the file's lines")?
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect(),
+    };
     let mut content = String::new();
     let mut last = start - 1;
-    for row in rows {
-        let n: i32 = row.get(0);
-        let line: String = row.get(1);
+    for (n, line) in rows {
         let entry = format!("{n:>6}\t{line}\n");
         if !content.is_empty() && content.len() + entry.len() > MAX_READ_BYTES {
             break;

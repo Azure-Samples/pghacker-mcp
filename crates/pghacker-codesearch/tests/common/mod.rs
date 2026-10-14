@@ -73,6 +73,7 @@ pub async fn load(
         version: Some(version.to_owned()),
         git_ref: format!("REL_{version}_STABLE"),
         sha,
+        history: None,
     })
 }
 

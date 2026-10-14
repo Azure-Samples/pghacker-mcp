@@ -282,6 +282,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     let q = pghacker_codesearch::engine::LineQuery {
         snapshot_id: snapshot.id,
+        history: None,
         file_ids: None,
         require: vec![&compiled.filter],
         reject: vec![],
@@ -346,6 +347,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     .map_err(anyhow::Error::msg)?;
     let q = LineQuery {
         snapshot_id: snapshot.id,
+        history: None,
         file_ids: None,
         require: vec![&compiled.filter],
         reject: vec![],
@@ -410,6 +412,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     let q = pghacker_codesearch::engine::LineQuery {
         snapshot_id: snapshot.id,
+        history: None,
         file_ids: None,
         require: vec![],
         reject: vec![],
