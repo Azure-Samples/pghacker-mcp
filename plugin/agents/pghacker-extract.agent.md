@@ -43,7 +43,11 @@ threads) is met or `next_extraction_batch` returns `done: true`:
      genuinely different, give `distinct_because` (one sentence: what differs).
      It is recorded, and the deduplicator won't review the pair again, so be
      specific.
-4. Draft **positions** for participants with a clear stance.
+4. Draft **positions** for participants with a clear stance. A thread
+   extracted before (`previously`: `extracted` or `skipped`) has new
+   messages: read it whole again, reuse its `existing_extracts`, and give each
+   participant's position as the thread now shows it. It replaces their
+   earlier position on the same feature or decision.
 5. `submit_extracts` for the thread. If it returns errors, nothing was saved:
    fix every error (usually a quote that isn't verbatim) and submit again.
 6. A thread without technical discussion (announcements, administrivia,

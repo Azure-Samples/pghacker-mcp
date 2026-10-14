@@ -5,7 +5,7 @@
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, extraction, status};
+use pghacker_indexer::{Indexer, extraction, graph, status};
 use serde_json::{Value, json};
 
 /// A stored thread: its id; how many days ago its latest message was sent,
@@ -652,5 +652,415 @@ async fn releases_set_before_take_their_features_most_recent_thread() {
     assert_eq!(
         release(&db, "unlinked").await,
         (Some("17".to_owned()), None)
+    );
+}
+
+/// Each position: its id, author, feature, decision, stance, summary and
+/// how many citations it has.
+type Position = (i64, i64, Option<i64>, Option<i64>, String, String, i64);
+
+async fn positions(db: &TestDb) -> Vec<Position> {
+    let client = db.indexer().await.unwrap();
+    let orphans: i64 = client
+        .query_one(
+            "SELECT count(*) FROM citations c WHERE c.extract_kind = 'position'
+               AND NOT EXISTS (SELECT FROM positions p WHERE p.id = c.extract_id)",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(orphans, 0, "no citation outlives its position");
+    client
+        .query(
+            "SELECT p.id, p.author_id, p.feature_id, p.decision_id, p.stance, p.summary,
+                    (SELECT count(*) FROM citations c WHERE c.extract_kind = 'position' AND c.extract_id = p.id)
+             FROM positions p ORDER BY p.id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+                row.get(6),
+            )
+        })
+        .collect()
+}
+
+/// How many times `pattern` matches in the graph, after a sync.
+async fn graph_count(db: &TestDb, pattern: &str) -> i64 {
+    let mut client = db.indexer().await.unwrap();
+    graph::sync(&mut client).await.unwrap();
+    db.reader()
+        .await
+        .unwrap()
+        .query_one(
+            &format!(
+                "SELECT count(*) FROM ag_catalog.cypher('pghacker_graph', $$ MATCH {pattern} RETURN 1 $$) \
+                 AS (x ag_catalog.agtype)"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+fn cites(message_id: &str, quote: &str) -> Value {
+    json!([{ "message_id": message_id, "quote": quote }])
+}
+
+#[tokio::test]
+async fn a_restated_position_replaces_the_authors_earlier_one_in_the_thread() {
+    let db = corpus(&[(1, Some(10), "pending", false)]).await;
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO authors (id, display_name, message_count) VALUES (2, 'Bob Reviewer', 0);
+             INSERT INTO messages (message_id, list, thread_id, parent_message_id, author_id, from_name, subject,
+                                   sent_at, body, body_clean)
+             VALUES ('bob@example.org', 'pgsql-hackers', 1, 't1@example.org', 2, 'Bob Reviewer', 'Re: Thread 1',
+                     now() - interval '9 days', 'I am not convinced the planner change is worth it.',
+                     'I am not convinced the planner change is worth it.');
+             UPDATE threads SET message_count = 2, participant_count = 2 WHERE id = 1;",
+        )
+        .await
+        .unwrap();
+    let indexer = indexer(&db, &[]);
+    let alice = "t1@example.org";
+    let bob = "bob@example.org";
+
+    let token = token_for(&indexer, 1).await;
+    let matched = extraction::match_extracts(
+        &indexer,
+        args(json!({ "lease_token": token, "drafts": [
+            { "thread_id": 1, "kind": "feature", "name": "Planner change", "description": "A change to the planner." },
+            { "thread_id": 1, "kind": "decision", "name": "Simplify first", "description": "Simplify it first." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    let feature_draft = matched["drafts"][0]["draft_id"].as_i64().unwrap();
+    let decision_draft = matched["drafts"][1]["draft_id"].as_i64().unwrap();
+    let first = extraction::submit(
+        &indexer,
+        args(json!({ "lease_token": token, "thread_id": 1,
+            "features": [{ "draft_id": feature_draft, "action": "new", "slug": "planner-change", "name": "Planner change",
+                           "description": "A change to the planner.", "status": "proposed",
+                           "citations": cites(alice, "proposes a change to the planner") }],
+            "decisions": [{ "draft_id": decision_draft, "action": "new", "feature_slug": "planner-change",
+                            "title": "Simplify first", "outcome": "Simplify the change first",
+                            "rationale": "Bob doubts it is worth it",
+                            "citations": cites(bob, "not convinced the planner change is worth it") }],
+            "positions": [
+                { "author_id": 1, "feature_slug": "planner-change", "stance": "proposes", "summary": "Proposes it.",
+                  "citations": cites(alice, "proposes a change to the planner") },
+                { "author_id": 2, "feature_slug": "planner-change", "stance": "concerned", "summary": "Doubts it.",
+                  "citations": cites(bob, "not convinced the planner change is worth it") },
+                { "author_id": 1, "decision_draft_id": decision_draft, "stance": "supports",
+                  "summary": "Agrees to simplify.", "citations": cites(alice, "Thread 1 proposes a change") }
+            ] })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first["accepted"], true, "{first:#}");
+    assert_eq!(first["created"]["positions"].as_array().unwrap().len(), 3);
+    let [alice_feature, bob_feature, alice_decision] =
+        [0, 1, 2].map(|i| first["created"]["positions"][i]["id"].as_i64().unwrap());
+    let feature = first["created"]["features"][0]["id"].as_i64().unwrap();
+    let decision = first["created"]["decisions"][0]["id"].as_i64().unwrap();
+
+    // A duplicate of Bob's from an earlier extraction, as re-extraction used
+    // to leave.
+    let client = db.indexer().await.unwrap();
+    let duplicate: i64 = client
+        .query_one(
+            "INSERT INTO positions (author_id, thread_id, feature_id, stance, summary, created_at)
+             VALUES (2, 1, $1, 'neutral', 'An older duplicate.', now() - interval '1 day') RETURNING id",
+            &[&feature],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    client
+        .execute(
+            "INSERT INTO citations (extract_kind, extract_id, message_id, quote)
+             SELECT 'position', $1, id, 'I am not convinced' FROM messages WHERE message_id = 'bob@example.org'",
+            &[&duplicate],
+        )
+        .await
+        .unwrap();
+    assert_eq!(graph_count(&db, "(:Position)").await, 4);
+
+    let token = token_for(&indexer, 1).await;
+    let again = extraction::submit(
+        &indexer,
+        args(json!({ "lease_token": token, "thread_id": 1, "positions": [
+            { "author_id": 1, "feature_slug": "planner-change", "stance": "supports",
+              "summary": "Now supports the simpler version.", "citations": cites(alice, "Thread 1 proposes a change") },
+            { "author_id": 2, "feature_slug": "planner-change", "stance": "opposes", "summary": "Opposes it.",
+              "citations": cites(bob, "I am not convinced") },
+            { "author_id": 1, "decision_id": decision, "stance": "proposes", "summary": "Proposed the simplification.",
+              "citations": cites(alice, "a change to the planner") },
+            { "author_id": 2, "decision_id": decision, "stance": "supports", "summary": "Wants it simpler.",
+              "citations": cites(bob, "not convinced the planner change is worth it") }
+        ] })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["accepted"], true, "{again:#}");
+    let updated: Vec<i64> = again["updated"]["positions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(updated, [alice_feature, bob_feature, alice_decision]);
+    let bob_decision = again["created"]["positions"][0]["id"].as_i64().unwrap();
+
+    let text = |s: &str| s.to_owned();
+    assert_eq!(
+        positions(&db).await,
+        [
+            (
+                alice_feature,
+                1,
+                Some(feature),
+                None,
+                text("supports"),
+                text("Now supports the simpler version."),
+                1
+            ),
+            (
+                bob_feature,
+                2,
+                Some(feature),
+                None,
+                text("opposes"),
+                text("Opposes it."),
+                1
+            ),
+            (
+                alice_decision,
+                1,
+                None,
+                Some(decision),
+                text("proposes"),
+                text("Proposed the simplification."),
+                1
+            ),
+            (
+                bob_decision,
+                2,
+                None,
+                Some(decision),
+                text("supports"),
+                text("Wants it simpler."),
+                1
+            ),
+        ],
+        "one position per author on each feature or decision, with the new citations"
+    );
+    let quote: String = client
+        .query_one(
+            "SELECT quote FROM citations WHERE extract_kind = 'position' AND extract_id = $1",
+            &[&alice_feature],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(quote, "Thread 1 proposes a change");
+    assert_eq!(graph_count(&db, "(:Position)").await, 4);
+    assert_eq!(
+        graph_count(&db, "(:Position)-[:EVIDENCED_BY]->(:Message)").await,
+        4,
+        "the graph follows the updated and deleted positions and citations"
+    );
+}
+
+/// Leases thread 1 and submits `positions`, with new features for
+/// `features` (slug, name): the reply.
+async fn submit_positions(indexer: &Indexer, features: &[(&str, &str)], positions: Value) -> Value {
+    let token = token_for(indexer, 1).await;
+    let mut new = Vec::new();
+    if !features.is_empty() {
+        let drafts: Vec<Value> = features
+            .iter()
+            .map(|(_, name)| json!({ "thread_id": 1, "kind": "feature", "name": name, "description": name }))
+            .collect();
+        let matched = extraction::match_extracts(
+            indexer,
+            args(json!({ "lease_token": token, "drafts": drafts })),
+        )
+        .await
+        .unwrap();
+        for (i, (slug, name)) in features.iter().enumerate() {
+            new.push(json!({ "draft_id": matched["drafts"][i]["draft_id"], "action": "new", "slug": slug,
+                             "name": name, "description": name, "status": "proposed",
+                             "citations": cites("t1@example.org", "proposes a change to the planner") }));
+        }
+    }
+    let saved = extraction::submit(
+        indexer,
+        args(json!({ "lease_token": token, "thread_id": 1, "features": new, "positions": positions })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["accepted"], true, "{saved:#}");
+    saved
+}
+
+fn ids_of(list: &Value) -> Vec<i64> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_i64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn two_stances_of_one_author_in_one_submission_stay_apart() {
+    let db = corpus(&[(1, Some(10), "pending", false)]).await;
+    let indexer = indexer(&db, &[]);
+    let alice = "t1@example.org";
+    let first = submit_positions(
+        &indexer,
+        &[("planner-change", "Planner change")],
+        json!([
+            { "author_id": 1, "feature_slug": "planner-change", "stance": "supports", "summary": "At first.",
+              "citations": cites(alice, "proposes a change to the planner") },
+            { "author_id": 1, "feature_slug": "planner-change", "stance": "concerned", "summary": "Then.",
+              "citations": cites(alice, "Thread 1 proposes a change") }
+        ]),
+    )
+    .await;
+    let [earlier, later] = <[i64; 2]>::try_from(ids_of(&first["created"]["positions"])).unwrap();
+    assert!(ids_of(&first["updated"]["positions"]).is_empty());
+    let feature = first["created"]["features"][0]["id"].as_i64().unwrap();
+    let text = |s: &str| s.to_owned();
+    assert_eq!(
+        positions(&db).await,
+        [
+            (
+                earlier,
+                1,
+                Some(feature),
+                None,
+                text("supports"),
+                text("At first."),
+                1
+            ),
+            (
+                later,
+                1,
+                Some(feature),
+                None,
+                text("concerned"),
+                text("Then."),
+                1
+            ),
+        ],
+        "each keeps its own stance and citations"
+    );
+
+    let again = submit_positions(
+        &indexer,
+        &[],
+        json!([{ "author_id": 1, "feature_slug": "planner-change", "stance": "opposes", "summary": "Now.",
+                 "citations": cites(alice, "a change to the planner") }]),
+    )
+    .await;
+    assert_eq!(ids_of(&again["updated"]["positions"]), [later]);
+    assert_eq!(
+        positions(&db).await,
+        [(
+            later,
+            1,
+            Some(feature),
+            None,
+            text("opposes"),
+            text("Now."),
+            1
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_position_that_a_merge_moved_is_left_for_undo_merge() {
+    let db = corpus(&[(1, Some(10), "pending", false)]).await;
+    let indexer = indexer(&db, &[]);
+    let alice = "t1@example.org";
+    // Alice's position on the hints, the newer, is moved next to hers on
+    // vacuum by the merge.
+    let first = submit_positions(
+        &indexer,
+        &[("parallel-vacuum", "Parallel vacuum"), ("planner-hints", "Planner hints")],
+        json!([
+            { "author_id": 1, "feature_slug": "parallel-vacuum", "stance": "supports", "summary": "On vacuum.",
+              "citations": cites(alice, "proposes a change to the planner") },
+            { "author_id": 1, "feature_slug": "planner-hints", "stance": "proposes", "summary": "On hints.",
+              "citations": cites(alice, "Thread 1 proposes a change") }
+        ]),
+    )
+    .await;
+    let [on_vacuum, on_hints] =
+        <[i64; 2]>::try_from(ids_of(&first["created"]["positions"])).unwrap();
+    let [vacuum, hints] = <[i64; 2]>::try_from(ids_of(&first["created"]["features"])).unwrap();
+    let merged = extraction::merge_extracts(
+        &indexer,
+        args(json!({ "kind": "feature", "from_id": hints, "into_id": vacuum, "reason": "The same work." })),
+    )
+    .await
+    .unwrap();
+
+    let again = submit_positions(
+        &indexer,
+        &[],
+        json!([{ "author_id": 1, "feature_slug": "parallel-vacuum", "stance": "opposes", "summary": "Now.",
+                 "citations": cites(alice, "a change to the planner") }]),
+    )
+    .await;
+    assert_eq!(
+        ids_of(&again["updated"]["positions"]),
+        [on_vacuum],
+        "the moved position isn't restated: {again:#}"
+    );
+    let undone = extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
+        .await
+        .unwrap();
+    assert_eq!(undone["undone"], true);
+    let text = |s: &str| s.to_owned();
+    assert_eq!(
+        positions(&db).await,
+        [
+            (
+                on_vacuum,
+                1,
+                Some(vacuum),
+                None,
+                text("opposes"),
+                text("Now."),
+                1
+            ),
+            (
+                on_hints,
+                1,
+                Some(hints),
+                None,
+                text("proposes"),
+                text("On hints."),
+                1
+            ),
+        ],
+        "undoing the merge gives the hints their position back as it was"
     );
 }

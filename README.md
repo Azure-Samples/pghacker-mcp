@@ -218,6 +218,9 @@ threads, new mail gets at most half of the threads leased, and a lane without
 threads leaves the other every one. A thread whose mail changes after
 extraction keeps its place in time, and one whose mail changes while it's
 leased is leased again: extraction records the version its lease read.
+Extracting a thread again restates its participants' positions, each
+replacing the author's earlier one there on the same feature or decision,
+except one that a merge moved there, which stays for `undo_merge`.
 
 `ingest_status` shows both lanes (`extraction.lanes`): the threads waiting and
 leased, new mail's oldest activity, and the backfill's newest, after which

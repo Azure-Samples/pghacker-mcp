@@ -1282,6 +1282,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         .collect();
     let mut created = json!({ "features": [], "decisions": [], "positions": [] });
     let mut reused = json!({ "features": [], "decisions": [] });
+    let mut updated = json!({ "positions": [] });
     let cite = |kind: &'static str,
                 extract_id: i64,
                 citations: &[CitationIn]|
@@ -1457,6 +1458,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         decision_of_draft.insert(decision.draft_id, id);
         citation_rows.extend(cite("decision", id, &decision.citations));
     }
+    let mut written: Vec<i64> = Vec::new();
     for position in &args.positions {
         let feature_id = feature_id_for(&position.feature_slug);
         let decision_id = position.decision_id.or_else(|| {
@@ -1465,20 +1467,80 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 .and_then(|d| decision_of_draft.get(&d).copied())
         });
         let embedding = vectors.next().flatten();
-        let id: i64 = tx
-            .query_one(
-                "INSERT INTO positions (author_id, thread_id, feature_id, decision_id, stance, summary, embedding,
-                                        created_by, model)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
-                &[&position.author_id, &args.thread_id, &feature_id, &decision_id, &position.stance.as_str(),
-                  &position.summary.trim(), &embedding, &session, &model],
+        // A thread extracted again restates its participants' positions: the
+        // author's latest on the same feature or decision takes the new
+        // stance and citations, and earlier duplicates go. Two positions of
+        // one author on one target in this submission are stances of their
+        // own, so a position this submission wrote isn't matched again. Nor
+        // is one that a merge moved here, which undo_merge must find as it
+        // left it.
+        let same: Vec<i64> = tx
+            .query(
+                "SELECT p.id FROM positions p
+                 WHERE p.thread_id = $1 AND p.author_id = $2
+                   AND p.feature_id IS NOT DISTINCT FROM $3 AND p.decision_id IS NOT DISTINCT FROM $4
+                   AND p.id <> ALL ($5)
+                   AND NOT EXISTS (
+                       SELECT FROM merge_log l
+                       WHERE l.reverted_at IS NULL
+                         AND ((l.kind = 'feature' AND l.into_id = p.feature_id)
+                              OR (l.kind = 'decision' AND l.into_id = p.decision_id)
+                              OR (l.kind = 'author' AND l.into_id = p.author_id))
+                         AND l.moved -> 'positions' @> to_jsonb(p.id))
+                 ORDER BY p.created_at DESC, p.id DESC",
+                &[
+                    &args.thread_id,
+                    &position.author_id,
+                    &feature_id,
+                    &decision_id,
+                    &written,
+                ],
             )
             .await?
-            .get(0);
-        created["positions"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({ "id": id, "author_id": position.author_id }));
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let id = match same.split_first() {
+            Some((&latest, earlier)) => {
+                tx.execute(
+                    "DELETE FROM citations WHERE extract_kind = 'position' AND extract_id = ANY ($1)",
+                    &[&same],
+                )
+                .await?;
+                tx.execute("DELETE FROM positions WHERE id = ANY ($1)", &[&earlier])
+                    .await?;
+                tx.execute(
+                    "UPDATE positions SET stance = $2, summary = $3, embedding = $4, created_by = $5, model = $6
+                     WHERE id = $1",
+                    &[&latest, &position.stance.as_str(), &position.summary.trim(), &embedding, &session,
+                      &model],
+                )
+                .await?;
+                updated["positions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "id": latest, "author_id": position.author_id }));
+                latest
+            }
+            None => {
+                let id: i64 = tx
+                    .query_one(
+                        "INSERT INTO positions (author_id, thread_id, feature_id, decision_id, stance, summary,
+                                                embedding, created_by, model)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                        &[&position.author_id, &args.thread_id, &feature_id, &decision_id,
+                          &position.stance.as_str(), &position.summary.trim(), &embedding, &session, &model],
+                    )
+                    .await?
+                    .get(0);
+                created["positions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({ "id": id, "author_id": position.author_id }));
+                id
+            }
+        };
+        written.push(id);
         citation_rows.extend(cite("position", id, &position.citations));
     }
     for (kind, extract_id, message_id, quote) in &citation_rows {
@@ -1499,6 +1561,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         "thread_id": args.thread_id,
         "created": created,
         "reused": reused,
+        "updated": updated,
         "citations": citation_rows.len(),
         "judged_distinct": judged_distinct,
     }))
