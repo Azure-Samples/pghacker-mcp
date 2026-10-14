@@ -85,7 +85,7 @@ not make the full graph sync incremental or establish its total runtime.
 | --- | --- |
 | Mail | `search_threads`, `get_thread`, `search_extracts`, `author_perspective`, `search_authors`, `get_author`. The search tools take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (default). |
 | SQL and graph | `get_ontology` describes the data. `query` runs one read-only SQL statement, including Cypher on `pghacker_graph`, and returns CSV. |
-| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the loaded source. |
+| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the loaded source. `search_patches` finds lines in the patches posted to the lists, by thread. With the [commit history](#commit-history), the code tools read any commit, and `blame`, `get_commit` and `search_commits` appear. |
 
 **pghacker-indexer**:
 
@@ -178,6 +178,34 @@ reconcile that warns if it finds drift, and on request with
 `pghacker-indexer graph-reconcile`. `ingest_status` shows the label counts the
 sync keeps, the changes waiting and the last full sync.
 
+### Commit history
+
+The commit history stores every line of every commit of every branch once
+(the weave) and lets the code tools read any commit; [the search
+design](docs/search-design.md) describes it. As the administrator:
+
+```bash
+# A bare clone with every branch and tag.
+git clone --mirror https://git.postgresql.org/git/postgresql.git .runtime/postgres.git
+# Build into a schema of its own (6 minutes), and swap it into pghacker.
+cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/postgres.git \
+    --url https://git.postgresql.org/git/postgresql.git --install
+# Rebuild every file of the branch heads and 40 random commits; compare with git.
+cargo run --release -p pghacker-indexer -- history verify --git-dir .runtime/postgres.git \
+    --schema pghacker --heads --sample 40
+```
+
+Then set `PGHACKER_CODE_HISTORY=pghacker`. The hourly `code_history_sync` job
+fetches and applies new commits, and refreshes back-patch groups and the
+links from commits to threads; `history sync` and `history regroup` do it by
+hand. The `patch_lines` job indexes the mail's patches for `search_patches`
+whether or not the history is installed.
+
+In the `pghacker-replay` crate's `perf_tuning/` folder, `history_parity`
+checks a build in `pghacker_bench` against git on random commits:
+`get_commit` against `git show`, its line counts, and `blame` against
+`git blame`. `profile_history` times one call through both engines.
+
 ## Build the corpus
 
 With the app running:
@@ -229,12 +257,12 @@ The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in D
 | --- | --- |
 | `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing |
 | `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
-| `crates/pghacker-code` | Git snapshot loader (gix), one row per line |
-| `crates/pghacker-codesearch` | pg_trgm code search, the grep translator, `read_file`, `list_files` |
+| `crates/pghacker-code` | Git snapshot loader (gix), one row per line; the commit history's builder and sync |
+| `crates/pghacker-codesearch` | pg_trgm code search, the grep translator, `read_file`, `list_files`; the history engine, `blame`, `get_commit`, `search_commits`, `search_patches` |
 | `crates/pghacker-sqlquery` | The read-only `query` tool |
 | `crates/pghacker-api` | Mail and graph tools |
 | `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
-| `crates/pghacker-replay` | The exactness replay harness |
+| `crates/pghacker-replay` | The exactness replay harness, the engine benchmark and the history parity check |
 | `migrations/`, `db/` | Schema and the PostgreSQL image |
 | `plugin/` | Branding, agents and the MCP catalog |
 | `scripts/` | The launcher, crawl and evaluation drivers; the container's supervisor, probe and corpus restore |
