@@ -14,6 +14,7 @@ pub mod glob;
 pub mod grep;
 pub mod history;
 pub mod pattern;
+pub mod rev;
 pub mod search;
 pub mod snapshot;
 

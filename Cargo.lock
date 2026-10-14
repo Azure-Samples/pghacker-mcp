@@ -2594,6 +2594,7 @@ name = "pghacker-codesearch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fancy-regex",
  "futures-util",
  "globset",

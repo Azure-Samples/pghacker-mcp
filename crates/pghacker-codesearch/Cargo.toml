@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 fancy-regex.workspace = true
 futures-util.workspace = true
 globset.workspace = true

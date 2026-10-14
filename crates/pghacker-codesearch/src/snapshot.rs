@@ -24,7 +24,8 @@ pub struct Snapshot {
     pub history: Option<crate::history::History>,
 }
 
-/// The snapshot of `repo` that a code tool reads. `version` names a major
+/// The snapshot of `repo` that a code tool reads; with `PGHACKER_CODE_HISTORY`
+/// set, the commit [`crate::rev::resolve`] finds in the history. `version` names a major
 /// version (`19`, `PG19`, `9`), a release (`18.3`, `9.6.24`) or a release
 /// line before 10 (`9.6`), a ref (`REL_18_3`, `REL_19_STABLE`, `master`) or a
 /// commit SHA prefix. Of the snapshots it names, the latest wins: the newest
@@ -36,6 +37,10 @@ pub async fn resolve_snapshot(
     repo: &str,
     version: Option<&str>,
 ) -> Result<Snapshot> {
+    // With the history on, any revision names a commit in it.
+    if let Some(schema) = crate::history::schema_from_env() {
+        return crate::rev::resolve(client, schema, repo, version).await;
+    }
     let rows = client
         .query(
             &format!(
@@ -63,10 +68,7 @@ pub async fn resolve_snapshot(
         Some(v) => named(&snapshots, v),
     };
     if let Some(snapshot) = found {
-        return match crate::history::schema_from_env() {
-            Some(schema) => crate::history::attach(client, snapshot.clone(), schema).await,
-            None => Ok(snapshot.clone()),
-        };
+        return Ok(snapshot.clone());
     }
     let mut versions: Vec<&str> = snapshots
         .iter()

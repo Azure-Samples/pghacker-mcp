@@ -321,3 +321,90 @@ async fn history_and_snapshots_answer_alike() {
         assert_eq!(found[0], found[1], "{version}");
     }
 }
+
+#[tokio::test]
+async fn revisions_resolve_in_the_history() {
+    use pghacker_codesearch::rev::resolve;
+    let dir = tempfile::tempdir().unwrap();
+    let commits = repository(dir.path());
+    let (c2, b1, c0) = (&commits[0].2, &commits[1].2, &commits[2].2);
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: dir.path().to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: vec!["src".into(), "contrib".into()],
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let at = |v: Option<&str>| {
+        let (reader, v) = (&reader, v.map(str::to_owned));
+        async move { resolve(reader, SCHEMA, "postgres", v.as_deref()).await }
+    };
+    // The newest release line by default; 19, one past it, is master.
+    let head = at(None).await.unwrap();
+    assert_eq!(
+        (head.git_ref.as_str(), head.sha.as_str()),
+        ("REL_18_STABLE", b1.as_str())
+    );
+    assert_eq!(head.version.as_deref(), Some("18"));
+    assert_eq!(at(Some("19")).await.unwrap().sha, *c2);
+    assert_eq!(at(Some("master^^")).await.unwrap().sha, *c0);
+    let fork = at(Some("REL_18_STABLE~1")).await.unwrap();
+    assert_eq!(fork.git_ref, "master");
+    let by_sha = at(Some(&c0[..8])).await.unwrap();
+    assert_eq!(
+        (by_sha.git_ref.as_str(), by_sha.sha.as_str()),
+        ("master", c0.as_str())
+    );
+    // c1 was committed at 00:02, c2 at 00:04.
+    let dated = at(Some("master@2026-01-01T00:03:00Z")).await.unwrap();
+    assert_eq!(dated.sha, fork.sha);
+    assert!(at(Some("master@2025-12-31")).await.is_err());
+    assert!(
+        at(Some("REL_99_STABLE"))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("REL_18_STABLE")
+    );
+    assert!(at(Some("master~9")).await.is_err());
+
+    // A resolved commit reads like the snapshot of it.
+    let mut indexer = db.indexer().await.unwrap();
+    load_snapshot(
+        &mut indexer,
+        &SnapshotSpec {
+            repo: "postgres".into(),
+            git_ref: "REL_17_STABLE".into(),
+            sha: c0.clone(),
+            version: Some("17".into()),
+            paths: vec!["src".into(), "contrib".into()],
+            source: RepoSource::Local {
+                path: dir.path().to_owned(),
+            },
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let snap = resolve_snapshot(&reader, "postgres", Some("17"))
+        .await
+        .unwrap();
+    let hist = at(Some("master~2")).await.unwrap();
+    for command in ["grep -rn json .", "grep -c '' src/backend/parser/gram.y"] {
+        let a = run(&reader, &snap, command, Limits::default())
+            .await
+            .unwrap();
+        let b = run(&reader, &hist, command, Limits::default())
+            .await
+            .unwrap();
+        assert_eq!(a.stdout, b.stdout, "{command}");
+    }
+}

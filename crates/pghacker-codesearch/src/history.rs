@@ -42,7 +42,7 @@ pub fn schema_from_env() -> Option<&'static str> {
     SCHEMA.as_deref()
 }
 
-fn checked(schema: &str) -> Result<&str> {
+pub(crate) fn checked(schema: &str) -> Result<&str> {
     let ok = !schema.is_empty()
         && schema.len() <= 63
         && schema.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
