@@ -25,7 +25,6 @@ pub struct Linked {
 /// Recomputes the commits' thread links in `schema`.
 pub async fn refresh(client: &impl GenericClient, schema: &str) -> Result<Linked> {
     let s = super::store::readable_schema(schema)?;
-    let mut linked = Linked::default();
     // (sha, thread, via, message)
     let mut rows: Vec<(String, i64, &'static str, i64)> = Vec::new();
     let has_mail: bool = client
@@ -65,7 +64,6 @@ pub async fn refresh(client: &impl GenericClient, schema: &str) -> Result<Linked
         {
             for sha in &named[m.get::<_, &str>(0)] {
                 rows.push((sha.clone(), m.get(1), "trailer", m.get(2)));
-                linked.by_trailer += 1;
             }
         }
 
@@ -105,10 +103,18 @@ pub async fn refresh(client: &impl GenericClient, schema: &str) -> Result<Linked
                 continue;
             }
             rows.push((sha.clone(), a.get(1), "anchor", a.get(2)));
-            linked.by_anchor += 1;
         }
     }
 
+    // A message can cite a commit twice, by a prefix and in full, and a
+    // commit can name a discussion twice. A build's tables have no keys yet
+    // for ON CONFLICT to skip the second row, so drop it here.
+    rows.sort_unstable();
+    rows.dedup();
+    let linked = Linked {
+        by_trailer: rows.iter().filter(|r| r.2 == "trailer").count() as u64,
+        by_anchor: rows.iter().filter(|r| r.2 == "anchor").count() as u64,
+    };
     let shas: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
     let threads: Vec<i64> = rows.iter().map(|r| r.1).collect();
     let via: Vec<&str> = rows.iter().map(|r| r.2).collect();

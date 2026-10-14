@@ -870,7 +870,12 @@ async fn renames_in_large_moves_are_followed() {
 async fn commits_link_to_the_threads_that_discussed_them() {
     let mut r = Repo::new();
     r.write("a.c", b"x\n");
-    r.commit("First\n\nDiscussion: https://postgr.es/m/disc%40example.org");
+    // The same discussion twice, and below, a message citing the second
+    // commit both by a prefix and in full: each is one link.
+    r.commit(
+        "First\n\nDiscussion: https://postgr.es/m/disc%40example.org\n\
+         Discussion: https://postgr.es/m/disc%40example.org",
+    );
     r.write("a.c", b"y\n");
     let second = r.commit("Second");
     let first = r.commits[0].clone();
@@ -887,7 +892,7 @@ async fn commits_link_to_the_threads_that_discussed_them() {
                  (20, 'cite@example.org', 'pgsql-hackers', 2, '2026-02-01'),
                  (30, 'early@example.org', 'pgsql-hackers', 2, '2020-01-01');
              INSERT INTO pghacker.anchors (message_id, kind, value) VALUES
-                 (20, 'commit', '{}'), (30, 'commit', '{}');",
+                 (20, 'commit', '{}'), (20, 'commit', '{second}'), (30, 'commit', '{}');",
             &second[..9],
             &first[..9]
         ))
