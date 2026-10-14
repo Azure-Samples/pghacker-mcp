@@ -49,7 +49,8 @@ choose output lines (with context), files or counts (group_by match: counts per 
 match); page with limit and offset; order coverage puts files with the most terms first. \
 Results give totals, `cut` when more remain, `complete` false when totals are only lower \
 bounds, `budget_exceeded` when the time ran out, and similar names when nothing matched. \
-The page limit does not limit the work needed to compute totals.";
+The page limit does not limit the work needed to compute totals. budget_ms defaults to 4000 \
+(maximum 10000), or with history to 10000 (maximum 15000).";
 
 /// The grep tool's description, for agents.
 pub const GREP_DESCRIPTION: &str = "\
@@ -60,7 +61,8 @@ regex dialect (none: basic regex); -i -w -x -v -c -l -L -o -n -h -H -m -A -B -C,
 folder it searches the whole tree; a leading cd DIR && sets the folder. Trailing head, \
 tail, wc, sort, uniq, cut and grep stages run on the output. Paths are relative to the \
 source root (absolute paths into a PostgreSQL checkout work too). Incomplete searches \
-fail instead of returning partial pipeline counts. Not egrep, fgrep, git grep or rg: use search.";
+fail instead of returning partial pipeline counts. budget_ms defaults to 10000, at most 15000. \
+Not egrep, fgrep, git grep or rg: use search.";
 
 /// The read_file tool's description, for agents.
 pub const READ_FILE_DESCRIPTION: &str = "\
@@ -95,7 +97,8 @@ matching Author and Co-authored-by trailers), paths (files, folders or globs), s
 (dates). changed_lines finds commits that added or removed a line matching a regular \
 expression (git log -G); occurrences finds commits that changed how many times a text occurs \
 in a file (git log -S), showing the lines. Each commit comes with its branch, line counts, \
-Discussion links and the other branches that got the same change; get_commit shows one whole.";
+Discussion links and the other branches that got the same change; get_commit shows one whole. \
+budget_ms defaults to 10000, at most 15000.";
 
 /// The search_patches tool's description, for agents.
 pub const SEARCH_PATCHES_DESCRIPTION: &str = "\
@@ -103,7 +106,8 @@ Find lines in the patches posted to pgsql-hackers, by thread: query (text, or wi
 a regular expression, or identifier a whole word), lines (changed: added or removed, the \
 default; added; removed; context; all), and paths, author, since, until and thread_id filters. \
 Each thread comes with the first and latest patch version that has the lines, the lines with \
-their files and line numbers, and, with the commit history, the linked commits that added them.";
+their files and line numbers, and, with the commit history, the linked commits that added them. \
+budget_ms defaults to 10000, at most 15000.";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\

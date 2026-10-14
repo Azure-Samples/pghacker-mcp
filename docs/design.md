@@ -19,7 +19,7 @@ PostgreSQL's design history lives in about 600K pgsql-hackers messages and the s
 
 ![pghacker-mcp architecture](assets/pghacker-architecture.svg)
 
-- **pghacker-mcp:** async Rust (tokio, axum, `rmcp`), stateless, public without sign-in, rate-limited per IP. No LLM calls beyond query embeddings; read-only role with a 5-second timeout.
+- **pghacker-mcp:** async Rust (tokio, axum, `rmcp`), stateless, public without sign-in, rate-limited per IP. No LLM calls beyond query embeddings; read-only role with a 10-second timeout.
 - **pghacker-indexer:** async Rust (tokio, `tokio-postgres`, `mail-parser`, `gix`), internal. Async workers fetch, parse and embed sources and build the graph; MCP tools serve crawler sessions.
 - **Crawler sessions:** a `pghacker-crawler` package on PilotSwarm's generic crawler. A supervisor picks sources; mini models extract; a stronger model deduplicates.
 
@@ -55,7 +55,7 @@ Deterministic code handles verbatim facts and models only judgments; the agent-b
 
 **Mail and graph:** `get_thread`, `search_authors`, `get_author`, `get_ontology`, and three tools that take `mode` (`fulltext`, `semantic` or `hybrid`, the default): `search_threads`, `search_extracts` and `author_perspective` (cited positions on a topic).
 
-**SQL:** `query`: after a `sqlparser` check (one statement, no transaction control), it runs the SQL, AGE `cypher()` included, in a rolled-back read-only transaction with a 5-second timeout and returns up to `max_rows` rows as CSV. It reads results in PostgreSQL's text format, through a vendored `tokio-postgres` fork (`bind_text`).
+**SQL:** `query`: after a `sqlparser` check (one statement, no transaction control), it runs the SQL, AGE `cypher()` included, in a rolled-back read-only transaction with a 10-second timeout and returns up to `max_rows` rows as CSV. Its connection checkout remains bounded at 5 seconds and its whole-call backstop at 20 seconds. It reads results in PostgreSQL's text format, through a vendored `tokio-postgres` fork (`bind_text`).
 
 **Code search** has a first-class `search` plus a `grep` tool.
 

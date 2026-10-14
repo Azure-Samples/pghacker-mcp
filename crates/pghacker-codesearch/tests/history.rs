@@ -18,6 +18,117 @@ use serde_json::{Value, json};
 
 const SCHEMA: &str = "pghacker_history";
 
+#[tokio::test]
+async fn patch_and_commit_searches_restore_pooled_timeouts_on_every_outcome() {
+    use pghacker_codesearch::{
+        SearchCommitsArgs, SearchPatchesArgs, search_commits, search_patches,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: dir.path().to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let pool = db.reader_pool(1).unwrap();
+    let client = pool.get().await.unwrap();
+    client
+        .batch_execute("SET statement_timeout = '1739ms'")
+        .await
+        .unwrap();
+    let patches = SearchPatchesArgs {
+        query: "missing".into(),
+        ..Default::default()
+    };
+    let commits = SearchCommitsArgs::default();
+    assert!(search_patches(&**client, None, &patches).await.is_ok());
+    assert!(
+        search_commits(&**client, SCHEMA, "postgres", &commits)
+            .await
+            .is_ok()
+    );
+
+    let invalid_patches = SearchPatchesArgs {
+        query: "[".into(),
+        match_mode: Some("regex".into()),
+        ..Default::default()
+    };
+    assert!(
+        search_patches(&**client, None, &invalid_patches)
+            .await
+            .is_err()
+    );
+    let invalid_commits = SearchCommitsArgs {
+        message: Some("[".into()),
+        ..Default::default()
+    };
+    assert!(
+        search_commits(&**client, SCHEMA, "postgres", &invalid_commits)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        client
+            .query_one("SHOW statement_timeout", &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "1739ms"
+    );
+
+    let blocker = db.admin().await.unwrap();
+    blocker
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE pghacker.patch_texts, {SCHEMA}.code_commits IN ACCESS EXCLUSIVE MODE"
+        ))
+        .await
+        .unwrap();
+    let patches = SearchPatchesArgs {
+        budget_ms: Some(80),
+        ..patches
+    };
+    let commits = SearchCommitsArgs {
+        budget_ms: Some(80),
+        ..commits
+    };
+    let found = search_patches(&**client, None, &patches).await.unwrap();
+    assert!(found.incomplete && found.threads.is_empty());
+    assert_eq!(
+        client
+            .query_one("SHOW statement_timeout", &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "1739ms"
+    );
+    let found = search_commits(&**client, SCHEMA, "postgres", &commits)
+        .await
+        .unwrap();
+    assert!(found.incomplete && found.commits.is_empty());
+    blocker.batch_execute("ROLLBACK").await.unwrap();
+    drop(client);
+
+    let reused = pool.get().await.unwrap();
+    assert_eq!(
+        reused
+            .query_one("SHOW statement_timeout", &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0),
+        "1739ms"
+    );
+}
+
 /// Commits of the fixture's files, edited, renamed and back-patched;
 /// returns (version, ref, sha) for three commits.
 fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {

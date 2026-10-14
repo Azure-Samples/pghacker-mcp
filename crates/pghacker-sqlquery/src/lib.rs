@@ -1,6 +1,6 @@
 //! The public MCP server's `query` tool: one read-only SQL statement, AGE's
 //! `cypher()` included, run as pgh_reader in a read-only transaction that is
-//! always rolled back, with a 5-second timeout, answered as CSV.
+//! always rolled back, with a 10-second timeout, answered as CSV.
 //!
 //! The check and the tool ([`check`], [`QueryTool`]) are in `query`, and the
 //! transaction, its text-format reads and the CSV in `execute`, whose
@@ -32,7 +32,7 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     Query the AGE graph pghacker_graph with SELECT * FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
-    SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement, run read-only with a 5-second \
+    SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement, run read-only with a 10-second \
     timeout. NULL reads as None, an empty string as \"\".";
 
 /// The commit history's tables, which pghacker-mcp adds to the description.
@@ -87,7 +87,7 @@ mod tests {
             "AS (name agtype, n agtype)",
             "get_ontology",
             "one SELECT",
-            "5-second",
+            "10-second",
             "banner",
             "Text keeps the email addresses written in it",
             "NULL reads as None",

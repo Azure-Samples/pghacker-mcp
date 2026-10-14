@@ -47,6 +47,7 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
         &snapshot,
         &GrepArgs {
             command: "grep -rF 'for (' src | wc -l".into(),
+            budget_ms: None,
             version: None,
         },
     )
@@ -271,6 +272,7 @@ async fn grep_paths_pipelines_and_errors() -> Result<()> {
         s,
         &GrepArgs {
             command: "grep -c json src/backend/utils/adt/json.c src/x.c".into(),
+            budget_ms: None,
             version: None,
         },
     )

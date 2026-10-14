@@ -471,6 +471,21 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     assert_eq!(output.status, 2);
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());
+    let error = pghacker_codesearch::grep(
+        &reader,
+        &snapshot,
+        &pghacker_codesearch::GrepArgs {
+            command: "grep -r makeNode src | wc -l".into(),
+            budget_ms: Some(80),
+            version: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("search stopped early"),
+        "{error:#}"
+    );
     let timeout: String = reader
         .query_one("SHOW statement_timeout", &[])
         .await?

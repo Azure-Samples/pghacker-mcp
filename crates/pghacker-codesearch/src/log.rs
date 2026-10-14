@@ -67,7 +67,7 @@ pub struct SearchCommitsArgs {
     /// The most commits, newest first. Default 30, at most 200.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Time budget in milliseconds. Default 10000.
+    /// Time budget in milliseconds. Default 10000, at most 15000.
     #[serde(default)]
     pub budget_ms: Option<u32>,
 }
@@ -195,8 +195,21 @@ pub async fn search_commits(
     repo: &str,
     args: &SearchCommitsArgs,
 ) -> Result<SearchCommitsResult> {
-    let s = checked(schema)?;
     let budget = Budget::new(args.budget_ms);
+    let old = crate::engine::set_timeout(client, budget.remaining_ms()).await?;
+    let result = search_commits_inner(client, schema, repo, args, &budget).await;
+    crate::engine::restore_timeout(client, &old).await;
+    result
+}
+
+async fn search_commits_inner(
+    client: &impl GenericClient,
+    schema: &str,
+    repo: &str,
+    args: &SearchCommitsArgs,
+    budget: &Budget,
+) -> Result<SearchCommitsResult> {
+    let s = checked(schema)?;
     let limit = args.limit.unwrap_or(DEFAULT_COMMITS).clamp(1, MAX_COMMITS) as usize;
     let (range, range_text) = range_of(client, s, repo, args.range.as_deref()).await?;
     let mut result = SearchCommitsResult {

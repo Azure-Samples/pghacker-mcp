@@ -13,8 +13,8 @@ use tokio_postgres::types::ToSql;
 use crate::pattern::Filter;
 
 /// The default and largest time budgets, in milliseconds.
-pub const DEFAULT_BUDGET_MS: u32 = 4_000;
-pub const MAX_BUDGET_MS: u32 = 10_000;
+pub const DEFAULT_BUDGET_MS: u32 = 10_000;
+pub const MAX_BUDGET_MS: u32 = 15_000;
 
 /// The most candidate lines one search reads; more makes its totals lower
 /// bounds.
@@ -271,6 +271,20 @@ pub fn merge_ranges(mut ranges: Vec<(i32, i32, i32)>) -> Vec<(i32, i32, i32)> {
 mod tests {
     use super::*;
     use crate::pattern::{Cond, Op};
+
+    #[test]
+    fn budgets_default_to_ten_seconds_and_clamp_to_fifteen() {
+        for (requested, expected) in [
+            (None, 10_000),
+            (Some(0), 1),
+            (Some(8_000), 8_000),
+            (Some(12_000), 12_000),
+            (Some(15_000), 15_000),
+            (Some(u32::MAX), 15_000),
+        ] {
+            assert_eq!(Budget::new(requested).limit.as_millis(), expected);
+        }
+    }
 
     #[test]
     fn builds_the_line_filters() {

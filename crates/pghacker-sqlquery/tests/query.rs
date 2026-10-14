@@ -189,11 +189,11 @@ async fn large_results_are_cut_at_the_size_limit() {
 async fn a_statement_past_the_timeout_is_cancelled() {
     let (_db, tool) = tool(1).await;
     let started = Instant::now();
-    let message = failure(&tool, "SELECT pg_sleep(6)").await;
+    let message = failure(&tool, "SELECT pg_sleep(11)").await;
     let elapsed = started.elapsed();
     assert_eq!(message, TIMEOUT_MESSAGE);
     assert!(
-        elapsed >= Duration::from_millis(4500) && elapsed < Duration::from_millis(6500),
+        elapsed >= Duration::from_millis(9500) && elapsed < Duration::from_millis(11500),
         "{elapsed:?}"
     );
     assert_eq!(value(&tool, "SELECT 1").await, "1");
@@ -474,7 +474,7 @@ async fn what_a_call_leaves_on_its_connection_does_not_reach_the_next() {
         value(&tool, "SHOW default_transaction_read_only").await,
         "on"
     );
-    assert_eq!(value(&tool, "SHOW statement_timeout").await, "5s");
+    assert_eq!(value(&tool, "SHOW statement_timeout").await, "10s");
 
     // SET and PREPARE don't run at all.
     let message = failure(&tool, "SET work_mem = '1234kB'").await;

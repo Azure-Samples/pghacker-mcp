@@ -11,7 +11,7 @@
 //!   statements, PostgreSQL's errors and timeouts alike. The SQL is logged at
 //!   debug level only.
 //! - `max_rows` is 100 by default and at most 1,000.
-//! - The statement timeout is 5 seconds, and the call as a whole has a
+//! - The statement timeout is 10 seconds, and the call as a whole has a
 //!   deadline of its own, [`CALL_TIMEOUT`].
 //! - The pool is pghacker-core's, over pgh_reader's URL with its TLS, and
 //!   the call waits for a connection with a tokio timeout rather than the
@@ -45,10 +45,10 @@ pub const MAX_ROWS: usize = 1000;
 
 /// How long a statement may run: pgh_reader's own limit, which the
 /// transaction sets again.
-pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What query answers when its statement runs past [`STATEMENT_TIMEOUT`].
-pub const TIMEOUT_MESSAGE: &str = "The statement ran past query's 5-second timeout, and was \
+pub const TIMEOUT_MESSAGE: &str = "The statement ran past query's 10-second timeout, and was \
     cancelled. Narrow it, such as with a more selective WHERE clause or a LIMIT, and try again.";
 
 /// How long a call waits for a connection of the pool.

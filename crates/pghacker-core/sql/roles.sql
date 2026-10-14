@@ -38,8 +38,8 @@ $$;
 
 ALTER ROLE pgh_indexer SET search_path = pghacker, ag_catalog, public;
 ALTER ROLE pgh_reader SET search_path = pghacker, ag_catalog, public;
--- The reader serves the public MCP server: read-only, with a 5-second limit.
+-- The reader serves the public MCP server: read-only, with a 10-second limit.
 ALTER ROLE pgh_reader SET default_transaction_read_only = on;
-ALTER ROLE pgh_reader SET statement_timeout = '5s';
+ALTER ROLE pgh_reader SET statement_timeout = '10s';
 ALTER ROLE pgh_reader SET idle_in_transaction_session_timeout = '30s';
 ALTER ROLE pgh_reader CONNECTION LIMIT 64;

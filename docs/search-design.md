@@ -29,6 +29,12 @@ Text that isn't UTF-8 stays binary to the tools, as in the snapshots: search and
 
 ## Indexes and queries
 
+Ordinary `search` has a 4-second default budget and a 10-second maximum.
+`search` with `history`, `grep`, `search_patches` and `search_commits` accept
+`budget_ms` with a 10-second default and a 15-second maximum. Each temporarily
+overrides the reader's 10-second statement timeout and restores the previous
+setting before returning, including on errors.
+
 A trigram GIN index on `line` finds candidates; a btree on (`lineage`, `hi`, `lo`) scopes them to files. `alive` is only ever a filter: GiST scans of multiranges can miss rows on PostgreSQL 14 and later (reported on pgsql-hackers in August 2026, not yet fixed). The engine chooses among three plans:
 
 - **One commit:** the trigram scan and `alive_at(commit)` together; rows map to versions through a cached per-commit map.

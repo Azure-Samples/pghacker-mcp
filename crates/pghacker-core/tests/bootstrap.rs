@@ -62,7 +62,7 @@ async fn the_reader_reads_but_cannot_write_or_see_emails() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(timeout, "5s");
+    assert_eq!(timeout, "10s");
 }
 
 #[tokio::test]

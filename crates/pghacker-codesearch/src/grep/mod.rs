@@ -32,6 +32,9 @@ pub const MAX_OUTPUT: usize = 1 << 20;
 pub struct GrepArgs {
     /// A grep command line, run at the source root, such as `grep -rn "makeNode(" src/backend | head -20`.
     pub command: String,
+    /// Time limit in milliseconds: default 10000, at most 15000.
+    #[serde(default)]
+    pub budget_ms: Option<u32>,
     /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
@@ -81,7 +84,16 @@ pub async fn grep(
     snapshot: &Snapshot,
     args: &GrepArgs,
 ) -> Result<String> {
-    let out = run(client, snapshot, &args.command, Limits::default()).await?;
+    let out = run(
+        client,
+        snapshot,
+        &args.command,
+        Limits {
+            budget_ms: args.budget_ms.unwrap_or(engine::DEFAULT_BUDGET_MS),
+            ..Limits::default()
+        },
+    )
+    .await?;
     if out.incomplete {
         bail!("{}", out.stderr.join("\n"));
     }
@@ -932,6 +944,23 @@ fn grep_stage(args: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
 mod tests {
     use super::*;
     use crate::snapshot::FileEntry;
+
+    #[test]
+    fn arguments_expose_an_optional_budget() {
+        let args: GrepArgs =
+            serde_json::from_value(serde_json::json!({"command": "grep x src"})).unwrap();
+        assert_eq!(args.budget_ms, None);
+        let args: GrepArgs = serde_json::from_value(serde_json::json!({
+            "command": "grep x src",
+            "budget_ms": 15000
+        }))
+        .unwrap();
+        assert_eq!(args.budget_ms, Some(15_000));
+        assert_eq!(Limits::default().budget_ms, 10_000);
+        let schema = pghacker_core::mcp::schema::<GrepArgs>();
+        assert!(schema["properties"]["budget_ms"].is_object());
+        assert_eq!(schema["required"], serde_json::json!(["command"]));
+    }
 
     fn table() -> FileTable {
         let paths = [

@@ -32,7 +32,7 @@ npm start
 **Setup** downloads and verifies the PilotSwarm release tarballs, installs dependencies, and builds the two Rust binaries. It also creates an ignored `.env` (owner-only permissions) with random passwords for:
 - PilotSwarm's database;
 - `pgh_indexer`, which writes schema `pghacker` and the graph `pghacker_graph`;
-- `pgh_reader`, which pghacker-mcp uses: read-only, with a 5-second statement timeout.
+- `pgh_reader`, which pghacker-mcp uses: read-only, with a 10-second statement timeout.
 
 An existing `.env` is kept, and missing role passwords are added to it.
 
@@ -119,8 +119,11 @@ scans avoid enumerating those unrelated postings, but a whole tree still
 requires reading its own lines.
 
 The time budget is shared by candidate retrieval, verification, counts,
-context and name suggestions: 4 seconds by default, at most 10 seconds.
-`search` exposes `budget_ms`; the MCP `grep` tool uses the 4-second default.
+context and name suggestions: ordinary `search` uses 4 seconds by default,
+at most 10 seconds. `search` with `history`, `grep`, `search_patches` and
+`search_commits` use 10 seconds by default, at most 15 seconds. All expose
+`budget_ms`. These budgets temporarily override the reader's 10-second
+statement timeout and restore the prior connection setting on success or error.
 The 200,000-candidate cap remains. `limit` pages the results **after** totals
 are computed; it does not make a broad count cheap. Check `complete` before
 using `search` totals; incomplete totals are lower bounds. Inverted counts
@@ -129,7 +132,7 @@ without emitting a fabricated `0` or running a pipeline over partial data.
 Single regex evaluations and in-memory pipeline stages cannot be interrupted
 mid-operation, but exhaustion is checked before results are returned.
 
-The read-only `query` tool keeps its separate 5-second SQL timeout and does
+The read-only `query` tool keeps its separate 10-second SQL timeout and does
 not rewrite arbitrary SQL. For a scoped code count, keep the text predicate
 outside a file-first scan so PostgreSQL cannot move it into a global trigram
 bitmap scan. A file version's lines are its lineage's instances alive at the

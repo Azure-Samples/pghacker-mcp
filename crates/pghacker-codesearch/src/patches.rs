@@ -57,7 +57,7 @@ pub struct SearchPatchesArgs {
     /// The most threads, newest first. Default 20, at most 100.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// Time budget in milliseconds. Default 10000.
+    /// Time budget in milliseconds. Default 10000, at most 15000.
     #[serde(default)]
     pub budget_ms: Option<u32>,
 }
@@ -157,11 +157,23 @@ pub async fn search_patches(
     history: Option<&str>,
     args: &SearchPatchesArgs,
 ) -> Result<SearchPatchesResult> {
+    let budget = Budget::new(args.budget_ms);
+    let old = crate::engine::set_timeout(client, budget.remaining_ms()).await?;
+    let result = search_patches_inner(client, history, args, &budget).await;
+    crate::engine::restore_timeout(client, &old).await;
+    result
+}
+
+async fn search_patches_inner(
+    client: &impl GenericClient,
+    history: Option<&str>,
+    args: &SearchPatchesArgs,
+    budget: &Budget,
+) -> Result<SearchPatchesResult> {
     let query = args.query.trim();
     if query.is_empty() {
         bail!("give a query");
     }
-    let budget = Budget::new(args.budget_ms);
     let limit = args.limit.unwrap_or(DEFAULT_THREADS).clamp(1, MAX_THREADS) as usize;
     let mut result = SearchPatchesResult {
         threads: Vec::new(),
