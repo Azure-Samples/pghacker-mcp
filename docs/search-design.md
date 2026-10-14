@@ -45,13 +45,13 @@ A trigram GIN index on `line` finds candidates; a btree on (`lineage`, `hi`, `lo
 
 | Tool | Like | What it adds |
 | --- | --- | --- |
-| `search`, `grep`, `read_file`, `list_files` | ripgrep, grep, cat, ls | With the history: any commit and virtual folders; search's `history` argument finds every line a range of commits had, with the commits that added and removed it |
+| `search`, `grep`, `read_file`, `list_files` | ripgrep, grep, cat, ls | Any commit and virtual folders; search's `history` argument finds every line a range of commits had, with the commits that added and removed it |
 | `blame` | `git blame` | Passes through `.git-blame-ignore-revs` (pgindent) by one-for-one links; `reverse` names the commit that removed each line; `proposals` names the earliest posted patch that added each line |
 | `get_commit` | `git show` | Trailers, linked threads and the posted patch the commit matches best, back-patch siblings, first releases, diffstat, diff rendered from the weave |
 | `search_commits` | `git log` | Range, message, author, paths, dates; `-G` and `-S` read from the weave |
 | `search_patches` | grep over the archive's patches | Lines by thread, first and latest version, the commit that landed them |
 
-`blame`, `get_commit` and `search_commits` are listed only once `PGHACKER_CODE_HISTORY` points the code tools at the history (until then the code tools read the snapshots as before); `search_patches` always is, and names landing commits once that flag is set.
+The history is the code tools' only source: `PGHACKER_CODE_HISTORY` only names another schema than `pghacker`, such as a build's before it is installed. Until a history is installed, the code tools have no code to read.
 
 **Commit metadata.** Trailers (`Discussion`, `Author`, `Reviewed-by`, `Backpatch-through`, ...) are parsed, keeping names without email addresses. Commits on different branches form a back-patch group, one per branch, when they share a whitespace-insensitive patch id, or a subject and author within a week and a changed file. Commits link to threads through `Discussion` trailers and messages citing their SHA.
 
@@ -72,5 +72,5 @@ A bulk build takes 6 minutes on 12 cores (2 walking the commits) and 1.6 GB of m
 ## Rollout
 
 1. Build the history in production with a one-off job, start the hourly sync and `patch_lines` backfill, and replay the benchmark on production's data.
-2. If it gives no wrong answers and comparable latency, set `PGHACKER_CODE_HISTORY`; check the 20 test questions. Unsetting it returns the tools to the snapshots.
-3. After a period of use without regressions, retire the snapshot tables and loader.
+2. If it gives no wrong answers and comparable latency, point the code tools at the history; check the test questions.
+3. Retire the snapshot tables and loader: migration `0016_retire_snapshots` drops them, and the graph's files and subsystems come from the history. There is no switching back.

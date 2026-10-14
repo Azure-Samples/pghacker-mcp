@@ -479,7 +479,7 @@ mod tests {
             "SELECT id FROM message_chunks \
              ORDER BY content <@> to_bm25query('planner', 'pghacker.message_chunks_bm25') LIMIT 5",
             "SELECT id FROM message_chunks ORDER BY embedding <=> '[1,2,3]' LIMIT 5",
-            "SELECT path FROM code_files WHERE path % 'jsonpath' OR path ~* 'json'",
+            "SELECT path FROM code_file_versions WHERE path % 'jsonpath' OR path ~* 'json'",
             "SELECT pg_advisory_lock(1)",
             "SELECT 1 + /* nested /* comment */ ; */ 1",
             "-- a comment first\nSELECT 1",

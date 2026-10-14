@@ -29,9 +29,9 @@ flowchart LR
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads) and any branch, tag or commit of PostgreSQL.
     - A list added without months, `follow` included, queues the whole archive.
-    - Every code snapshot is kept. The code tools read a version's latest (its newest commit: the branch head, else its newest release), or the newest release line when no version is given; any other snapshot is readable by release (`18.3`), ref or commit SHA.
+    - A version needs no loading: the code tools read any branch, tag or commit of the [commit history](#commit-history), and `add_source` for one says which commit it names, or starts the history's sync when it has none.
   - `follow` retrieves a list's current month again every hour.
-  - The indexer's job workers have lanes. Worker 0 runs the recurring jobs, worker 1 runs anything, and the rest never take code snapshots, so a batch of snapshots loads one at a time while mail keeps flowing.
+  - The indexer's job workers have lanes: worker 0 runs the recurring jobs, and the others run anything.
   - The crawl scheduler keeps extraction sessions busy as long as threads wait, as fast as Foundry allows: it starts 8, adds one a minute while saturated, halves on a 429, and stops at `crawl_max_sessions`. It runs deduplication as extracts arrive.
   - There are no caps on scope or spend. Every thread of whatever users add gets extracted by `gpt-6-luna`.
 
@@ -155,6 +155,8 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
    Then open `public_url`. GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
 
+10. **The code.** Unless the corpus brought a commit history, build one ([Commit history](#commit-history)): the code tools have no other source.
+
 ## Updates
 
 Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap briefly: the new indexer serves its tools at once, but runs jobs only once the old one has stopped.
@@ -235,42 +237,21 @@ part of this change.
 
 ## Commit history
 
-The code tools can read PostgreSQL's whole commit history instead of the snapshots ([README](../README.md#commit-history), [the search design](../docs/search-design.md)). Turning it on takes three changes, each approved on its own:
-
-1. **An image with migrations `0011_code_history` and `0012_patch_lines`** (Updates). They add the history's tables, empty, and the patch lines. The `patch_lines` job then indexes the mail's patches for `search_patches` in the background, in batches. The code tools still read the snapshots.
-2. **The build.** A one-off execution of the probe job, given 4 vCPU and 8 GiB, runs `scripts/history-build.mjs`:
-
-   ```sh
-   ../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
-   ```
-
-   It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.git` into a bare clone on the job's disk, builds the history into schema `pghacker_history`, and swaps it into `pghacker`. It then rebuilds every file of the branch heads and of 40 random commits and compares them with git. `ok` is true when nothing differed. Running it again rebuilds the history from scratch.
-   - Once a history is installed, the indexer's hourly `code_history_sync` job fetches new commits into its own clone and applies them, whether or not the code tools read the history. The clone is about 850 MB in `PGHACKER_GIT_DIR`, fetched again after a restart.
-3. **The switch.** It waits for the engine benchmark to pass on production's data, as the [search design's rollout](../docs/search-design.md#rollout) requires: no wrong answers, and latency comparable to the snapshots'. Then add `PGHACKER_CODE_HISTORY = "pghacker"` to `app_env` and apply.
-   - The new revision lists `blame`, `get_commit` and `search_commits`.
-   - `search`, `grep`, `read_file` and `list_files` read any commit, and paths below `/branch/<name>/`, `/tag/<name>/` and `/commit/<rev>/`.
-   - The next `resolve_anchors` run resolves mail's file anchors to those paths.
-   - `add_source` for a version loads nothing: the history has it.
-
-   Check `tools/list` (First deployment, step 9) and run the evaluation.
-
-The engine benchmark runs `pghacker-replay`, which the app image doesn't include, so it has an image of its own on the app's (`deploy/bench.Dockerfile`). From the repository root:
+The code tools read PostgreSQL's whole commit history ([README](../README.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed. Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
 
 ```sh
-acr=$(terraform -chdir=deploy/terraform output -raw acr_name)
-az acr build --registry "$acr" --platform linux/amd64 --file deploy/bench.Dockerfile \
-  --image "pghacker-bench:$(git rev-parse --short=12 HEAD)" \
-  --build-arg "APP_IMAGE=$acr.azurecr.io/pghacker-mcp@sha256:<the app's digest>" .
+../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
 ```
 
-A one-off execution of the probe job, given 4 vCPU and 8 GiB, runs `scripts/engine-bench.mjs`. It runs `pghacker-replay engines` as `pgh_reader` at every snapshot, with the history in `pghacker`: 8 calls at once for about half an hour, so watch the endpoint's latency. It logs each difference where both engines completed and each call only the history left incomplete; `ok` is true when there are none.
+It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.git` into a bare clone on the job's disk, builds the history into schema `pghacker_history`, and swaps it into `pghacker`. It then rebuilds every file of the branch heads and of 40 random commits and compares them with git, for the rest of the job's hour. `ok` is true when nothing differed.
+- The code tools read it at once: `search`, `grep`, `read_file`, `list_files` and `blame` read any commit, and paths below `/branch/<name>/`, `/tag/<name>/` and `/commit/<rev>/`; `get_commit` and `search_commits` answer as `git show` and `git log`.
+- The indexer's hourly `code_history_sync` job fetches new commits into its own clone and applies them. The clone is about 850 MB in `PGHACKER_GIT_DIR`, fetched again after a restart.
+- The next `resolve_anchors` run resolves mail's file anchors to the history's paths.
+- `PGHACKER_CODE_HISTORY` in `app_env` names another schema for the code tools to read; unset, `pghacker`.
 
-```sh
-../scripts/run-job.sh bench "$acr.azurecr.io/pghacker-bench@sha256:<digest>" \
-  | jq '{ok, error, wrong, history_only_incomplete, all, by_workload}'
-```
+Check `tools/list` (First deployment, step 9) and run the evaluation.
 
-To switch back, remove `PGHACKER_CODE_HISTORY` and apply. The code tools read the snapshots again, and anchors resolve to them again. The history's tables stay and keep syncing.
+**Retired snapshots.** Until the history, the code tools read source snapshots (15 in production: 48M lines, 5.9 GB). Migration `0016_retire_snapshots` drops their tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and records the graph keys of their files and of the history's, so the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history, without a full sync: a File is `loaded` when the history has its path. It also cancels any `code_snapshot` job still queued. An image without `0016` reads the dropped tables in the graph sync and `ingest_status`, so there is no rolling back past it: fix forward.
 
 ## Production mode in use
 
@@ -309,4 +290,4 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
   - The app has 4 vCPU and 8 GiB of memory; each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
   - HorizonDB has 32 vCores (`horizondb_vcores`).
   - `gpt-6-luna` has the subscription's whole 1M tokens per minute in westus3.
-  - The ephemeral disk holds the commit history's clone (about 850 MB, once a history is installed), git clones only while a snapshot loads, and no mbox files.
+  - The ephemeral disk holds the commit history's clone (about 850 MB, once a history is installed) and no mbox files.

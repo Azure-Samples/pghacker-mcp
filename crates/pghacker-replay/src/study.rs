@@ -5,6 +5,9 @@
 //! study computed them. With GNU grep in Docker, every grep-path command is
 //! also run by GNU grep, so that a difference from ripgrep is classified as
 //! GNU grep's own semantics or as an engine error.
+//!
+//! Each repository's commit is served on branch `main` from a commit history
+//! of its own, in schema `replay_study_<name>`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -14,7 +17,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::{StreamExt, stream};
-use pghacker_code::{RepoSource, SnapshotSpec};
 use pghacker_codesearch::grep::options::Options;
 use pghacker_codesearch::grep::shell::{self, Word};
 use pghacker_codesearch::grep::{self as grep_tool, Limits};
@@ -26,7 +28,7 @@ use tokio_postgres::Client;
 
 use crate::gitstats::{self, StudyStats};
 use crate::rg::{self, RgLines, RgOpts};
-use crate::{Ctx, gnu, percentile, vacuum};
+use crate::{Ctx, gnu, percentile, tree};
 
 /// The study's time, near which its clones were made.
 const STUDY_TIME: &str = "2026-10-09T01:00:00Z";
@@ -695,6 +697,21 @@ struct Repo {
     dirs: HashSet<String>,
 }
 
+/// The history schema a study repository is served in:
+/// `replay_study_<name>` in lower-case letters, digits and underscores, at
+/// most 63 bytes.
+fn schema_of(name: &str) -> String {
+    let mut schema: String = format!("replay_study_{name}")
+        .chars()
+        .map(|c| match c.to_ascii_lowercase() {
+            c @ ('a'..='z' | '0'..='9') => c,
+            _ => '_',
+        })
+        .collect();
+    schema.truncate(63);
+    schema
+}
+
 /// The environment variable that names the clone of the study's repository
 /// `name`: `PGHACKER_REPLAY_` and the name in upper-case letters, digits and
 /// underscores, such as `PGHACKER_REPLAY_SCENARIOS` for `scenarios`.
@@ -710,6 +727,79 @@ fn repo_var(name: &str) -> String {
         })
         .collect();
     format!("PGHACKER_REPLAY_{suffix}")
+}
+
+/// Serves the clone at `dir` at commit `sha` as repository `name`, on
+/// branch `main` of its own history, and writes its files under
+/// `<runtime>/trees`.
+async fn serve_repo(
+    admin_url: &str,
+    reader: &Client,
+    runtime: &Path,
+    name: &str,
+    dir: &Path,
+    sha: &str,
+) -> Result<Repo> {
+    let spec = tree::Spec {
+        repo: name.to_owned(),
+        source: tree::Source::Local(dir.to_owned()),
+        sha: sha.to_owned(),
+        paths: Vec::new(),
+        branch: "main".into(),
+        schema: schema_of(name),
+    };
+    let started = Instant::now();
+    let served = tree::serve(admin_url, reader, runtime, &spec).await?;
+    println!(
+        "{name}: {} history in {}: {} files, {} text, {} binary, {} lines in {:.1}s",
+        if served.built { "built" } else { "reused" },
+        spec.schema,
+        served.files,
+        served.text_files,
+        served.binary_files,
+        served.lines,
+        started.elapsed().as_secs_f64()
+    );
+    let tree = runtime.join("trees").join(format!("{name}-{}", &sha[..12]));
+    let started = Instant::now();
+    let (git_dir, commit, t) = (
+        served.git_dir.clone(),
+        served.snapshot.sha.clone(),
+        tree.clone(),
+    );
+    let written =
+        tokio::task::spawn_blocking(move || crate::tree::materialize(&git_dir, &commit, &t))
+            .await??;
+    println!(
+        "{name}: materialized {written} files in {:.1}s",
+        started.elapsed().as_secs_f64()
+    );
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-tree", "-r", "-z", "--name-only", sha])
+        .output()?;
+    let tracked: HashSet<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    let mut dirs = HashSet::new();
+    for t in &tracked {
+        let mut end = 0;
+        while let Some(k) = t[end..].find('/') {
+            end += k;
+            dirs.insert(t[..end].to_owned());
+            end += 1;
+        }
+    }
+    Ok(Repo {
+        snapshot: served.snapshot,
+        tree,
+        tracked,
+        dirs,
+    })
 }
 
 /// Serves each repository that the study loaded (load.json's statistics),
@@ -732,7 +822,8 @@ async fn load_repos(ctx: &Ctx, study_dir: &Path) -> Result<HashMap<String, Arc<R
             })?;
         dirs.push((name, dir));
     }
-    let mut indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
+    let admin_url = ctx.admin_url()?;
+    let reader = db::connect(&ctx.reader_url()?, "pghacker-replay").await?;
     let mut repos = HashMap::new();
     for (name, dir) in dirs {
         let want = load.stats[name];
@@ -747,80 +838,9 @@ async fn load_repos(ctx: &Ctx, study_dir: &Path) -> Result<HashMap<String, Arc<R
             want.lines,
             started.elapsed().as_secs_f64()
         );
-        let spec = SnapshotSpec {
-            repo: name.to_owned(),
-            git_ref: "main".into(),
-            sha: sha.clone(),
-            version: None,
-            paths: Vec::new(),
-            source: RepoSource::Local { path: dir.clone() },
-            source_id: None,
-        };
-        let started = Instant::now();
-        let mut stats = pghacker_code::load_snapshot(&mut indexer, &spec).await?;
-        crate::count_reused(&indexer, &mut stats).await?;
-        println!(
-            "{name}: {} snapshot {}: {} files, {} text, {} binary, {} lines in {:.1}s",
-            if stats.reused { "reused" } else { "loaded" },
-            stats.snapshot_id,
-            stats.files,
-            stats.text_files,
-            stats.binary_files,
-            stats.lines,
-            started.elapsed().as_secs_f64()
-        );
-        let tree = ctx
-            .runtime
-            .join("trees")
-            .join(format!("{name}-{}", &sha[..12]));
-        let started = Instant::now();
-        let (s, t) = (spec.clone(), tree.clone());
-        let written =
-            tokio::task::spawn_blocking(move || pghacker_code::materialize(&s, &t)).await??;
-        println!(
-            "{name}: materialized {written} files in {:.1}s",
-            started.elapsed().as_secs_f64()
-        );
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["ls-tree", "-r", "-z", "--name-only", &sha])
-            .output()?;
-        let tracked: HashSet<String> = out
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect();
-        let mut dirs = HashSet::new();
-        for t in &tracked {
-            let mut end = 0;
-            while let Some(k) = t[end..].find('/') {
-                end += k;
-                dirs.insert(t[..end].to_owned());
-                end += 1;
-            }
-        }
-        repos.insert(
-            name.to_owned(),
-            Arc::new(Repo {
-                snapshot: Snapshot {
-                    id: stats.snapshot_id,
-                    repo: name.to_owned(),
-                    version: None,
-                    git_ref: "main".into(),
-                    sha,
-                    history: None,
-                },
-                tree,
-                tracked,
-                dirs,
-            }),
-        );
+        let repo = serve_repo(&admin_url, &reader, &ctx.runtime, name, &dir, &sha).await?;
+        repos.insert(name.to_owned(), Arc::new(repo));
     }
-    let started = Instant::now();
-    vacuum(ctx).await?;
-    println!("vacuumed in {:.1}s", started.elapsed().as_secs_f64());
     Ok(repos)
 }
 
@@ -1228,6 +1248,107 @@ fn summarize(records: &[&Record]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree::fixture;
+    use pghacker_codesearch::snapshot::FileTable;
+    use pghacker_core::testing::TestDb;
+
+    #[test]
+    fn names_a_schema_per_repository() {
+        assert_eq!(schema_of("scenarios"), "replay_study_scenarios");
+        assert_eq!(schema_of("tools"), "replay_study_tools");
+        assert_eq!(schema_of("Some-Org.PG"), "replay_study_some_org_pg");
+        let long = schema_of(&"x".repeat(80));
+        assert_eq!(long.len(), 63);
+        assert!(pghacker_code::history::store::schema_name(&long).is_ok());
+    }
+
+    #[test]
+    fn names_a_variable_per_repository() {
+        assert_eq!(repo_var("scenarios"), "PGHACKER_REPLAY_SCENARIOS");
+        assert_eq!(repo_var("Some-Org.pg2"), "PGHACKER_REPLAY_SOME_ORG_PG2");
+    }
+
+    /// A study repository is served as committed, whatever its attributes
+    /// say about checkouts and archives.
+    #[tokio::test]
+    async fn serves_a_repository_as_committed() -> Result<()> {
+        let scratch = fixture::scratch()?;
+        let source = scratch.path().join("source");
+        let sha = fixture::repo(&source)?;
+        let db = TestDb::create().await?;
+        let reader = db.reader().await?;
+        let repo = serve_repo(
+            &db.admin_url,
+            &reader,
+            scratch.path(),
+            "fixture",
+            &source,
+            &sha,
+        )
+        .await?;
+        let snapshot = &repo.snapshot;
+        assert_eq!(snapshot.repo, "fixture");
+        assert_eq!(snapshot.git_ref, "main");
+        assert_eq!(snapshot.version, None);
+        assert_eq!(snapshot.history.schema, "replay_study_fixture");
+
+        // The source commit's very tree, so its very blobs.
+        let tree_of = |dir: &Path, rev: &str| {
+            fixture::text(dir, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])
+        };
+        let served = scratch.path().join("served/replay_study_fixture.git");
+        assert_eq!(tree_of(&served, &snapshot.sha)?, tree_of(&source, &sha)?);
+
+        // grep prints each text file's lines as committed: CRLF kept, LF
+        // not converted, the export-ignore and filtered files there.
+        for path in fixture::TEXT {
+            let out = grep_tool::run(
+                &reader,
+                snapshot,
+                &format!("grep '' {path}"),
+                Limits::default(),
+            )
+            .await?;
+            assert_eq!(out.stdout, fixture::blob(&source, &sha, path)?, "{path}");
+        }
+        let table = FileTable::load(&reader, snapshot).await?;
+        assert_eq!(table.files.len(), 8, "every file but the symlink");
+        let binary: Vec<&str> = table
+            .files
+            .iter()
+            .filter(|f| f.is_binary)
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(binary, ["src/data.bin", "src/latin1.txt"]);
+
+        // ripgrep's and GNU grep's tree: the text files, byte for byte.
+        let tree = scratch.path().join(format!("trees/fixture-{}", &sha[..12]));
+        assert_eq!(repo.tree, tree);
+        for (path, _, content) in fixture::FILES {
+            let written = std::fs::read(tree.join(path)).ok();
+            let text = fixture::TEXT.contains(&path).then_some(content);
+            assert_eq!(written.as_deref(), text, "{path}");
+        }
+        assert_eq!(repo.tracked.len(), fixture::FILES.len());
+        assert!(repo.tracked.contains("src/link.c"));
+        assert_eq!(
+            repo.dirs,
+            HashSet::from(["src".to_owned(), "docs".to_owned()])
+        );
+
+        // Served again, the history is reused as built.
+        let again = serve_repo(
+            &db.admin_url,
+            &reader,
+            scratch.path(),
+            "fixture",
+            &source,
+            &sha,
+        )
+        .await?;
+        assert_eq!(again.snapshot, repo.snapshot);
+        Ok(())
+    }
 
     #[test]
     fn study_rewrites_basic_regexes() {

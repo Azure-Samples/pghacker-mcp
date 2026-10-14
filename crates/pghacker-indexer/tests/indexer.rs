@@ -59,51 +59,75 @@ fn args<T: serde::de::DeserializeOwned>(value: Value) -> T {
 }
 
 #[tokio::test]
-async fn code_snapshots_keep_to_one_lane() {
+async fn workers_keep_their_lanes_and_leave_retired_kinds_alone() {
     let db = TestDb::create().await.unwrap();
     let client = db.indexer().await.unwrap();
-    let payload = json!({});
-    for (kind, key, priority) in [
-        (jobs::kind::CODE_SNAPSHOT, "postgres/a", 3),
-        (jobs::kind::CODE_SNAPSHOT, "postgres/b", 3),
-        (jobs::kind::MBOX_MONTH, "pgsql-hackers/2026-10", 1),
-    ] {
-        assert!(
-            jobs::enqueue(&client, None, kind, key, &payload, priority)
-                .await
-                .unwrap()
-        );
-    }
-    // Snapshots outrank mail, but only worker 1 takes them.
-    let (kinds, except) = jobs::lane(2, 5);
-    let mail = jobs::claim(&client, "w2", kinds, except)
+    // A database keeps the finished jobs of the retired code_snapshot kind.
+    client
+        .batch_execute(
+            "INSERT INTO jobs (kind, key, state) VALUES
+                 ('code_snapshot', 'postgres/a', 'done'), ('code_snapshot', 'postgres/b', 'failed'),
+                 ('code_snapshot', 'postgres/c', 'cancelled')",
+        )
+        .await
+        .unwrap();
+    assert!(
+        jobs::enqueue(
+            &client,
+            None,
+            jobs::kind::MBOX_MONTH,
+            "pgsql-hackers/2026-10",
+            &json!({}),
+            1
+        )
+        .await
+        .unwrap()
+    );
+    // Worker 0 runs only the recurring jobs; the others run anything.
+    let recurring = jobs::lane(0, 5).unwrap();
+    assert!(recurring.contains(&jobs::kind::MAIL_REFRESH));
+    assert!(recurring.contains(&jobs::kind::CODE_HISTORY_SYNC));
+    assert!(
+        jobs::claim(&client, "w0", Some(recurring))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mail = jobs::claim(&client, "w1", jobs::lane(1, 5))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(mail.kind, jobs::kind::MBOX_MONTH);
     assert!(
-        jobs::claim(&client, "w3", kinds, except)
+        jobs::claim(&client, "w2", jobs::lane(2, 5))
             .await
             .unwrap()
             .is_none()
     );
-    let (kinds, except) = jobs::lane(1, 5);
-    let code = jobs::claim(&client, "w1", kinds, except)
+    // Fewer workers than lanes: whatever is left runs anything.
+    assert_eq!(jobs::lane(0, 1), None);
+    assert_eq!(jobs::lane(1, 2), None);
+
+    // Neither a restart nor the recurring jobs bring the retired ones back.
+    assert_eq!(jobs::requeue_orphans(&client).await.unwrap(), 1);
+    jobs::ensure_recurring(&client).await.unwrap();
+    let mut claimed = 0;
+    while let Some(job) = jobs::claim(&client, "w1", None).await.unwrap() {
+        assert_ne!(job.kind, "code_snapshot");
+        claimed += 1;
+    }
+    assert_eq!(claimed, 1 + jobs::RECURRING.len());
+    let retired: Vec<String> = client
+        .query(
+            "SELECT state FROM jobs WHERE kind = 'code_snapshot' ORDER BY key",
+            &[],
+        )
         .await
         .unwrap()
-        .unwrap();
-    assert_eq!(code.kind, jobs::kind::CODE_SNAPSHOT);
-
-    assert!(
-        jobs::lane(0, 5)
-            .0
-            .unwrap()
-            .contains(&jobs::kind::MAIL_REFRESH)
-    );
-    assert!(jobs::lane(4, 5).1.contains(&jobs::kind::CODE_SNAPSHOT));
-    // Fewer workers than lanes: whatever is left runs anything.
-    assert_eq!(jobs::lane(0, 1), (None, &[] as &[&str]));
-    assert_eq!(jobs::lane(1, 2), (None, &[] as &[&str]));
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(retired, ["done", "failed", "cancelled"]);
 }
 
 #[tokio::test]
@@ -127,21 +151,13 @@ async fn jobs_are_idempotent_claimed_once_and_retried() {
             .unwrap()
     );
     let other = db.indexer().await.unwrap();
-    let first = jobs::claim(&client, "n1", None, &[])
-        .await
-        .unwrap()
-        .unwrap();
-    let second = jobs::claim(&other, "n2", None, &[]).await.unwrap().unwrap();
+    let first = jobs::claim(&client, "n1", None).await.unwrap().unwrap();
+    let second = jobs::claim(&other, "n2", None).await.unwrap().unwrap();
     assert_eq!(first.key, "b", "higher priority first");
     assert_eq!(second.key, "a");
+    assert!(jobs::claim(&client, "n1", None).await.unwrap().is_none());
     assert!(
-        jobs::claim(&client, "n1", None, &[])
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        jobs::claim(&client, "n1", Some(&["other"]), &[])
+        jobs::claim(&client, "n1", Some(&["other"]))
             .await
             .unwrap()
             .is_none()
@@ -196,20 +212,41 @@ async fn sources_queue_the_test_slices() {
         refused.to_string().contains("PGHACKER_SOURCES=open"),
         "{refused}"
     );
+    // A version comes from the commit history in this mode too, and loads
+    // nothing: there's none to read here.
     let code = sources::add_source(
         &indexer,
         args(json!({ "kind": "postgres_version", "name": "19" })),
     )
     .await
-    .unwrap();
-    assert_eq!(
-        code["queued"][0],
-        format!("postgres/{}", indexer.slices.code.sha)
+    .unwrap_err();
+    assert!(
+        format!("{code:#}").contains("no commit history installed"),
+        "{code:#}"
     );
     let removed = sources::remove_source(&indexer, args(list)).await.unwrap();
     assert_eq!(removed["jobs_cancelled"].as_u64().unwrap() as usize, queued);
     let listed = sources::list_sources(&indexer).await.unwrap();
-    assert_eq!(listed["sources"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["available"]["mode"], "test-slices");
+    assert!(
+        listed["available"]["postgres_versions"]
+            .as_str()
+            .unwrap()
+            .contains("commit history")
+    );
+    let jobs: i64 = db
+        .indexer()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FROM jobs WHERE kind NOT IN ('mbox_month', 'seed_thread')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(jobs, 0, "nothing queued for the version");
 }
 
 async fn graph_counts(client: &tokio_postgres::Client) -> (i64, i64) {
@@ -221,6 +258,15 @@ async fn graph_counts(client: &tokio_postgres::Client) -> (i64, i64) {
         .await
         .unwrap();
     (row.get(0), row.get(1))
+}
+
+/// A vertex's properties, if the graph has it.
+async fn vertex(client: &tokio_postgres::Client, key: &str) -> Option<Value> {
+    client
+        .query_opt("SELECT props FROM graph_nodes WHERE key = $1", &[&key])
+        .await
+        .unwrap()
+        .map(|row| row.get(0))
 }
 
 async fn cypher_count(client: &tokio_postgres::Client, pattern: &str) -> i64 {
@@ -1039,26 +1085,21 @@ async fn open_sources_take_months_ranges_follows_and_commits() {
         .get(0);
     assert_eq!(refresh["refresh"], true);
 
+    // Any version comes from the commit history, which isn't installed here.
     let sha = "0123456789abcdef0123456789abcdef01234567";
-    let code = json!({
-        "kind": "postgres_version", "name": "18", "branch": "REL_18_STABLE", "sha": sha,
-        "paths": ["src/backend/parser"],
-    });
-    let added = sources::add_source(&indexer, args(code)).await.unwrap();
-    assert_eq!(added["queued"], json!([format!("postgres/{sha}")]));
-    assert_eq!(
-        added["source"]["config"]["paths"],
-        json!(["src/backend/parser"])
+    let code =
+        json!({ "kind": "postgres_version", "name": "18", "branch": "REL_18_STABLE", "sha": sha });
+    let error = sources::add_source(&indexer, args(code)).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no commit history installed"),
+        "{error:#}"
     );
-    let bad = json!({ "kind": "postgres_version", "name": "18", "sha": sha, "paths": ["../etc"] });
-    assert!(sources::add_source(&indexer, args(bad)).await.is_err());
-    let foreign = json!({
-        "kind": "postgres_version", "name": "18", "sha": sha,
-        "repo_url": "https://example.org/postgres.git",
-    });
-    assert!(sources::add_source(&indexer, args(foreign)).await.is_err());
+    let bad = json!({ "kind": "postgres_version", "name": "REL_18_STABLE" });
+    let error = sources::add_source(&indexer, args(bad)).await.unwrap_err();
+    assert!(error.to_string().contains("major version"), "{error}");
     let listed = sources::list_sources(&indexer).await.unwrap();
     assert_eq!(listed["available"]["mode"], "open");
+    assert_eq!(listed["sources"].as_array().unwrap().len(), 1);
 
     let status = pghacker_indexer::status::ingest_status(&indexer)
         .await
@@ -1154,12 +1195,50 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     )
     .await
     .unwrap();
+    // The graph's files come from the installed history.
+    let mut client = db.indexer().await.unwrap();
+    let full = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert!(full.full.is_some());
+    assert_eq!(
+        vertex(&client, "file:a.c").await,
+        Some(json!({ "key": "file:a.c", "path": "a.c", "loaded": true }))
+    );
     std::fs::write(src.path().join("a.c"), "int a;\nint c;\nint b;\n").unwrap();
-    git(&["commit", "-q", "-am", "c1"]);
+    std::fs::create_dir_all(src.path().join("src/backend/parser")).unwrap();
+    std::fs::write(src.path().join("src/backend/parser/gram.y"), "%%\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "c1"]);
     git(&["tag", "v1"]);
 
     let synced = pghacker_indexer::history::sync(&indexer).await.unwrap();
     assert_eq!(synced["commits"], 1, "{synced}");
+    // The history has no triggers: the sync recorded its new files for the
+    // graph, which an incremental sync adds.
+    assert!(graph::pending(&client).await.unwrap());
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert!(report.full.is_none());
+    let gram = json!({ "key": "file:src/backend/parser/gram.y", "path": "src/backend/parser/gram.y",
+                       "subsystem": "parser", "loaded": true });
+    assert_eq!(
+        vertex(&client, "file:src/backend/parser/gram.y").await,
+        Some(gram)
+    );
+    let part_of: i64 = client
+        .query_one(
+            "SELECT count(*) FROM graph_edges WHERE label = 'PART_OF'
+             AND start_key = 'file:src/backend/parser/gram.y' AND end_key = 'subsystem:parser'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(part_of, 1);
+    let drift = graph::check(&mut client).await.unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
     assert!(
         indexer
             .settings
@@ -1168,12 +1247,13 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
             .join("HEAD")
             .exists()
     );
-    let client = db.indexer().await.unwrap();
     let lines: Vec<String> = client
         .query(
             "SELECT l.line FROM code_line_instances l, code_commits c, code_refs r \
              WHERE r.name = 'v1' AND c.addr = r.addr AND l.lo <= c.addr AND l.hi > c.addr \
-               AND (l.alive IS NULL OR l.alive @> c.addr) ORDER BY l.weave",
+               AND (l.alive IS NULL OR l.alive @> c.addr) \
+               AND l.lineage = (SELECT lineage FROM code_file_versions WHERE path = 'a.c' LIMIT 1) \
+             ORDER BY l.weave",
             &[],
         )
         .await
@@ -1184,6 +1264,46 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     assert_eq!(lines, vec!["int a;", "int c;", "int b;"]);
     let again = pghacker_indexer::history::sync(&indexer).await.unwrap();
     assert_eq!(again["commits"], 0);
+    assert!(!graph::pending(&client).await.unwrap());
+
+    // add_source finds a version in the history, whatever the mode, and
+    // loads nothing.
+    let added = sources::add_source(
+        &indexer,
+        args(json!({ "kind": "postgres_version", "name": "master" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (&added["covered"], &added["revision"], &added["jobs_queued"]),
+        (&json!(true), &json!("master"), &json!(0)),
+        "{added}"
+    );
+    let v1: String = client
+        .query_one(
+            "SELECT c.sha FROM code_refs r JOIN code_commits c ON c.addr = r.addr WHERE r.name = 'v1'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let tagged = sources::add_source(
+        &indexer,
+        args(json!({ "kind": "postgres_version", "name": "1", "branch": "v1" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (&tagged["covered"], &tagged["sha"]),
+        (&json!(true), &json!(v1))
+    );
+    let missing = sources::add_source(
+        &indexer,
+        args(json!({ "kind": "postgres_version", "name": "1", "sha": "f".repeat(40) })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(missing["covered"], false, "{missing}");
 
     let status = pghacker_indexer::status::ingest_status(&indexer)
         .await

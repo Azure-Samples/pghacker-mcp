@@ -1,52 +1,25 @@
-//! The history engine against the snapshot engine: snapshots loaded from a
-//! generated repository, and the same repository's history, must give the
-//! same output for every tool call at every loaded commit.
+//! The code tools over the commit history of generated repositories: line
+//! reads, revisions, virtual folders that mount other commits, history
+//! search, blame, get_commit, search_commits and search_patches, checked
+//! against git where git can tell.
 
 mod common;
 
 use std::path::Path;
-use std::process::Command;
 
+use common::git;
 use pghacker_code::history::{BuildOptions, build};
-use pghacker_code::{RepoSource, SnapshotSpec, load_snapshot};
-use pghacker_codesearch::engine::{Budget, LineQuery, MAX_CANDIDATES, candidates};
 use pghacker_codesearch::grep::{Limits, run};
-use pghacker_codesearch::history::attach;
 use pghacker_codesearch::{
-    ListFilesArgs, ReadFileArgs, SearchArgs, Snapshot, list_files, read_file, resolve_snapshot,
-    search,
+    ListFilesArgs, ReadFileArgs, SearchArgs, Snapshot, list_files, read_file, search,
 };
 use pghacker_core::testing::TestDb;
 use serde_json::{Value, json};
-use tokio_postgres::Client;
 
 const SCHEMA: &str = "pghacker_history";
 
-fn git(dir: &Path, tick: u32, args: &[&str]) -> String {
-    let date = format!("{} +0000", 1_767_225_600 + tick * 60);
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.org")
-        .env("GIT_COMMITTER_NAME", "Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.org")
-        .env("GIT_AUTHOR_DATE", &date)
-        .env("GIT_COMMITTER_DATE", &date)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("HOME", dir)
-        .output()
-        .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-/// Commits of the snapshot fixture's files, edited, renamed and
-/// back-patched; returns (version, ref, sha) for three commits.
+/// Commits of the fixture's files, edited, renamed and back-patched;
+/// returns (version, ref, sha) for three commits.
 fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {
     let write = |path: &str, data: &str| {
         let path = dir.join(path);
@@ -54,16 +27,8 @@ fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {
         std::fs::write(path, data).unwrap();
     };
     git(dir, 0, &["init", "-q", "-b", "master"]);
-    for (path, content) in common::files() {
-        match content {
-            Some(text) => write(path, text),
-            None => {
-                std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
-                std::fs::write(dir.join(path), b"\x00\x01binary").unwrap();
-            }
-        }
-    }
-    write("doc/README", "outside the loaded paths\n");
+    common::write_files(dir, &common::files());
+    write("doc/README", "outside the kept paths\n");
     // Text that isn't UTF-8: binary to the tools, though the history keeps
     // its lines.
     std::fs::write(
@@ -131,56 +96,65 @@ fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {
     ]
 }
 
-fn without_timing(mut v: Value) -> Value {
-    if let Some(o) = v.as_object_mut() {
-        o.remove("elapsed_ms");
-    }
-    v
+/// The candidate lines a line query reads at the history's commit, as
+/// (file id, line number, text), and whether it hit the cap.
+async fn read_lines(
+    client: &tokio_postgres::Client,
+    h: &pghacker_codesearch::history::History,
+    file_ids: Option<&[i32]>,
+    mounted: bool,
+    filter: &pghacker_codesearch::pattern::Filter,
+    cap: usize,
+    scope_first: bool,
+) -> (Vec<(i32, i32, String)>, bool) {
+    use pghacker_codesearch::engine::{Budget, LineQuery, candidates};
+    let q = LineQuery {
+        history: h,
+        mounted,
+        file_ids,
+        require: vec![filter],
+        reject: vec![],
+        cap,
+        scope_first,
+    };
+    let c = candidates(client, &q, &Budget::new(None)).await.unwrap();
+    assert!(!c.timed_out);
+    let rows = c
+        .rows
+        .into_iter()
+        .map(|r| (r.file_id, r.line_no, r.line))
+        .collect();
+    (rows, c.capped)
 }
 
-async fn same_grep(client: &Client, snap: &Snapshot, hist: &Snapshot, command: &str) {
-    let a = run(client, snap, command, Limits::default()).await;
-    let b = run(client, hist, command, Limits::default()).await;
-    match (a, b) {
-        (Ok(a), Ok(b)) => {
-            assert_eq!(
-                (String::from_utf8_lossy(&a.stdout), &a.stderr, a.status),
-                (String::from_utf8_lossy(&b.stdout), &b.stderr, b.status),
-                "{} {command}",
-                snap.git_ref
-            );
-            assert!(!a.stdout.is_empty() || a.status != 0 || command.contains("-c"));
-        }
-        (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{command}"),
-        (a, b) => panic!(
-            "{command}: snapshots {:?}, history {:?}",
-            a.map(|o| o.status),
-            b.map(|o| o.status)
-        ),
+/// A file's lines at a commit, as git has them.
+fn git_lines(dir: &Path, sha: &str, path: &str) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["show", &format!("{sha}:{path}")])
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .output()
+        .expect("git runs");
+    assert!(output.status.success(), "git show {sha}:{path}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    if text.is_empty() || text.ends_with('\n') {
+        lines.pop();
     }
-}
-
-async fn same_search(client: &Client, snap: &Snapshot, hist: &Snapshot, args: Value) {
-    let parsed: SearchArgs = serde_json::from_value(args.clone()).unwrap();
-    let a = search(client, snap, &parsed)
-        .await
-        .map(|r| without_timing(json!(r)));
-    let b = search(client, hist, &parsed)
-        .await
-        .map(|r| without_timing(json!(r)));
-    match (a, b) {
-        (Ok(a), Ok(b)) => assert_eq!(a, b, "{} {args}", snap.git_ref),
-        (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{args}"),
-        (a, b) => panic!("{args}: snapshots {a:?}, history {b:?}"),
-    }
+    lines
 }
 
 #[tokio::test]
-async fn history_and_snapshots_answer_alike() {
+async fn candidate_reads_agree_at_every_commit() {
+    use pghacker_codesearch::engine::MAX_CANDIDATES;
+    use pghacker_codesearch::pattern::{Compiled, Dialect, PatternSpec, Semantics, compile};
+    use pghacker_codesearch::rev::resolve;
+    use pghacker_codesearch::snapshot::{FileTable, tree_cmp};
+
     let dir = tempfile::tempdir().unwrap();
     let commits = repository(dir.path());
     let db = TestDb::create().await.unwrap();
-    let paths = vec!["src".to_owned(), "contrib".to_owned()];
     build(
         &db.admin_url,
         &BuildOptions {
@@ -188,197 +162,72 @@ async fn history_and_snapshots_answer_alike() {
             master: "master".into(),
             url: None,
             schema: SCHEMA.into(),
-            paths: paths.clone(),
+            paths: vec!["src".into(), "contrib".into()],
             install: false,
         },
     )
     .await
     .unwrap();
-    let mut indexer = db.indexer().await.unwrap();
-    for (version, git_ref, sha) in &commits {
-        load_snapshot(
-            &mut indexer,
-            &SnapshotSpec {
-                repo: "postgres".into(),
-                git_ref: (*git_ref).into(),
-                sha: sha.clone(),
-                version: Some((*version).into()),
-                paths: paths.clone(),
-                source: RepoSource::Local {
-                    path: dir.path().to_owned(),
-                },
-                source_id: None,
-            },
-        )
+    let reader = db.reader().await.unwrap();
+    let fixed = |text: &str| -> Compiled {
+        compile(&PatternSpec {
+            patterns: &[text.to_owned()],
+            dialect: Dialect::Fixed,
+            ignore_case: false,
+            word: false,
+            line: false,
+            semantics: Semantics::LeftmostFirst,
+        })
+        .unwrap()
+    };
+    let (json, make_node) = (fixed("json"), fixed("makeNode"));
+    // Callers leave binary files out of the scopes they read, and list
+    // them in tree order.
+    let text_ids = |table: &FileTable| -> Vec<i32> {
+        table.files[..table.own]
+            .iter()
+            .filter(|f| !f.is_binary)
+            .map(|f| f.id)
+            .collect()
+    };
+    let old = resolve(&reader, SCHEMA, "postgres", Some("REL_17_0"))
         .await
         .unwrap();
-    }
-    let reader = db.reader().await.unwrap();
-    let greps = [
-        "grep -rn makeNode .",
-        "grep -rn makeNode",
-        "grep -rc json src",
-        "grep -rl -i json .",
-        "grep -rL json src",
-        "grep -n -C2 makeNode src/backend/parser/gram.y",
-        "grep -rn -A1 -B2 json_ src/backend",
-        "grep -rnb Datum src contrib",
-        "grep -n -v T_ src/include/nodes/nodes.h",
-        "grep -rnw json .",
-        "grep -rnx '}' src",
-        "grep -rno 'json_[a-z]*' .",
-        "grep -rn --include=*.c PG_ .",
-        "grep -rnE 'make(Node|_json)' . | head -3",
-        "grep -c '' src/backend/parser/gram.y",
-        "grep -n json src/backend/utils/adt/json.c",
-        "grep -rn Stmt src/backend/parser | sort | uniq -c",
-        "grep -rh T_ src/include | wc -l",
-    ];
-    let searches = [
-        json!({"query": "makeNode"}),
-        json!({"query": "json", "match": "identifier"}),
-        json!({"query": "make json value", "match": "identifier"}),
-        json!({"query": "Datum", "output": "files"}),
-        json!({"query": "T_", "output": "counts", "paths": "src/include"}),
-        json!({"query": "makeNod"}),
-        json!({"query": "jsn_out"}),
-        json!({"query": "json_[a-z]+", "match": "regex", "context": 1}),
-        json!({"query": ["Stmt", "makeNode"], "order": "coverage", "output": "files"}),
-        json!({"query": "return", "also": "json", "not": "cstring"}),
-        json!({"query": "n", "paths": "src/backend/parser", "group_by": "match", "output": "counts"}),
-        json!({"query": "PG_", "include": "*.c", "limit": 2, "offset": 1}),
-        // No match in the files named: alternative spellings and names.
-        json!({"query": "jsn_out", "paths": "src/backend"}),
-        json!({"query": "no_such_name", "paths": ["src/include", "contrib"]}),
-        // Its only near spelling is in a binary file (Latin-1 text).
-        json!({"query": "json_latin2"}),
-    ];
-    for (version, _, _) in &commits {
-        let snap = resolve_snapshot(&reader, "postgres", Some(version))
+    let old_ids = text_ids(&FileTable::load(&reader, &old).await.unwrap());
+    for (version, _, sha) in &commits {
+        let s = resolve(&reader, SCHEMA, "postgres", Some(sha))
             .await
             .unwrap();
-        assert!(snap.history.is_none());
-        let hist = attach(&reader, snap.clone(), SCHEMA).await.unwrap();
-        for command in greps {
-            same_grep(&reader, &snap, &hist, command).await;
-        }
-        for args in &searches {
-            same_search(&reader, &snap, &hist, args.clone()).await;
-        }
-        for args in [
-            json!({}),
-            json!({"path": "src", "depth": 3}),
-            json!({"glob": "*.c"}),
-            json!({"path": "contrib/pg_trgm"}),
-        ] {
-            let parsed: ListFilesArgs = serde_json::from_value(args.clone()).unwrap();
-            let a = list_files(&reader, &snap, &parsed).await.unwrap();
-            let b = list_files(&reader, &hist, &parsed).await.unwrap();
-            assert_eq!(json!(a), json!(b), "{version} {args}");
-        }
-        for (path, start, end) in [
-            ("src/backend/parser/gram.y", None, None),
-            ("src/include/nodes/nodes.h", Some(3), Some(9)),
-            ("src/backend/utils/adt/json.c", Some(2), None),
-            ("src/backend/utils/adt/jsonfuncs.c", None, Some(4)),
-            ("contrib/pg_trgm/data/trgm.data", None, None),
-        ] {
-            let args = ReadFileArgs {
-                path: path.into(),
-                start_line: start,
-                end_line: end,
-                version: None,
-            };
-            let a = read_file(&reader, &snap, &args).await.map(|r| json!(r));
-            let b = read_file(&reader, &hist, &args).await.map(|r| json!(r));
-            match (a, b) {
-                (Ok(a), Ok(b)) => assert_eq!(a, b, "{version} {path}"),
-                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{path}"),
-                (a, b) => panic!("{version} {path}: {a:?} vs {b:?}"),
-            }
-        }
-
-        // Both ways of reading candidates find the same lines.
-        let compiled =
-            pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
-                patterns: &["json".into()],
-                dialect: pghacker_codesearch::pattern::Dialect::Fixed,
-                ignore_case: false,
-                word: false,
-                line: false,
-                semantics: pghacker_codesearch::pattern::Semantics::LeftmostFirst,
-            })
-            .unwrap();
-        let mut found = Vec::new();
-        for scope_first in [true, false] {
-            let q = LineQuery {
-                snapshot_id: hist.id,
-                history: hist.history.as_ref(),
-                mounted: false,
-                file_ids: None,
-                require: vec![&compiled.filter],
-                reject: vec![],
-                cap: MAX_CANDIDATES,
-                scope_first,
-            };
-            let mut rows: Vec<(i32, i32, String)> = candidates(&reader, &q, &Budget::new(None))
-                .await
-                .unwrap()
-                .rows
-                .into_iter()
-                .map(|r| (r.file_id, r.line_no, r.line))
-                .collect();
-            rows.sort();
-            assert!(!rows.is_empty());
-            found.push(rows);
-        }
-        assert_eq!(found[0], found[1], "{version}");
-
-        // So do trigram reads of a scope: one commit's files, or files that
-        // mount another commit's.
-        let own = |s: Snapshot| {
-            let reader = &reader;
-            async move {
-                let table = pghacker_codesearch::snapshot::FileTable::load(reader, &s)
-                    .await
-                    .unwrap();
-                // Callers leave binary files out of the scopes they read.
-                let ids: Vec<i32> = table.files[..table.own]
-                    .iter()
-                    .filter(|f| !f.is_binary)
-                    .map(|f| f.id)
-                    .collect();
-                ids
-            }
+        let h = &s.history;
+        let table = FileTable::load(&reader, &s).await.unwrap();
+        let path_of = |id: i32| -> String {
+            let k = table.files.iter().position(|f| f.id == id).unwrap();
+            table.files[k].path.clone()
         };
-        let half: Vec<i32> = own(hist.clone()).await.into_iter().step_by(2).collect();
-        let old = resolve_snapshot(&reader, "postgres", Some("17"))
-            .await
-            .unwrap();
-        let mut mixed = own(attach(&reader, old, SCHEMA).await.unwrap()).await;
+
+        // Scanning the scope first and reading the trigram index find the
+        // same lines: of the whole commit, of some of its files, or of
+        // files that mount another commit's.
+        let own = text_ids(&table);
+        let half: Vec<i32> = own.iter().copied().step_by(2).collect();
+        let mut mixed = old_ids.clone();
         mixed.extend(&half);
         mixed.sort_unstable();
         mixed.dedup();
-        for (ids, mounted) in [(&half, false), (&mixed, true)] {
+        for (ids, mounted) in [(None, false), (Some(&half), false), (Some(&mixed), true)] {
             let mut found = Vec::new();
             for scope_first in [true, false] {
-                let q = LineQuery {
-                    snapshot_id: hist.id,
-                    history: hist.history.as_ref(),
+                let (mut rows, capped) = read_lines(
+                    &reader,
+                    h,
+                    ids.map(Vec::as_slice),
                     mounted,
-                    file_ids: Some(ids.as_slice()),
-                    require: vec![&compiled.filter],
-                    reject: vec![],
-                    cap: MAX_CANDIDATES,
+                    &json.filter,
+                    MAX_CANDIDATES,
                     scope_first,
-                };
-                let c = candidates(&reader, &q, &Budget::new(None)).await.unwrap();
-                assert!(!c.capped && !c.timed_out);
-                let mut rows: Vec<(i32, i32, String)> = c
-                    .rows
-                    .into_iter()
-                    .map(|r| (r.file_id, r.line_no, r.line))
-                    .collect();
+                )
+                .await;
+                assert!(!capped);
                 rows.sort();
                 assert!(!rows.is_empty(), "{version} mounted {mounted}");
                 found.push(rows);
@@ -386,80 +235,48 @@ async fn history_and_snapshots_answer_alike() {
             assert_eq!(found[0], found[1], "{version} mounted {mounted}");
         }
 
-        // Raw candidates of the whole commit: none from binary files.
-        let make_node =
-            pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
-                patterns: &["makeNode".into()],
-                dialect: pghacker_codesearch::pattern::Dialect::Fixed,
-                ignore_case: false,
-                word: false,
-                line: false,
-                semantics: pghacker_codesearch::pattern::Semantics::LeftmostFirst,
-            })
-            .unwrap();
-        for scope_first in [true, false] {
-            let mut both = Vec::new();
-            for s in [&snap, &hist] {
-                let table = pghacker_codesearch::snapshot::FileTable::load(&reader, s)
-                    .await
-                    .unwrap();
-                let path_of: std::collections::HashMap<i32, String> =
-                    table.files.iter().map(|f| (f.id, f.path.clone())).collect();
-                let q = LineQuery {
-                    snapshot_id: s.id,
-                    history: s.history.as_ref(),
-                    mounted: false,
-                    file_ids: None,
-                    require: vec![&make_node.filter],
-                    reject: vec![],
-                    cap: MAX_CANDIDATES,
-                    scope_first,
-                };
-                let mut rows: Vec<(String, i32)> = candidates(&reader, &q, &Budget::new(None))
-                    .await
-                    .unwrap()
-                    .rows
-                    .iter()
-                    .map(|r| (path_of[&r.file_id].clone(), r.line_no))
-                    .collect();
-                rows.sort();
-                both.push(rows);
+        // The whole commit's lines are git's, none from binary files,
+        // though the history keeps the lines of one that isn't UTF-8.
+        let mut expected = Vec::new();
+        for f in table.files[..table.own].iter().filter(|f| !f.is_binary) {
+            for (k, line) in git_lines(dir.path(), sha, &f.path).iter().enumerate() {
+                if line.contains("makeNode") {
+                    expected.push((f.path.clone(), k as i32 + 1));
+                }
             }
-            assert!(!both[0].is_empty());
-            assert_eq!(both[0], both[1], "{version} scope_first {scope_first}");
+        }
+        expected.sort();
+        assert!(!expected.is_empty());
+        for scope_first in [true, false] {
+            let (rows, _) = read_lines(
+                &reader,
+                h,
+                None,
+                false,
+                &make_node.filter,
+                MAX_CANDIDATES,
+                scope_first,
+            )
+            .await;
+            let mut got: Vec<(String, i32)> = rows.iter().map(|r| (path_of(r.0), r.1)).collect();
+            got.sort();
+            assert_eq!(got, expected, "{version} scope_first {scope_first}");
         }
 
-        // Capped, both engines give the first lines in tree order.
+        // Capped, a read gives the first lines in tree order.
+        let (all, _) =
+            read_lines(&reader, h, None, false, &json.filter, MAX_CANDIDATES, true).await;
+        let mut first: Vec<(String, i32)> = all.iter().map(|r| (path_of(r.0), r.1)).collect();
+        first.sort_by(|a, b| tree_cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
+        first.truncate(7);
         for (scope_first, whole) in [(true, true), (false, true), (true, false), (false, false)] {
-            let mut capped = Vec::new();
-            for s in [&snap, &hist] {
-                let table = pghacker_codesearch::snapshot::FileTable::load(&reader, s)
-                    .await
-                    .unwrap();
-                let ids: Vec<i32> = table.files[..table.own].iter().map(|f| f.id).collect();
-                let path_of: std::collections::HashMap<i32, String> =
-                    table.files.iter().map(|f| (f.id, f.path.clone())).collect();
-                let q = LineQuery {
-                    snapshot_id: s.id,
-                    history: s.history.as_ref(),
-                    mounted: false,
-                    file_ids: (!whole).then_some(ids.as_slice()),
-                    require: vec![&compiled.filter],
-                    reject: vec![],
-                    cap: 7,
-                    scope_first,
-                };
-                let c = candidates(&reader, &q, &Budget::new(None)).await.unwrap();
-                assert!(c.capped);
-                let rows: Vec<(String, i32)> = c
-                    .rows
-                    .iter()
-                    .map(|r| (path_of[&r.file_id].clone(), r.line_no))
-                    .collect();
-                capped.push(rows);
-            }
+            let ids = (!whole).then_some(own.as_slice());
+            let (rows, capped) =
+                read_lines(&reader, h, ids, false, &json.filter, 7, scope_first).await;
+            assert!(capped);
+            let got: Vec<(String, i32)> = rows.iter().map(|r| (path_of(r.0), r.1)).collect();
             assert_eq!(
-                capped[0], capped[1],
+                got, first,
                 "{version} scope_first {scope_first} whole {whole}"
             );
         }
@@ -520,37 +337,38 @@ async fn revisions_resolve_in_the_history() {
     );
     assert!(at(Some("master~9")).await.is_err());
 
-    // A resolved commit reads like the snapshot of it.
-    let mut indexer = db.indexer().await.unwrap();
-    load_snapshot(
-        &mut indexer,
-        &SnapshotSpec {
-            repo: "postgres".into(),
-            git_ref: "REL_17_STABLE".into(),
-            sha: c0.clone(),
-            version: Some("17".into()),
-            paths: vec!["src".into(), "contrib".into()],
-            source: RepoSource::Local {
-                path: dir.path().to_owned(),
-            },
-            source_id: None,
-        },
+    // A resolved commit reads like the same commit by another name, and
+    // has the file as git does.
+    let tagged = at(Some("REL_17_0")).await.unwrap();
+    let back = at(Some("master~2")).await.unwrap();
+    assert_eq!(back.sha, tagged.sha);
+    for command in ["grep -rn json .", "grep -c '' src/backend/parser/gram.y"] {
+        let a = run(&reader, &tagged, command, Limits::default())
+            .await
+            .unwrap();
+        let b = run(&reader, &back, command, Limits::default())
+            .await
+            .unwrap();
+        assert!(!a.stdout.is_empty(), "{command}");
+        assert_eq!(a.stdout, b.stdout, "{command}");
+    }
+    let gram = git(
+        dir.path(),
+        0,
+        &["show", &format!("{c0}:src/backend/parser/gram.y")],
+    );
+    let counted = run(
+        &reader,
+        &back,
+        "grep -c '' src/backend/parser/gram.y",
+        Limits::default(),
     )
     .await
     .unwrap();
-    let snap = resolve_snapshot(&reader, "postgres", Some("17"))
-        .await
-        .unwrap();
-    let hist = at(Some("master~2")).await.unwrap();
-    for command in ["grep -rn json .", "grep -c '' src/backend/parser/gram.y"] {
-        let a = run(&reader, &snap, command, Limits::default())
-            .await
-            .unwrap();
-        let b = run(&reader, &hist, command, Limits::default())
-            .await
-            .unwrap();
-        assert_eq!(a.stdout, b.stdout, "{command}");
-    }
+    assert_eq!(
+        String::from_utf8(counted.stdout).unwrap(),
+        format!("{}\n", gram.lines().count())
+    );
 }
 
 #[tokio::test]
@@ -558,7 +376,6 @@ async fn virtual_folders_mount_other_commits() {
     let dir = tempfile::tempdir().unwrap();
     let commits = repository(dir.path());
     let db = TestDb::create().await.unwrap();
-    let paths = vec!["src".to_owned(), "contrib".to_owned()];
     build(
         &db.admin_url,
         &BuildOptions {
@@ -566,38 +383,25 @@ async fn virtual_folders_mount_other_commits() {
             master: "master".into(),
             url: None,
             schema: SCHEMA.into(),
-            paths: paths.clone(),
+            paths: vec!["src".into(), "contrib".into()],
             install: false,
         },
     )
     .await
     .unwrap();
-    let mut indexer = db.indexer().await.unwrap();
-    for (version, git_ref, sha) in &commits {
-        load_snapshot(
-            &mut indexer,
-            &SnapshotSpec {
-                repo: "postgres".into(),
-                git_ref: (*git_ref).into(),
-                sha: sha.clone(),
-                version: Some((*version).into()),
-                paths: paths.clone(),
-                source: RepoSource::Local {
-                    path: dir.path().to_owned(),
-                },
-                source_id: None,
-            },
-        )
-        .await
-        .unwrap();
-    }
     let reader = db.reader().await.unwrap();
     let snap = |v: &'static str| {
         let reader = &reader;
-        async move { resolve_snapshot(reader, "postgres", Some(v)).await.unwrap() }
+        async move {
+            pghacker_codesearch::rev::resolve(reader, SCHEMA, "postgres", Some(v))
+                .await
+                .unwrap()
+        }
     };
-    let (s19, s18, s17) = (snap("19").await, snap("18").await, snap("17").await);
-    let hist = attach(&reader, s19.clone(), SCHEMA).await.unwrap();
+    // 19 is master, one past the newest release line; 17 is tagged.
+    let (s19, s18, s17) = (snap("19").await, snap("18").await, snap("REL_17_0").await);
+    // Mounts are read from master's head.
+    let hist = s19.clone();
     let out = |s: &Snapshot, command: &str| {
         let (reader, s, command) = (&reader, s.clone(), command.to_owned());
         async move {
@@ -614,7 +418,7 @@ async fn virtual_folders_mount_other_commits() {
             .collect()
     };
 
-    // A mounted branch reads as that branch's snapshot does.
+    // A mounted branch reads as the branch does.
     let (o18, _, _) = out(&s18, "grep -rn json src").await;
     let (o, e, rc) = out(&hist, "grep -rn json /branch/REL_18_STABLE/src").await;
     assert_eq!(
@@ -877,31 +681,6 @@ async fn history_search_finds_lines_across_commits() {
     .await
     .unwrap_err();
     assert!(error.to_string().contains("/history"), "{error}");
-
-    let snap_args: SearchArgs =
-        serde_json::from_value(json!({"query": "x", "history": "all"})).unwrap();
-    let mut indexer = db.indexer().await.unwrap();
-    load_snapshot(
-        &mut indexer,
-        &SnapshotSpec {
-            repo: "postgres".into(),
-            git_ref: "master".into(),
-            sha: c2.clone(),
-            version: Some("19".into()),
-            paths: vec!["src".into()],
-            source: RepoSource::Local {
-                path: dir.path().to_owned(),
-            },
-            source_id: None,
-        },
-    )
-    .await
-    .unwrap();
-    let snap = resolve_snapshot(&reader, "postgres", Some("19"))
-        .await
-        .unwrap();
-    let error = search(&reader, &snap, &snap_args).await.unwrap_err();
-    assert!(error.to_string().contains("history"), "{error}");
 }
 
 /// The commit per line that `git blame` gives, with extra options.

@@ -1,11 +1,12 @@
-//! Code search over the commit history: the code tools read it when
-//! PGHACKER_CODE_HISTORY names a build's schema, the snapshots otherwise.
+//! Code search over the commit history, which the code tools read: the
+//! build in the schema PGHACKER_CODE_HISTORY names, else the history
+//! installed in `pghacker`.
 //!
-//! The same tools read a commit's file versions and line instances instead
-//! of a snapshot's files and lines. A file's id is its version's id. A
-//! version's lines are its lineage's instances alive at the version's birth,
-//! in weave order; their weave keys are cached per version, which gives line
-//! numbers, and every commit where the version is alive shares the list.
+//! The tools read a commit's file versions and line instances. A file's id
+//! is its version's id. A version's lines are its lineage's instances alive
+//! at the version's birth, in weave order; their weave keys are cached per
+//! version, which gives line numbers, and every commit where the version is
+//! alive shares the list.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -15,11 +16,11 @@ use tokio_postgres::GenericClient;
 use tokio_postgres::types::ToSql;
 
 use crate::engine::{Budget, Candidates, LineQuery, Row, is_timeout};
-use crate::snapshot::{FileEntry, Snapshot};
+use crate::snapshot::FileEntry;
 
 pub use pghacker_core::code::HISTORY_ENV;
 
-/// Where a snapshot's commit is in a history build.
+/// Where a commit is in a history build.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct History {
     pub schema: String,
@@ -29,8 +30,9 @@ pub struct History {
     pub build: String,
 }
 
-/// The history schema the flag names, if any.
-pub fn schema_from_env() -> Option<&'static str> {
+/// The schema of the history the code tools read: PGHACKER_CODE_HISTORY's,
+/// else `pghacker`.
+pub fn schema_from_env() -> &'static str {
     pghacker_core::code::history_schema()
 }
 
@@ -45,33 +47,6 @@ pub(crate) fn checked(schema: &str) -> Result<&str> {
         bail!("{schema:?} isn't a history schema name");
     }
     Ok(schema)
-}
-
-/// `snapshot`, read from the history build in `schema` at the same commit.
-pub async fn attach(
-    client: &impl GenericClient,
-    mut snapshot: Snapshot,
-    schema: &str,
-) -> Result<Snapshot> {
-    let s = checked(schema)?;
-    let row = client
-        .query_opt(
-            &format!(
-                "SELECT c.addr, \
-                        current_database()::text || ':' || h.built_at || ':' || h.weave_epoch \
-                 FROM {s}.code_commits c, {s}.code_history h WHERE c.sha = $1"
-            ),
-            &[&snapshot.sha],
-        )
-        .await
-        .with_context(|| format!("cannot read the history in schema {s}"))?
-        .with_context(|| format!("the history in schema {s} has no commit {}", snapshot.sha))?;
-    snapshot.history = Some(History {
-        schema: s.to_owned(),
-        addr: row.get(0),
-        build: row.get(1),
-    });
-    Ok(snapshot)
 }
 
 /// Where a row is alive: sorted, disjoint [lo, hi) spans, as `lo`, `hi`
@@ -122,7 +97,7 @@ pub async fn files(
     let rows = client
         .query(
             &format!(
-                // A binary file has no lines to the tools, as in the snapshots.
+                // A binary file has no lines to the tools.
                 "SELECT v.id, v.path, v.is_binary, \
                         CASE WHEN v.is_binary THEN 0 ELSE v.line_count END, v.size \
                  FROM {s}.code_file_versions v WHERE {}",
@@ -525,10 +500,10 @@ pub async fn candidates(
 /// No cap: the most rows an SQL LIMIT takes.
 const UNCAPPED: usize = i64::MAX as usize - 1;
 
-/// The first `q.cap` candidates by file in tree order, then by line: what
-/// the snapshots' capped query gives, for when the history's unordered
-/// query hit the cap and so returned an arbitrary part of the matches. Reads
-/// the scope's files in growing chunks, in order, until the cap.
+/// The first `q.cap` candidates by file in tree order, then by line, for
+/// when the unordered query hit the cap and so returned an arbitrary part
+/// of the matches: a capped search still gives its first matches. Reads the
+/// scope's files in growing chunks, in order, until the cap.
 async fn in_tree_order(
     client: &impl GenericClient,
     q: &LineQuery<'_>,
@@ -565,7 +540,6 @@ async fn in_tree_order(
     while start < ordered.len() && found.len() <= q.cap {
         let end = (start + chunk).min(ordered.len());
         let sub = LineQuery {
-            snapshot_id: q.snapshot_id,
             history: q.history,
             mounted: q.mounted,
             file_ids: Some(&ordered[start..end]),
@@ -733,8 +707,7 @@ mod tests {
             (true, Some(&ids[..]), true),
         ] {
             let q = LineQuery {
-                snapshot_id: 1,
-                history: Some(&h),
+                history: &h,
                 mounted,
                 file_ids,
                 require: vec![],

@@ -1,11 +1,11 @@
 //! Checks wide loop searches and pipeline counts on the full PG19 tree
-//! against GNU grep, using a temporary database.
+//! against GNU grep, using a temporary database: the tree is served from a
+//! commit history built there.
 
 use anyhow::{Context, Result, ensure};
-use pghacker_code::{RepoSource, SnapshotSpec};
 use pghacker_codesearch::grep::{self, Limits};
 use pghacker_codesearch::search::{GroupBy, MatchMode, OutputMode, Strings};
-use pghacker_codesearch::{SearchArgs, resolve_snapshot, search};
+use pghacker_codesearch::{SearchArgs, search};
 use pghacker_core::config::repo_root;
 use pghacker_core::testing::TestDb;
 use serde_json::json;
@@ -13,29 +13,28 @@ use std::time::Instant;
 
 #[path = "../src/gnu.rs"]
 mod gnu;
+#[allow(dead_code)]
+#[path = "../src/tree.rs"]
+mod tree;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let root = repo_root().context("cannot find the repository root")?;
+    let runtime = root.join(".runtime/replay");
     let db = TestDb::create().await?;
-    let mut indexer = db.indexer().await?;
-    let spec = SnapshotSpec {
-        repo: "postgres".into(),
-        git_ref: "REL_19_STABLE".into(),
-        sha: "2359968b449a0fd53cfc04d4a644ae02370adec6".into(),
-        version: Some("19".into()),
-        paths: vec![],
-        source: RepoSource::Remote {
-            url: "https://github.com/postgres/postgres.git".into(),
-            cache_dir: root.join(".runtime/git"),
-        },
-        source_id: None,
-    };
-    let loaded = pghacker_code::load_snapshot(&mut indexer, &spec).await?;
-    let tree = root.join(".runtime/replay/profile-full/tree");
-    pghacker_code::materialize(&spec, &tree)?;
     let reader = db.reader().await?;
-    let snapshot = resolve_snapshot(&reader, "postgres", Some("19")).await?;
+    let spec = tree::Spec {
+        repo: "postgres".into(),
+        source: tree::Source::Remote("https://github.com/postgres/postgres.git".into()),
+        sha: "2359968b449a0fd53cfc04d4a644ae02370adec6".into(),
+        paths: vec![],
+        branch: "REL_19_STABLE".into(),
+        schema: "replay_pg19_full".into(),
+    };
+    let served = tree::serve(&db.admin_url, &reader, &runtime, &spec).await?;
+    let dir = runtime.join("profile-full/tree");
+    tree::materialize(&served.git_dir, &served.snapshot.sha, &dir)?;
+    let snapshot = served.snapshot;
     let cases = [
         (
             "full_text",
@@ -82,7 +81,7 @@ async fn main() -> Result<()> {
     });
     let native = gnu::run(
         &jobs,
-        &[("full".into(), tree)],
+        &[("full".into(), dir)],
         &root.join(".runtime/replay/profile-full/gnu"),
         1,
         "",
@@ -94,7 +93,7 @@ async fn main() -> Result<()> {
         "GNU grep failed"
     );
     let mut results =
-        vec![json!({ "case": "snapshot", "files": loaded.files, "lines": loaded.lines })];
+        vec![json!({ "case": "history", "files": served.files, "lines": served.lines })];
     for (i, (label, query, match_mode, group_by, _)) in cases.into_iter().enumerate() {
         let args = SearchArgs {
             query,

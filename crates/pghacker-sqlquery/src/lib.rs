@@ -27,7 +27,7 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     database and returns CSV: a header row, up to max_rows rows, and the row count, with a banner \
     above when rows are cut. Tables, in schema pghacker: threads, messages, authors, author_names, \
     patches, patch_texts, anchors, message_chunks, features, decisions, positions, citations, \
-    feature_threads, feature_files, code_snapshots, code_files, code_lines, sources. Emails are not \
+    feature_threads, feature_files, sources, and the commit history's below. Emails are not \
     available. \
     Query the AGE graph pghacker_graph with SELECT * FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
@@ -35,7 +35,7 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement, run read-only with a 5-second \
     timeout. NULL reads as None, an empty string as \"\".";
 
-/// What the description adds when the code tools read the commit history.
+/// The commit history's tables, which pghacker-mcp adds to the description.
 pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_commit_files, \
     code_commit_threads, code_refs, code_lanes, code_lineages, code_file_versions, \
     code_line_instances and code_history; get_ontology shows how to read a commit's files and \
@@ -82,7 +82,7 @@ mod tests {
             "schema pghacker",
             "message_chunks",
             "patch_texts",
-            "code_lines",
+            "feature_files",
             "cypher('pghacker_graph', $$",
             "AS (name agtype, n agtype)",
             "get_ontology",
@@ -94,5 +94,10 @@ mod tests {
         ] {
             assert!(DESCRIPTION.contains(needed), "{needed}");
         }
+        assert!(
+            !DESCRIPTION.contains("code_lines"),
+            "the snapshots are retired"
+        );
+        assert!(HISTORY_NOTE.contains("code_line_instances"));
     }
 }

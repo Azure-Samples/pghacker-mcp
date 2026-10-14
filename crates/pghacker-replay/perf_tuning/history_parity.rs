@@ -1,23 +1,30 @@
-//! Checks pghacker_bench's history build (see `pghacker-replay
-//! bench-prepare`) against git, on random commits and files: get_commit's
-//! diff against git show, file by file; its changed files against git show
-//! --numstat; and blame against git blame, plain and with the head's
-//! .git-blame-ignore-revs, for random files at the production heads.
-//! Changes the history leaves out by design (symlinks, submodules, modes
-//! alone) are counted apart. Prints agreement and the first differences.
+//! Checks a commit history build against git, on random commits and
+//! files: get_commit's diff against git show, file by file; its changed
+//! files against git show --numstat; and blame against git blame, plain and
+//! with the head's .git-blame-ignore-revs, for random files at the branch
+//! heads production reads (those the history has; else all of its
+//! branches). Changes the history leaves out by design (symlinks,
+//! submodules, modes alone) are counted apart. Prints agreement and the
+//! first differences.
 //!
-//! usage: history_parity GIT_DIR [COMMITS] [FILES] [SEED]
+//! The history is read as pgh_reader in schema --schema (default pghacker,
+//! where it is installed) of database --database (default the app's, from
+//! .env); GIT_DIR is the clone it was built from.
+//!
+//! usage: history_parity [--database NAME] [--schema NAME] GIT_DIR [COMMITS]
+//!        [FILES] [SEED]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use clap::Parser;
 use pghacker_codesearch::{BlameArgs, GetCommitArgs, blame, get_commit};
 use pghacker_core::config::{Env, with_database};
 use pghacker_core::db;
 
-const SCHEMA: &str = "pghacker_history";
+/// The branches production reads, newest first.
 const HEADS: [&str; 15] = [
     "master",
     "REL_19_STABLE",
@@ -35,6 +42,28 @@ const HEADS: [&str; 15] = [
     "REL8_4_STABLE",
     "REL7_4_STABLE",
 ];
+
+#[derive(Parser)]
+#[command(about = "Checks a commit history build against git")]
+struct Args {
+    /// The database to read as pgh_reader; default the app's, from .env.
+    #[arg(long)]
+    database: Option<String>,
+    /// The history's schema: a build's, or pghacker once installed.
+    #[arg(long, default_value = "pghacker")]
+    schema: String,
+    /// The clone the history was built from.
+    git_dir: PathBuf,
+    /// Commits to compare with git show.
+    #[arg(default_value_t = 200)]
+    commits: i64,
+    /// Files to compare with git blame.
+    #[arg(default_value_t = 40)]
+    files: usize,
+    /// Picks the commits and files.
+    #[arg(default_value = "1")]
+    seed: String,
+}
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("git")
@@ -100,22 +129,44 @@ fn left_out(git_block: &[String], raw_block: &str) -> Option<&'static str> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let git_dir = Path::new(
-        args.first()
-            .context("usage: history_parity GIT_DIR [COMMITS] [FILES] [SEED]")?,
-    );
-    let n_commits: i64 = args.get(1).map_or(Ok(200), |a| a.parse())?;
-    let n_files: usize = args.get(2).map_or(Ok(40), |a| a.parse())?;
-    let seed: &str = args.get(3).map_or("1", String::as_str);
+    let args = Args::parse();
+    let git_dir = args.git_dir.as_path();
+    let n_commits = args.commits;
+    let n_files = args.files;
+    let seed = args.seed.as_str();
+    let schema = pghacker_code::history::store::readable_schema(&args.schema)?;
     let env = Env::local()?;
-    let url = with_database(&env.reader_database_url()?, "pghacker_bench")?;
+    let mut url = env.reader_database_url()?;
+    if let Some(database) = &args.database {
+        url = with_database(&url, database)?;
+    }
     let client = db::connect(&url, "history-parity").await?;
+    let branches: Vec<String> = client
+        .query(
+            &format!("SELECT name FROM {schema}.code_refs WHERE kind = 'branch' ORDER BY name"),
+            &[],
+        )
+        .await
+        .with_context(|| format!("schema {schema} has no history"))?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    let mut heads: Vec<String> = HEADS
+        .iter()
+        .filter(|h| branches.iter().any(|b| b == *h))
+        .map(|h| (*h).to_owned())
+        .collect();
+    if heads.is_empty() {
+        heads = branches;
+    }
+    if heads.is_empty() {
+        bail!("the history in {schema} has no branches");
+    }
 
     // get_commit and numstat against git show.
     let shas: Vec<String> = client
         .query(
-            &format!("SELECT sha FROM {SCHEMA}.code_commits ORDER BY md5(sha || $1) LIMIT $2"),
+            &format!("SELECT sha FROM {schema}.code_commits ORDER BY md5(sha || $1) LIMIT $2"),
             &[&seed, &n_commits],
         )
         .await?
@@ -129,7 +180,7 @@ async fn main() -> Result<()> {
     for sha in &shas {
         let ours = get_commit(
             &client,
-            SCHEMA,
+            schema,
             "postgres",
             &GetCommitArgs {
                 commit: sha.clone(),
@@ -237,14 +288,14 @@ async fn main() -> Result<()> {
     let mut lines = [0usize; 2];
     let mut agree = [0usize; 2];
     for k in 0..n_files {
-        let head = HEADS[k % HEADS.len()];
+        let head = heads[k % heads.len()].as_str();
         let snapshot =
-            pghacker_codesearch::rev::resolve(&client, SCHEMA, "postgres", Some(head)).await?;
-        let addr = snapshot.history.as_ref().context("no history")?.addr;
+            pghacker_codesearch::rev::resolve(&client, schema, "postgres", Some(head)).await?;
+        let addr = snapshot.history.addr;
         let path: String = client
             .query_one(
                 &format!(
-                    "SELECT v.path FROM {SCHEMA}.code_file_versions v \
+                    "SELECT v.path FROM {schema}.code_file_versions v \
                      WHERE v.lo <= $1 AND v.hi > $1 AND (v.alive IS NULL OR v.alive @> $1) \
                        AND NOT v.is_binary AND v.line_count > 0 \
                      ORDER BY md5(v.path || $2) LIMIT 1"

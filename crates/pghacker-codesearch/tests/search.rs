@@ -1,4 +1,5 @@
-//! The search operation against a synthetic snapshot in a test database.
+//! The search operation against a synthetic commit history in a test
+//! database.
 
 mod common;
 
@@ -24,55 +25,78 @@ async fn resolved(reader: &tokio_postgres::Client, version: Option<&str>) -> Res
 }
 
 #[tokio::test]
-async fn versions_resolve_to_their_latest_snapshot() -> Result<()> {
+async fn versions_resolve_to_their_branch_heads() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let d = dir.path();
+    let tick = std::cell::Cell::new(0);
+    let commit = |message: &str| {
+        tick.set(tick.get() + 1);
+        std::fs::write(d.join("src.c"), format!("{message} {}\n", tick.get())).unwrap();
+        common::git(d, tick.get(), &["add", "-A"]);
+        common::git(d, tick.get(), &["commit", "-q", "-m", message]);
+        common::git(d, tick.get(), &["rev-parse", "HEAD"])
+    };
+    common::git(d, 0, &["init", "-q", "-b", "master"]);
+    // Release lines fork from master, with their releases tagged on them.
+    let mut shas = std::collections::HashMap::new();
+    for (line, releases) in [
+        ("REL9_0_STABLE", vec!["REL9_0_23"]),
+        ("REL9_6_STABLE", vec!["REL9_6_24", ""]),
+        ("REL_18_STABLE", vec!["REL_18_3", "REL_18_6", ""]),
+        ("REL_19_STABLE", vec!["REL_19_0", ""]),
+    ] {
+        commit("master");
+        common::git(d, tick.get(), &["checkout", "-q", "-b", line]);
+        for release in releases {
+            let sha = commit(line);
+            if !release.is_empty() {
+                common::git(d, tick.get(), &["tag", release, &sha]);
+                shas.insert(release, sha);
+            }
+        }
+        common::git(d, tick.get(), &["checkout", "-q", "master"]);
+    }
+    commit("master");
     let db = TestDb::create().await?;
-    // Loaded in another order than committed, as a batch of tags loads.
-    db.indexer()
-        .await?
-        .batch_execute(
-            "INSERT INTO code_snapshots (repo, ref, sha, version, paths, state, loaded_at, committed_at) VALUES
-               ('postgres', 'REL_18_STABLE', '18a0000000', '18', '{}', 'ready', now() - interval '3 hours', '2026-09-01'),
-               ('postgres', 'REL_18_6', '18b0000000', '18', '{}', 'ready', now(), '2026-08-10'),
-               ('postgres', 'REL_18_3', '18c0000000', '18', '{}', 'ready', now() - interval '1 hour', '2026-02-12'),
-               ('postgres', 'REL_19_STABLE', '19a0000000', '19', '{}', 'ready', now() - interval '5 hours', '2026-09-30'),
-               ('postgres', 'REL_19_0', '19b0000000', '19', '{}', 'ready', now() - interval '2 hours', '2026-09-20'),
-               ('postgres', 'master', 'ffa0000000', 'master', '{}', 'ready', now() - interval '4 hours', '2026-10-09'),
-               ('postgres', 'REL9_6_STABLE', '96a0000000', '9', '{}', 'ready', now(), '2021-11-09'),
-               ('postgres', 'REL9_6_24', '96b0000000', '9', '{}', 'ready', now(), '2021-11-08'),
-               ('postgres', 'REL9_0_23', '90a0000000', '9', '{}', 'ready', now(), '2015-10-05')",
-        )
-        .await?;
+    common::install(&db, d, &[]).await?;
     let reader = db.reader().await?;
 
-    // A major version is its latest snapshot: the branch head, whenever it loaded.
+    // A major version is its branch head.
     assert_eq!(resolved(&reader, Some("18")).await?, "REL_18_STABLE");
     assert_eq!(resolved(&reader, Some("PG18")).await?, "REL_18_STABLE");
     assert_eq!(resolved(&reader, Some("9")).await?, "REL9_6_STABLE");
     // No version: the newest numbered release line, not master.
     assert_eq!(resolved(&reader, None).await?, "REL_19_STABLE");
-    // Every other snapshot by release, ref or SHA.
+    // Every other commit by release, ref or SHA.
     assert_eq!(resolved(&reader, Some("18.3")).await?, "REL_18_3");
     assert_eq!(resolved(&reader, Some("REL_18_6")).await?, "REL_18_6");
     assert_eq!(resolved(&reader, Some("rel_19_0")).await?, "REL_19_0");
-    assert_eq!(resolved(&reader, Some("18b0000")).await?, "REL_18_6");
+    // A SHA names its commit on its branch.
+    let by_sha = resolve_snapshot(&reader, "postgres", Some(&shas["REL_18_6"][..7])).await?;
+    assert_eq!(
+        (by_sha.git_ref.as_str(), by_sha.sha.as_str()),
+        ("REL_18_STABLE", shas["REL_18_6"].as_str())
+    );
     assert_eq!(resolved(&reader, Some("master")).await?, "master");
     assert_eq!(resolved(&reader, Some("9.6")).await?, "REL9_6_STABLE");
     assert_eq!(resolved(&reader, Some("9.6.24")).await?, "REL9_6_24");
-    assert_eq!(resolved(&reader, Some("9.0")).await?, "REL9_0_23");
+    assert_eq!(resolved(&reader, Some("9.0")).await?, "REL9_0_STABLE");
 
     let error = resolved(&reader, Some("18.5"))
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("versions: 19, 18, 9, master"), "{error}");
+    assert!(
+        error.contains("REL9_0_STABLE, REL9_6_STABLE, REL_18_STABLE, REL_19_STABLE, master"),
+        "{error}"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn text_and_regex_searches() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    common::load(&indexer, "postgres", "19", &common::files()).await?;
+    common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
     let snapshot = resolve_snapshot(&reader, "postgres", Some("PG19")).await?;
     assert_eq!(snapshot.version.as_deref(), Some("19"));
@@ -132,8 +156,7 @@ async fn text_and_regex_searches() -> Result<()> {
 #[tokio::test]
 async fn scope_filters_and_paging() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let mut args = SearchArgs::new("T_");
@@ -195,8 +218,7 @@ async fn scope_filters_and_paging() -> Result<()> {
 #[tokio::test]
 async fn identifiers_counts_coverage_and_similar_names() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let mut args = SearchArgs::new("make json value");
@@ -253,22 +275,13 @@ async fn identifiers_counts_coverage_and_similar_names() -> Result<()> {
 #[tokio::test]
 async fn literal_searches_use_the_trigram_index() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
     // Enough lines that an index is worth it.
-    indexer
-        .batch_execute(&format!(
-            "INSERT INTO code_files (snapshot_id, path, blob_sha, size, line_count) \
-             VALUES ({}, 'src/backend/filler.c', 'f', 1, 60000);
-             INSERT INTO code_lines (file_id, line_no, line)
-             SELECT currval('code_files_id_seq'), g, 'filler line ' || g || ' of synthetic text'
-             FROM generate_series(1, 60000) g;",
-            snapshot.id
-        ))
-        .await?;
-    // As a loader should: move new GIN entries out of the pending list.
-    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
-    indexer.batch_execute("ANALYZE code_files").await?;
+    let filler: String = (1..=60_000)
+        .map(|g| format!("filler line {g} of synthetic text\n"))
+        .collect();
+    let mut files: Vec<(&str, Option<&str>)> = common::files();
+    files.push(("src/backend/filler.c", Some(&filler)));
+    let snapshot = common::load(&db, "postgres", "19", &files).await?;
     let reader = db.reader().await?;
     let compiled =
         pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
@@ -280,9 +293,15 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
             semantics: pghacker_codesearch::pattern::Semantics::LeftmostFirst,
         })
         .map_err(anyhow::Error::msg)?;
+    let h = &snapshot.history;
+    let mut lineages: Vec<i32> = pghacker_codesearch::history::lineage_map(&reader, h)
+        .await?
+        .keys()
+        .copied()
+        .collect();
+    lineages.sort_unstable();
     let q = pghacker_codesearch::engine::LineQuery {
-        snapshot_id: snapshot.id,
-        history: None,
+        history: h,
         mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
@@ -290,7 +309,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         cap: 1000,
         scope_first: false,
     };
-    let (sql, params) = pghacker_codesearch::engine::line_sql(&q);
+    let (sql, params) = pghacker_codesearch::history::line_sql(&q, h, &lineages)?;
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|p| p.as_ref() as _).collect();
     let plan: serde_json::Value = reader
@@ -298,7 +317,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         .await?
         .get(0);
     let plan = plan.to_string();
-    assert!(plan.contains("code_lines_trgm"), "{plan}");
+    assert!(plan.contains("code_line_instances_trgm"), "{plan}");
     let result = search(&reader, &snapshot, &SearchArgs::new("json_lex_string")).await?;
     assert_eq!(result.total_lines, 1);
     Ok(())
@@ -306,36 +325,33 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
 
 #[tokio::test]
 async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
-    use pghacker_codesearch::engine::{Budget, LineQuery, candidates, line_sql};
+    use pghacker_codesearch::engine::{Budget, LineQuery, candidates};
+    use pghacker_codesearch::history::line_sql;
     use pghacker_codesearch::pattern::{Dialect, PatternSpec, Semantics, compile};
 
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(
-        &indexer,
+    // Another version's loops fill the trigram index.
+    let other = "for (int i = 0; i < 10; i++) {}\n".repeat(50_000);
+    let snapshot = common::load_versions(
+        &db,
         "postgres",
-        "19",
-        &[(
-            "src/backend/access/heap/loops.c",
-            Some("for (a) {}\n\tfor\t(b) {}\nwhile (c) {}\n// for (d) for (e)\nformat();\n"),
-        )],
+        &[
+            (
+                "19",
+                &[(
+                    "src/backend/access/heap/loops.c",
+                    Some(
+                        "for (a) {}\n\tfor\t(b) {}\nwhile (c) {}\n// for (d) for (e)\nformat();\n",
+                    ),
+                )][..],
+            ),
+            (
+                "18",
+                &[("src/backend/access/heap/other.c", Some(other.as_str()))][..],
+            ),
+        ],
     )
     .await?;
-    common::load(
-        &indexer,
-        "postgres",
-        "18",
-        &[("src/backend/access/heap/other.c", Some(""))],
-    )
-    .await?;
-    indexer
-        .batch_execute(
-            "INSERT INTO code_lines (file_id, line_no, line)
-             SELECT currval('code_files_id_seq'), n, 'for (int i = 0; i < 10; i++) {}'
-             FROM generate_series(1, 50000) n",
-        )
-        .await?;
-    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
     let reader = db.reader().await?;
     let compiled = compile(&PatternSpec {
         patterns: &[r"\bfor\s*\(".into()],
@@ -347,8 +363,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     })
     .map_err(anyhow::Error::msg)?;
     let q = LineQuery {
-        snapshot_id: snapshot.id,
-        history: None,
+        history: &snapshot.history,
         mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
@@ -356,7 +371,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
         cap: 100,
         scope_first: true,
     };
-    let (sql, params) = line_sql(&q);
+    let (sql, params) = line_sql(&q, &snapshot.history, &[])?;
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|p| p.as_ref() as _).collect();
     let plan: serde_json::Value = reader
@@ -364,7 +379,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
         .await?
         .get(0);
     let plan = plan.to_string();
-    assert!(!plan.contains("code_lines_trgm"), "{plan}");
+    assert!(!plan.contains("code_line_instances_trgm"), "{plan}");
     let rows = candidates(&reader, &q, &Budget::new(None)).await?;
     assert_eq!(rows.rows.len(), 3);
     assert!(!rows.capped && !rows.timed_out);
@@ -398,8 +413,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     use pghacker_codesearch::snapshot::FileTable;
 
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
     FileTable::load(&reader, &snapshot).await?;
     reader
@@ -407,14 +421,16 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
         .await?;
     let blocker = db.admin().await?;
     blocker
-        .batch_execute("BEGIN; LOCK TABLE pghacker.code_lines IN ACCESS EXCLUSIVE MODE")
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {}.code_line_instances IN ACCESS EXCLUSIVE MODE",
+            snapshot.history.schema
+        ))
         .await?;
     let budget = pghacker_codesearch::engine::Budget::new(Some(500));
     let old = pghacker_codesearch::engine::set_timeout(&reader, budget.remaining_ms()).await?;
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     let q = pghacker_codesearch::engine::LineQuery {
-        snapshot_id: snapshot.id,
-        history: None,
+        history: &snapshot.history,
         mounted: false,
         file_ids: None,
         require: vec![],

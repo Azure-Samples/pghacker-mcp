@@ -1,4 +1,5 @@
-//! The grep, read_file and list_files tools against a synthetic snapshot.
+//! The grep, read_file and list_files tools against a synthetic commit
+//! history.
 //! The expected outputs are GNU grep 3.11's on the same files (LC_ALL=C.UTF-8).
 
 mod common;
@@ -27,24 +28,8 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
     use pghacker_codesearch::engine::MAX_CANDIDATES;
 
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &[("src/loops.c", Some(""))]).await?;
-    let count = MAX_CANDIDATES as i32 + 2;
-    indexer
-        .execute(
-            "UPDATE code_files SET line_count = $1 WHERE snapshot_id = $2",
-            &[&count, &snapshot.id],
-        )
-        .await?;
-    indexer
-        .execute(
-            "INSERT INTO code_lines (file_id, line_no, line)
-             SELECT currval('code_files_id_seq'), n, 'for (int i = 0; i < 10; i++) {}'
-             FROM generate_series(1, $1::int) n",
-            &[&count],
-        )
-        .await?;
-    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
+    let loops = "for (int i = 0; i < 10; i++) {}\n".repeat(MAX_CANDIDATES + 2);
+    let snapshot = common::load(&db, "postgres", "19", &[("src/loops.c", Some(&loops))]).await?;
     let reader = db.reader().await?;
     for command in [
         "grep -rF 'for (' src | wc -l",
@@ -82,8 +67,7 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
 #[tokio::test]
 async fn grep_prints_like_gnu_grep() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
     let s = &snapshot;
 
@@ -220,8 +204,7 @@ async fn grep_prints_like_gnu_grep() -> Result<()> {
 #[tokio::test]
 async fn grep_paths_pipelines_and_errors() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
     let s = &snapshot;
 
@@ -318,8 +301,7 @@ async fn grep_paths_pipelines_and_errors() -> Result<()> {
 #[tokio::test]
 async fn read_file_and_list_files() -> Result<()> {
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    let snapshot = common::load(&indexer, "postgres", "19", &common::files()).await?;
+    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let r = read_file(

@@ -9,7 +9,7 @@ pghacker-mcp gives AI agents cited answers about PostgreSQL's design history and
 Locally, it runs on test slices of the data:
 - two months of pgsql-hackers (June–July 2026);
 - whole threads on SQL/PGQ and SQL/JSON;
-- a PG19 code subset (`src/backend/parser`, `src/backend/utils/adt`, `src/include/nodes`, `contrib/pg_trgm`).
+- PostgreSQL's commit history, which you build from a clone ([Commit history](#commit-history)), of the whole tree or of a few folders.
 
 In Azure ([deploy/README.md](deploy/README.md)), it indexes whatever its users ask for, starting from the local corpus.
 
@@ -74,9 +74,9 @@ not make the full graph sync incremental or establish its total runtime.
 | `PILOTSWARM_WORKER_CONCURRENCY` | Session turns the worker runs at once (default 8). |
 | `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
 | `PGHACKER_AGENT_MCP_URL` | Another pghacker-mcp for the local agents, such as a deployment's public `/mcp`, to evaluate it. |
-| `PGHACKER_CODE_HISTORY` | The schema of a commit-history build for the code tools to read instead of the snapshots: `pghacker` once installed. Unset, they read the snapshots. |
+| `PGHACKER_CODE_HISTORY` | The schema whose commit history the code tools read, such as a build's before it is installed. Unset, `pghacker`, where `history build --install` puts it. |
 
-`config/test-slices.toml` chooses the months, seed threads and code paths that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months, threads or commit instead, and `follow` keeps a list current (deploy/README.md).
+`config/test-slices.toml` chooses the months and seed threads that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months, threads or commit instead, and `follow` keeps a list current (deploy/README.md).
 
 ## Tools
 
@@ -86,7 +86,7 @@ not make the full graph sync incremental or establish its total runtime.
 | --- | --- |
 | Mail | `search_threads`, `get_thread`, `search_extracts`, `author_perspective`, `search_authors`, `get_author`. The search tools take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (default). |
 | SQL and graph | `get_ontology` describes the data. `query` runs one read-only SQL statement, including Cypher on `pghacker_graph`, and returns CSV. |
-| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the loaded source. `search_patches` finds lines in the patches posted to the lists, by thread. With the [commit history](#commit-history), the code tools read any commit, and `blame`, `get_commit` and `search_commits` appear. |
+| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the source. They read any commit of the [commit history](#commit-history), as do `blame`, `get_commit` and `search_commits`. `search_patches` finds lines in the patches posted to the lists, by thread, and the commits that landed them. |
 
 **pghacker-indexer**:
 
@@ -100,19 +100,18 @@ Results cite Message-IDs, verbatim quotes and file paths. Email addresses are us
 
 ### Code-search budgets and large archives
 
-`search` and `grep` restrict their scans to the selected snapshot and paths.
+`search` and `grep` restrict their scans to the selected commit and paths.
 Small scopes (at most 200,000 lines) and short or unindexable patterns use
 file-first scans through `(file_id, line_no)`. Larger scopes with a required
 literal of at least six consecutive ASCII letters or digits in every
 alternative can use the trigram index. This is a performance hint only:
 the exact Rust matcher still verifies the candidates.
 
-The trigram index is shared by **all loaded snapshots**. A common term such
-as `for` can have millions of postings even when one version and a small
-folder are selected. File-first scans avoid enumerating those unrelated
-postings, but a full snapshot still requires reading its own lines.
-Partitioning or a snapshot-scoped index would be needed to remove that
-remaining large-archive tradeoff.
+The trigram index is shared by **every commit**: it indexes each line
+instance of the history once. A common term such as `for` can have millions
+of postings even when one version and a small folder are selected. File-first
+scans avoid enumerating those unrelated postings, but a whole tree still
+requires reading its own lines.
 
 The time budget is shared by candidate retrieval, verification, counts,
 context and name suggestions: 4 seconds by default, at most 10 seconds.
@@ -128,18 +127,22 @@ mid-operation, but exhaustion is checked before results are returned.
 The read-only `query` tool keeps its separate 5-second SQL timeout and does
 not rewrite arbitrary SQL. For a scoped code count, keep the text predicate
 outside a file-first scan so PostgreSQL cannot move it into a global trigram
-bitmap scan. Replace `123` below with the wanted `code_snapshots.id`:
+bitmap scan. A file version's lines are its lineage's instances alive at the
+version's `lo` (get_ontology describes the tables); here, at REL_17_STABLE's head:
 
 ```sql
 WITH files AS MATERIALIZED (
-    SELECT id, path FROM code_files WHERE snapshot_id = 123
+    SELECT v.lineage, v.lo
+    FROM code_refs r JOIN code_file_versions v
+      ON v.lo <= r.addr AND r.addr < v.hi AND (v.alive IS NULL OR v.alive @> r.addr)
+    WHERE r.kind = 'branch' AND r.name = 'REL_17_STABLE'
+      AND v.path LIKE 'src/backend/access/heap/%'
 )
 SELECT count(*)
 FROM (
-    SELECT line FROM code_lines
-    WHERE file_id = ANY(ARRAY(
-        SELECT id FROM files WHERE path LIKE 'src/backend/access/heap/%'
-    ))
+    SELECT i.line FROM files f JOIN code_line_instances i
+      ON i.lineage = f.lineage AND i.lo <= f.lo AND f.lo < i.hi
+         AND (i.alive IS NULL OR i.alive @> f.lo)
     OFFSET 0
 ) scoped
 WHERE scoped.line LIKE '%for (%';
@@ -147,8 +150,8 @@ WHERE scoped.line LIKE '%for (%';
 
 Two performance-tuning programs, in their crates' `perf_tuning/` folders, run
 through Cargo as examples. `crates/pghacker-codesearch/perf_tuning/profile_search.rs`
-profiles common loop searches on an isolated, synthetic multi-snapshot
-database, with the local test database configured:
+profiles common loop searches on an isolated, synthetic commit history (a
+master and eight release branches), with the local test database configured:
 
 ```bash
 cargo run --locked -p pghacker-codesearch --example profile_search
@@ -182,8 +185,9 @@ sync keeps, the changes waiting and the last full sync.
 ### Commit history
 
 The commit history stores every line of every commit of every branch once
-(the weave) and lets the code tools read any commit; [the search
-design](docs/search-design.md) describes it. As the administrator:
+(the weave), and the code tools read any commit from it; [the search
+design](docs/search-design.md) describes it. It is their only source: until
+one is installed, they have no code to read. As the administrator:
 
 ```bash
 # A bare clone with every branch and tag.
@@ -191,34 +195,38 @@ git clone --mirror https://git.postgresql.org/git/postgresql.git .runtime/postgr
 # Build into a schema of its own (6 minutes), and swap it into pghacker.
 cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/postgres.git \
     --url https://git.postgresql.org/git/postgresql.git --install
+# Or keep only some folders, for a smaller local build (repeat --path):
+#   ... history build ... --install --path src/backend/parser --path src/include/nodes
 # Rebuild every file of the branch heads and 40 random commits; compare with git.
 cargo run --release -p pghacker-indexer -- history verify --git-dir .runtime/postgres.git \
     --schema pghacker --heads --sample 40
 ```
 
-Then set `PGHACKER_CODE_HISTORY=pghacker` in `.env` and restart: `npm start`
-passes it to the indexer and pghacker-mcp (in Azure, `app_env`; see
-[deploy/README.md](deploy/README.md#commit-history)). `history build --fetch`
-fetches or updates the bare clone from `--url` itself, as the Azure job does.
+The running indexer and pghacker-mcp read it at once (in Azure, see
+[deploy/README.md](deploy/README.md#commit-history)). To read a build before
+installing it, set `PGHACKER_CODE_HISTORY` to its schema in `.env` and restart.
+`history build --fetch` fetches or updates the bare clone from `--url` itself,
+as the Azure job does.
 The hourly `code_history_sync` job
 fetches and applies new commits, and refreshes back-patch groups and the
 links from commits to threads; `history sync` and `history regroup` do it by
 hand. The `patch_lines` job indexes the mail's patches for `search_patches`
-whether or not the history is installed. With the history on, `add_source`
-for a PostgreSQL version loads no snapshot: it names the commit the history
-already has, or starts the sync when the history lacks it.
+whether or not the history is installed. `add_source` for a PostgreSQL
+version loads nothing: it names the commit the history already has, or starts
+the sync when the history lacks it.
 
 In the `pghacker-replay` crate's `perf_tuning/` folder, `history_parity`
-checks a build in `pghacker_bench` against git on random commits:
-`get_commit` against `git show`, its line counts, and `blame` against
-`git blame`. `profile_history` times one call through both engines.
+checks a history against git on random commits: `get_commit` against
+`git show`, its line counts, and `blame` against `git blame`.
+`profile_history` times one code-tool call. Both read the history in
+`--schema` (default `pghacker`) of `--database` (default the app's).
 
 ## Build the corpus
 
 With the app running:
 
-1. Add the sources. Ask a `pghacker-crawler` session in the portal, or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}` and `{kind: postgres_version, name: "19"}`.
-2. Watch the progress with `ingest_status`. Workers download the mbox months and seed threads (2 requests/s, cached in `.runtime/cache`), fetch the pinned PG19 commit with gix, embed chunks, resolve file anchors and sync the graph.
+1. Add the sources. Ask a `pghacker-crawler` session in the portal, or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`. The code comes from the [commit history](#commit-history), built once.
+2. Watch the progress with `ingest_status`. Workers download the mbox months and seed threads (2 requests/s, cached in `.runtime/cache`), embed chunks, resolve file anchors against the commit history and sync the graph.
 3. Extract:
 
 ```bash
@@ -252,7 +260,7 @@ cargo run --release -p pghacker-replay -- pg19                          # 2,000 
 PGHACKER_STUDY_DIR=<study> cargo run --release -p pghacker-replay -- study
 ```
 
-The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in Docker: 2,000 of 2,000 match each. The study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`. It matched ripgrep on all 10,540 replayable searches through `search` and 7,254 through `grep`, which is byte-identical to GNU grep on 7,277 command lines.
+Each workload reads one commit from a history of its own (schema `replay_pg19`, or `replay_study_<repo>`): a one-commit repository with exactly that commit's blobs, built once and reused while the commit is the same. The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in Docker: 2,000 of 2,000 match each. The study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`. It matched ripgrep on all 10,540 replayable searches through `search` and 7,254 through `grep`, which is byte-identical to GNU grep on 7,277 command lines.
 
 ## Deploy to Azure
 
@@ -264,12 +272,12 @@ The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in D
 | --- | --- |
 | `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing |
 | `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
-| `crates/pghacker-code` | Git snapshot loader (gix), one row per line; the commit history's builder and sync |
+| `crates/pghacker-code` | The commit history's builder and sync |
 | `crates/pghacker-codesearch` | pg_trgm code search, the grep translator, `read_file`, `list_files`; the history engine, `blame`, `get_commit`, `search_commits`, `search_patches` |
 | `crates/pghacker-sqlquery` | The read-only `query` tool |
 | `crates/pghacker-api` | Mail and graph tools |
 | `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
-| `crates/pghacker-replay` | The exactness replay harness, the engine benchmark and the history parity check |
+| `crates/pghacker-replay` | The exactness replay harness and the history parity check |
 | `migrations/`, `db/` | Schema and the PostgreSQL image |
 | `plugin/` | Branding, agents and the MCP catalog |
 | `scripts/` | The launcher, crawl and evaluation drivers; the container's supervisor, probe and corpus restore |

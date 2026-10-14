@@ -1,18 +1,21 @@
 //! pghacker-replay: the exactness gate for code search. It replays the
 //! search study's recorded agent searches, and generated PG19 searches,
 //! through `search` and `grep`, and compares their lines with ripgrep's and
-//! GNU grep's on the same files.
+//! GNU grep's on the same files. Each replayed commit is served from a commit
+//! history of its own (see the `tree` module).
 //!
 //! The study's data is private: it is read at run time from the folder given
-//! by `--study-dir` or `PGHACKER_STUDY_DIR`, and per-search details go only to
-//! `.runtime/replay/` (ignored by git). The console shows aggregates.
+//! by `--study-dir` or `PGHACKER_STUDY_DIR`, and the clones of the
+//! repositories it searched from the folders that `PGHACKER_REPLAY_<NAME>`
+//! variables name. Per-search details go only to `.runtime/replay/` (ignored
+//! by git). The console shows aggregates.
 
-mod engines;
 mod gitstats;
 mod gnu;
 mod pg19;
 mod rg;
 mod study;
+mod tree;
 
 use std::path::{Path, PathBuf};
 
@@ -53,42 +56,7 @@ enum Command {
         #[arg(long)]
         skip_gnu: bool,
     },
-    /// Creates pghacker_bench: production's 15 snapshots and the whole
-    /// history, from a full clone.
-    BenchPrepare {
-        /// A full clone of PostgreSQL with every branch and tag.
-        #[arg(long)]
-        git_dir: PathBuf,
-    },
-    /// Runs the same calls through the snapshot and history engines at
-    /// every snapshot, comparing outputs and latencies.
-    Engines {
-        /// Generated PG19 searches to run.
-        #[arg(long, default_value_t = 2000)]
-        pg19: usize,
-        #[arg(long, default_value_t = 19)]
-        seed: u64,
-        /// Calls run at once.
-        #[arg(long, default_value_t = 8)]
-        jobs: usize,
-        /// Only the newest N snapshots.
-        #[arg(long)]
-        heads: Option<usize>,
-        /// Runs of the whole workload: the first is colder.
-        #[arg(long, default_value_t = 1)]
-        passes: usize,
-        /// Add the grep command lines of the last study replay.
-        #[arg(long)]
-        study: bool,
-        /// The database with the snapshots and the history, read as
-        /// pgh_reader: the app's on a deployment.
-        #[arg(long, default_value = engines::DATABASE)]
-        database: String,
-        /// The history's schema: a build's, or pghacker once installed.
-        #[arg(long, default_value = engines::SCHEMA)]
-        schema: String,
-    },
-    /// Loads the PG19 subset and replays generated searches.
+    /// Serves the PG19 subset from a history and replays generated searches.
     Pg19 {
         /// Searches to generate.
         #[arg(long, default_value_t = 2000)]
@@ -105,7 +73,6 @@ enum Command {
 /// Paths and settings shared by the subcommands.
 pub struct Ctx {
     pub env: Env,
-    pub root: PathBuf,
     pub runtime: PathBuf,
     pub rg: PathBuf,
 }
@@ -117,12 +84,7 @@ impl Ctx {
         let runtime = root.join(".runtime").join("replay");
         std::fs::create_dir_all(&runtime)?;
         let rg = find_rg(&env);
-        Ok(Self {
-            env,
-            root,
-            runtime,
-            rg,
-        })
+        Ok(Self { env, runtime, rg })
     }
 
     pub fn admin_url(&self) -> Result<String> {
@@ -166,72 +128,34 @@ fn find_rg(env: &Env) -> PathBuf {
 
 /// Creates the replay database if missing, bootstraps and migrates it.
 async fn prepare(ctx: &Ctx) -> Result<()> {
-    prepare_database(ctx, DATABASE).await
-}
-
-/// Creates database `name` if missing, bootstraps and migrates it.
-pub async fn prepare_database(ctx: &Ctx, name: &str) -> Result<()> {
     let admin = ctx.env.admin_database_url()?;
     let maintenance = db::connect(&with_database(&admin, "postgres")?, "pghacker-replay").await?;
     let exists = maintenance
-        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&name])
+        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&DATABASE])
         .await?
         .is_some();
     if !exists {
         maintenance
-            .batch_execute(&format!("CREATE DATABASE {name}"))
+            .batch_execute(&format!("CREATE DATABASE {DATABASE}"))
             .await
-            .with_context(|| format!("cannot create database {name}"))?;
-        println!("created database {name}");
+            .context("cannot create the replay database")?;
+        println!("created database {DATABASE}");
     }
-    let mut admin = db::connect(&with_database(&admin, name)?, "pghacker-replay").await?;
+    let mut admin = db::connect(&ctx.admin_url()?, "pghacker-replay").await?;
     if !migrate::roles_exist(&admin).await? {
         migrate::bootstrap_roles(&mut admin, &ctx.env.passwords()?).await?;
     }
     migrate::bootstrap_database(&mut admin).await?;
-    let indexer_url = with_database(&ctx.env.indexer_database_url()?, name)?;
-    let mut indexer = db::connect(&indexer_url, "pghacker-replay").await?;
+    let mut indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
     let applied = migrate::migrate(&mut indexer).await?;
     println!(
-        "{name} is migrated{}",
+        "{DATABASE} is migrated{}",
         if applied.is_empty() {
             String::new()
         } else {
             format!(" (applied {})", applied.join(", "))
         }
     );
-    Ok(())
-}
-
-/// Moves new GIN entries out of the pending list and refreshes statistics,
-/// so that the planner sees the trigram index as it is.
-pub async fn vacuum(ctx: &Ctx) -> Result<()> {
-    let indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
-    indexer
-        .batch_execute("VACUUM ANALYZE code_lines")
-        .await
-        .context("cannot vacuum code_lines")?;
-    indexer.batch_execute("VACUUM ANALYZE code_files").await?;
-    Ok(())
-}
-
-/// Fills in the text and binary file counts that the loader leaves at zero
-/// when it reuses a loaded snapshot.
-pub async fn count_reused(
-    client: &tokio_postgres::Client,
-    stats: &mut pghacker_code::LoadStats,
-) -> Result<()> {
-    if stats.reused {
-        let row = client
-            .query_one(
-                "SELECT count(*) FILTER (WHERE NOT is_binary), count(*) FILTER (WHERE is_binary) \
-                 FROM code_files WHERE snapshot_id = $1",
-                &[&stats.snapshot_id],
-            )
-            .await?;
-        stats.text_files = row.get::<_, i64>(0) as u64;
-        stats.binary_files = row.get::<_, i64>(1) as u64;
-    }
     Ok(())
 }
 
@@ -264,31 +188,5 @@ async fn main() -> Result<()> {
             study::run(&ctx, &dir, limit, jobs.max(1), skip_gnu).await
         }
         Command::Pg19 { count, seed, jobs } => pg19::run(&ctx, count, seed, jobs.max(1)).await,
-        Command::BenchPrepare { git_dir } => engines::prepare(&ctx, &git_dir).await,
-        Command::Engines {
-            pg19,
-            seed,
-            jobs,
-            heads,
-            passes,
-            study,
-            database,
-            schema,
-        } => {
-            engines::run(
-                &ctx,
-                &engines::RunOptions {
-                    pg19,
-                    seed,
-                    jobs,
-                    heads,
-                    passes,
-                    study,
-                    database,
-                    schema,
-                },
-            )
-            .await
-        }
     }
 }

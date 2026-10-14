@@ -145,7 +145,7 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
       max,
       perSession: integer(env, "PGHACKER_CRAWL_PER_SESSION", 8, { max: 50 }),
     },
-    // The schema whose commit history the code tools read; unset, the snapshots.
+    // The schema whose commit history the code tools read; unset, pghacker.
     code: { history },
     github: {
       ...github,

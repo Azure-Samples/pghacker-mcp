@@ -1,43 +1,109 @@
-//! Profiles common loop searches with many unrelated snapshots sharing the
-//! trigram index. Uses a temporary TestDb, never the application's corpus.
+//! Profiles common loop searches with many unrelated branches' lines
+//! sharing the history's trigram index. Builds a synthetic repository into
+//! a temporary TestDb, never the application's corpus.
 
-use anyhow::Result;
+use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
+
+use anyhow::{Result, ensure};
+use pghacker_code::history::{BuildOptions, build};
 use pghacker_codesearch::grep::{self, Limits};
 use pghacker_codesearch::search::{GroupBy, MatchMode, OutputMode, Strings};
-use pghacker_codesearch::{SearchArgs, resolve_snapshot, search};
+use pghacker_codesearch::{SearchArgs, search};
 use pghacker_core::testing::TestDb;
 use serde_json::json;
-use std::time::Instant;
+
+const SCHEMA: &str = "pghacker_history";
+
+/// Runs git in `dir` as a fixed author, `tick` minutes into 2026.
+fn git(dir: &Path, tick: u32, args: &[&str]) -> Result<()> {
+    let date = format!("{} +0000", 1_767_225_600 + tick * 60);
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Profile")
+        .env("GIT_AUTHOR_EMAIL", "profile@example.org")
+        .env("GIT_COMMITTER_NAME", "Profile")
+        .env("GIT_COMMITTER_EMAIL", "profile@example.org")
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Writes a tree of 40 files of 7,500 lines each, `line(n)` for line n.
+fn write_tree(dir: &Path, line: impl Fn(u32) -> String) -> Result<()> {
+    for f in 1..=40 {
+        let folder = if f <= 2 {
+            "src/backend/access/heap"
+        } else if f <= 20 {
+            "src/backend/other"
+        } else {
+            "contrib/example"
+        };
+        let path = dir.join(folder).join(format!("{f}.c"));
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        let text: String = (1..=7_500).map(|n| line(n) + "\n").collect();
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Master is 19, one past the newest release line: a loop every 19th
+    // line and a while every 37th. REL_18_STABLE to REL_11_STABLE fork from
+    // it and turn every line into a loop of their own, which the trigram
+    // index shares but master's commit doesn't have.
+    let dir = tempfile::tempdir()?;
+    let d = dir.path();
+    git(d, 0, &["init", "-q", "-b", "master"])?;
+    write_tree(d, |n| {
+        if n % 19 == 0 {
+            "    for (int i = 0; i < 10; i++) {}".into()
+        } else if n % 37 == 0 {
+            "    while (ready) {}".into()
+        } else {
+            format!("    benchmark_padding_{n}();")
+        }
+    })?;
+    git(d, 1, &["add", "-A"])?;
+    git(d, 1, &["commit", "-q", "-m", "19"])?;
+    for v in (11..=18).rev() {
+        let tick = 20 - v;
+        git(
+            d,
+            tick,
+            &["checkout", "-q", "-b", &format!("REL_{v}_STABLE"), "master"],
+        )?;
+        write_tree(d, |_| format!("    for (int j = 0; j < {v}; j++) {{}}"))?;
+        git(d, tick, &["add", "-A"])?;
+        git(d, tick, &["commit", "-q", "-m", &v.to_string()])?;
+    }
     let db = TestDb::create().await?;
-    let indexer = db.indexer().await?;
-    indexer
-        .batch_execute(
-            "INSERT INTO code_snapshots (repo, ref, sha, version, state, file_count, line_count, loaded_at)
-             SELECT 'postgres', 'REL_' || v || '_STABLE', md5(v::text), v::text, 'ready', 40, 300000, now()
-             FROM generate_series(19, 11, -1) v;
-             INSERT INTO code_files (snapshot_id, path, blob_sha, size, line_count)
-             SELECT s.id,
-                    CASE WHEN f <= 2 THEN 'src/backend/access/heap/'
-                         WHEN f <= 20 THEN 'src/backend/other/' ELSE 'contrib/example/' END
-                         || f || '.c',
-                    md5(f::text), 300000, 7500
-             FROM code_snapshots s CROSS JOIN generate_series(1, 40) f;
-             INSERT INTO code_lines (file_id, line_no, line)
-             SELECT f.id, n,
-                    CASE WHEN s.version <> '19' OR n % 19 = 0 THEN '    for (int i = 0; i < 10; i++) {}'
-                         WHEN n % 37 = 0 THEN '    while (ready) {}'
-                         ELSE '    benchmark_padding_' || n || '();' END
-             FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-             CROSS JOIN generate_series(1, 7500) n;",
-        )
-        .await?;
-    indexer.batch_execute("VACUUM ANALYZE code_lines").await?;
-    indexer.batch_execute("ANALYZE code_files").await?;
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: d.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await?;
     let reader = db.reader().await?;
-    let snapshot = resolve_snapshot(&reader, "postgres", Some("19")).await?;
+    let snapshot =
+        pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", Some("19")).await?;
     let mut cases = Vec::new();
     let compiled =
         pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
@@ -50,8 +116,7 @@ async fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg)?;
     let q = pghacker_codesearch::engine::LineQuery {
-        snapshot_id: snapshot.id,
-        history: None,
+        history: &snapshot.history,
         mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
@@ -59,7 +124,7 @@ async fn main() -> Result<()> {
         cap: pghacker_codesearch::engine::MAX_CANDIDATES,
         scope_first: true,
     };
-    let (sql, params) = pghacker_codesearch::engine::line_sql(&q);
+    let (sql, params) = pghacker_codesearch::history::line_sql(&q, &snapshot.history, &[])?;
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|p| p.as_ref() as _).collect();
     let plan: serde_json::Value = reader
@@ -96,21 +161,21 @@ async fn main() -> Result<()> {
             GroupBy::Match,
         ),
         (
-            "snapshot_text",
+            "tree_text",
             Strings::from("for ("),
             MatchMode::Text,
             Strings::default(),
             GroupBy::File,
         ),
         (
-            "snapshot_regex",
+            "tree_regex",
             Strings::from(r"^\s*for\s*\("),
             MatchMode::Regex,
             Strings::from(vec!["src".into(), "contrib".into()]),
             GroupBy::File,
         ),
         (
-            "snapshot_match_counts",
+            "tree_match_counts",
             Strings::from("for ("),
             MatchMode::Text,
             Strings::from("src"),

@@ -110,7 +110,7 @@ test("agents use the internal pghacker-mcp listener; the public one is rate-limi
   assert.equal(environments.swarm.PILOTSWARM_WORKER_CONCURRENCY, "20");
 });
 
-test("PGHACKER_CODE_HISTORY switches the indexer and pghacker-mcp, and nothing else, to the commit history", () => {
+test("PGHACKER_CODE_HISTORY names the history schema of the indexer and pghacker-mcp, and nothing else", () => {
   const off = processEnvironments(readAzureConfig(ENV));
   for (const env of Object.values(off)) assert.equal("PGHACKER_CODE_HISTORY" in env, false);
   const on = processEnvironments(readAzureConfig({ ...ENV, PGHACKER_CODE_HISTORY: " pghacker " }));

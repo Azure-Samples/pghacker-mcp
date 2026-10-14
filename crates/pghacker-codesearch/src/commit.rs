@@ -281,11 +281,9 @@ pub async fn get_commit(
     args: &GetCommitArgs,
 ) -> Result<CommitResult> {
     let s = checked(schema)?;
-    let snapshot = crate::rev::resolve(client, s, repo, Some(&args.commit)).await?;
-    let addr = snapshot
+    let addr = crate::rev::resolve(client, s, repo, Some(&args.commit))
+        .await?
         .history
-        .as_ref()
-        .context("the commit has no place in the history")?
         .addr;
     let row = client
         .query_one(

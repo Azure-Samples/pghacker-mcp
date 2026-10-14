@@ -1,162 +1,48 @@
-//! Snapshots and their file tables: which files a snapshot has, in tree
-//! order, and how tool paths map onto them.
+//! The commit a code tool reads and its file table: which files the commit
+//! has in the commit history, in tree order, and how tool paths map onto
+//! them.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{Context, Result, bail};
-use pghacker_core::code::{LATEST_FIRST, newest_first, release_line};
+use anyhow::Result;
 use serde::Serialize;
 use tokio_postgres::GenericClient;
 
-/// A loaded source snapshot.
+/// A commit in the commit history, as the code tools read it: its
+/// repository, the major version and ref it is read as, and its SHA.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Snapshot {
-    pub id: i32,
     pub repo: String,
     pub version: Option<String>,
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub sha: String,
-    /// Where to read the commit in the history, when the history serves it.
+    /// Where to read the commit in the history.
     #[serde(skip)]
-    pub history: Option<crate::history::History>,
+    pub history: crate::history::History,
 }
 
-/// The snapshot of `repo` that a code tool reads; with `PGHACKER_CODE_HISTORY`
-/// set, the commit [`crate::rev::resolve`] finds in the history. `version` names a major
-/// version (`19`, `PG19`, `9`), a release (`18.3`, `9.6.24`) or a release
-/// line before 10 (`9.6`), a ref (`REL_18_3`, `REL_19_STABLE`, `master`) or a
-/// commit SHA prefix. Of the snapshots it names, the latest wins: the newest
-/// commit, so a release branch's head before its releases. Without one, the
-/// latest of the newest numbered release line. Every loaded snapshot stays
-/// readable by its ref or SHA.
+/// The commit of `repo` that a code tool reads: the one
+/// [`crate::rev::resolve`] finds for `version` in the commit history of
+/// [`pghacker_core::code::history_schema`]. `version` names a major version
+/// (`19`, `PG19`, `9`): its branch head; a release (`18.3`, `9.6.24`) or a
+/// release line before 10 (`9.6`); a branch or tag (`REL_18_3`,
+/// `REL_19_STABLE`, `master`); or a commit SHA prefix; any of them as of a
+/// date (`REL_17_STABLE@2024-06-01`) or commits back (`master~3`). Without
+/// one, the head of the newest numbered release line. Every commit in the
+/// history is readable.
 pub async fn resolve_snapshot(
     client: &impl GenericClient,
     repo: &str,
     version: Option<&str>,
 ) -> Result<Snapshot> {
-    // With the history on, any revision names a commit in it.
-    if let Some(schema) = crate::history::schema_from_env() {
-        return crate::rev::resolve(client, schema, repo, version).await;
-    }
-    let rows = client
-        .query(
-            &format!(
-                "SELECT id, repo, version, ref, sha FROM code_snapshots \
-                 WHERE repo = $1 AND state = 'ready' ORDER BY {LATEST_FIRST}"
-            ),
-            &[&repo],
-        )
-        .await
-        .context("cannot read code_snapshots")?;
-    let snapshots: Vec<Snapshot> = rows
-        .iter()
-        .map(|row| Snapshot {
-            id: row.get(0),
-            repo: row.get(1),
-            version: row.get(2),
-            git_ref: row.get(3),
-            sha: row.get(4),
-            history: None,
-        })
-        .collect();
-    let wanted = version.map(str::trim).filter(|v| !v.is_empty());
-    let found = match wanted {
-        None => latest_release(&snapshots),
-        Some(v) => named(&snapshots, v),
-    };
-    if let Some(snapshot) = found {
-        return Ok(snapshot.clone());
-    }
-    let mut versions: Vec<&str> = snapshots
-        .iter()
-        .filter_map(|s| s.version.as_deref())
-        .collect();
-    versions.sort_by(|a, b| newest_first(a, b));
-    versions.dedup();
-    match wanted {
-        Some(v) if !versions.is_empty() => bail!(
-            "no loaded snapshot of {repo} for version {v}; versions: {} (or a release such as 18.3, \
-             a ref such as REL_18_STABLE, or a commit SHA)",
-            versions.join(", ")
-        ),
-        _ => bail!("no loaded snapshot of {repo}"),
-    }
+    crate::rev::resolve(client, pghacker_core::code::history_schema(), repo, version).await
 }
 
-/// The latest snapshot of the newest numbered release line, or the latest of
-/// all when none is numbered. `snapshots` are latest first.
-fn latest_release(snapshots: &[Snapshot]) -> Option<&Snapshot> {
-    let line = |s: &Snapshot| s.version.as_deref().and_then(release_line);
-    match snapshots.iter().filter_map(line).max() {
-        Some(newest) => snapshots.iter().find(|s| line(s) == Some(newest)),
-        None => snapshots.first(),
-    }
-}
-
-/// The latest snapshot that `v` names: a ref, a release or release line, a
-/// commit SHA prefix, then a major version. `snapshots` are latest first.
-fn named<'a>(snapshots: &'a [Snapshot], v: &str) -> Option<&'a Snapshot> {
-    let with_ref = |name: &str| {
-        snapshots
-            .iter()
-            .find(|s| s.git_ref.eq_ignore_ascii_case(name))
-    };
-    if let Some(found) = with_ref(v) {
-        return Some(found);
-    }
-    let norm = normalize_version(v);
-    let parts: Vec<&str> = norm.split('.').collect();
-    if parts.len() > 1
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-    {
-        let major: u32 = parts[0].parse().ok()?;
-        return match (major >= 10, parts.len()) {
-            // 18.3 is the release REL_18_3.
-            (true, 2) => with_ref(&format!("REL_{}_{}", parts[0], parts[1])),
-            // 9.6.24 is the release REL9_6_24.
-            (false, 3) => with_ref(&format!("REL{}_{}_{}", parts[0], parts[1], parts[2])),
-            // 9.6 is a release line: its branch head, or its newest release.
-            (false, 2) => {
-                let line = format!("REL{}_{}", parts[0], parts[1]);
-                snapshots.iter().find(|s| {
-                    let r = s.git_ref.to_ascii_uppercase();
-                    r == line || r.starts_with(&format!("{line}_"))
-                })
-            }
-            _ => None,
-        };
-    }
-    let lower = v.to_ascii_lowercase();
-    if v.len() >= 7
-        && let Some(found) = snapshots.iter().find(|s| s.sha.starts_with(&lower))
-    {
-        return Some(found);
-    }
-    snapshots
-        .iter()
-        .find(|s| s.version.as_deref().map(normalize_version).as_deref() == Some(norm.as_str()))
-}
-
-/// `PG19`, `pg 19`, `v19` and `REL_19_STABLE` all mean `19`.
-fn normalize_version(v: &str) -> String {
-    let lower = v.trim().to_ascii_lowercase();
-    let lower = lower.strip_prefix("rel_").unwrap_or(&lower);
-    let lower = lower.strip_suffix("_stable").unwrap_or(lower);
-    let lower = lower
-        .trim_start_matches("postgresql")
-        .trim_start_matches("postgres")
-        .trim_start_matches("pg")
-        .trim_start_matches('v')
-        .trim();
-    lower.replace('_', ".")
-}
-
-/// A file of a snapshot.
+/// A file of a commit: a file version in the history, whose id is the
+/// version's.
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     pub id: i32,
@@ -202,9 +88,9 @@ pub fn shown(path: &str) -> String {
     }
 }
 
-/// A snapshot's files in tree order (paths compared component by
-/// component, the order of a sorted directory walk), with its folders.
-/// Mounted trees follow the commit's own files.
+/// A commit's files in tree order (paths compared component by component,
+/// the order of a sorted directory walk), with its folders. Mounted trees
+/// follow the commit's own files.
 #[derive(Debug)]
 pub struct FileTable {
     pub files: Vec<FileEntry>,
@@ -214,24 +100,22 @@ pub struct FileTable {
     dirs: HashSet<String>,
     /// First path components: what an absolute path must contain.
     top: HashSet<String>,
-    /// The path prefixes the snapshot loaded; empty means the whole tree.
+    /// The path prefixes the history keeps; empty means the whole tree.
     pub loaded_paths: Vec<String>,
 }
 
 impl FileTable {
-    /// The table a call reads: the snapshot's files, and in the history,
-    /// the trees that the call's paths mount (`/commit/<rev>`,
-    /// `/branch/<name>`, `/tag/<name>`). A mount that names no commit is
-    /// left out, so its paths don't exist.
+    /// The table a call reads: the commit's files, and the trees that the
+    /// call's paths mount (`/commit/<rev>`, `/branch/<name>`,
+    /// `/tag/<name>`). A mount that names no commit is left out, so its
+    /// paths don't exist.
     pub async fn view(
         client: &impl GenericClient,
         snapshot: &Snapshot,
         paths: &[String],
     ) -> Result<Arc<FileTable>> {
         let base = FileTable::load(client, snapshot).await?;
-        let Some(h) = &snapshot.history else {
-            return Ok(base);
-        };
+        let h = &snapshot.history;
         let mut mounts: Vec<(String, String)> = paths.iter().filter_map(|p| mount_of(p)).collect();
         mounts.sort();
         mounts.dedup();
@@ -285,60 +169,22 @@ pub fn tree_cmp(a: &str, b: &str) -> Ordering {
     a.split('/').cmp(b.split('/'))
 }
 
-/// (database, snapshot id or history commit, loaded_at or build): a
-/// snapshot's files never change once it is ready.
-type CacheKey = (String, String, String);
+/// (build, schema@commit address): a commit's files never change within a
+/// build, and the build names the database.
+type CacheKey = (String, String);
 type Cache = Mutex<Vec<(CacheKey, Arc<FileTable>)>>;
 
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl FileTable {
-    /// The snapshot's file table, cached per database and load.
+    /// The commit's file table, cached per build.
     pub async fn load(client: &impl GenericClient, snapshot: &Snapshot) -> Result<Arc<FileTable>> {
-        if let Some(h) = &snapshot.history {
-            let key: CacheKey = (
-                h.build.clone(),
-                format!("{}@{}", h.schema, h.addr),
-                String::new(),
-            );
-            if let Some(table) = cached(&key) {
-                return Ok(table);
-            }
-            let (files, loaded_paths) = crate::history::files(client, h).await?;
-            return Ok(remember(key, FileTable::new(files, loaded_paths)));
-        }
-        let row = client
-            .query_opt(
-                "SELECT current_database()::text, coalesce(loaded_at::text, ''), paths \
-                 FROM code_snapshots WHERE id = $1",
-                &[&snapshot.id],
-            )
-            .await
-            .context("cannot read code_snapshots")?
-            .with_context(|| format!("snapshot {} does not exist", snapshot.id))?;
-        let key: CacheKey = (row.get(0), snapshot.id.to_string(), row.get(1));
-        let loaded_paths: Vec<String> = row.get(2);
+        let h = &snapshot.history;
+        let key: CacheKey = (h.build.clone(), format!("{}@{}", h.schema, h.addr));
         if let Some(table) = cached(&key) {
             return Ok(table);
         }
-        let rows = client
-            .query(
-                "SELECT id, path, is_binary, line_count, size FROM code_files \
-                 WHERE snapshot_id = $1",
-                &[&snapshot.id],
-            )
-            .await
-            .context("cannot read code_files")?;
-        let files = rows
-            .iter()
-            .map(|row| FileEntry {
-                id: row.get(0),
-                path: row.get(1),
-                is_binary: row.get(2),
-                line_count: row.get(3),
-                size: row.get(4),
-            })
-            .collect();
+        let (files, loaded_paths) = crate::history::files(client, h).await?;
         Ok(remember(key, FileTable::new(files, loaded_paths)))
     }
 
@@ -401,11 +247,11 @@ impl FileTable {
         self.dirs.iter().map(String::as_str)
     }
 
-    /// A tool path as a snapshot path: `./x`, `/x`, `x/` and `a/../x` are
-    /// `x`, and an absolute or `~` path that contains one of the
-    /// snapshot's top-level folders is taken from that folder on
+    /// A tool path as a table path: `./x`, `/x`, `x/` and `a/../x` are `x`,
+    /// and an absolute or `~` path that contains one of the commit's
+    /// top-level folders is taken from that folder on
     /// (`/home/me/postgres/src/backend` is `src/backend`). Returns None when
-    /// the path cannot be placed in the snapshot.
+    /// the path cannot be placed in the tree.
     pub fn normalize(&self, repo: &str, raw: &str) -> Option<String> {
         let raw = raw.trim();
         if mount_of(raw).is_some() || bare_root(raw) {
@@ -570,12 +416,5 @@ mod tests {
             "/branch/REL_17_STABLE/src/x.c"
         );
         assert_eq!(shown("src/x.c"), "src/x.c");
-    }
-
-    #[test]
-    fn versions_normalize() {
-        for v in ["19", "PG19", "pg 19", "v19", "REL_19_STABLE", "postgres19"] {
-            assert_eq!(normalize_version(v), "19", "{v}");
-        }
     }
 }

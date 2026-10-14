@@ -33,7 +33,7 @@ const DESTRUCTIVE: Effect = Effect::Write {
 
 pub const INSTRUCTIONS: &str = "pghacker-indexer: tools for crawler sessions that build the pghacker corpus. \
 Sources (add_source, list_sources, remove_source) choose mailing lists, their months and whether to follow them, \
-and PostgreSQL versions; workers then retrieve, parse, embed and graph them; ingest_status shows progress. Extraction: next_extraction_batch leases \
+and PostgreSQL versions of the commit history; workers then retrieve, parse, embed and graph them; ingest_status shows progress. Extraction: next_extraction_batch leases \
 threads, read_messages pages through long ones, match_extracts compares your draft features and decisions with \
 existing ones, and submit_extracts saves a thread's features, decisions and positions with verbatim citations. \
 find_duplicates, mark_distinct, merge_authors, merge_extracts and undo_merge repair the corpus.";
@@ -46,23 +46,23 @@ pub static TOOLS: &[ToolSpec] = &[
             WHOLE archive (decades of mail, and extraction of every thread: confirm that scope with the user \
             first); seed_threads add whole threads; follow retrieves the current month again every hour. A \
             PostgreSQL version's code (kind postgres_version, name 19 or master): a branch or tag (default \
-            REL_<n>_STABLE, or master), its current commit or a given sha, the whole tree or chosen paths. \
-            When the code tools read the commit history (list_sources shows it), a version is already there: \
-            nothing is loaded, and the reply names its commit, or wakes the history's sync when it lacks it. \
-            list_sources says what this deployment allows: the configured test slices only, or any source.",
+            REL_<n>_STABLE, or master), at its current commit or a given sha. The commit history that the code \
+            tools read (list_sources shows it) already has every branch, tag and commit: nothing is loaded, and \
+            the reply names the commit, or wakes the history's sync when it lacks it. list_sources says which \
+            lists this deployment allows: the configured test slices only, or any list.",
         effect: WRITE,
         schema: schema::<AddSourceArgs>,
     },
     ToolSpec {
         name: "remove_source",
-        description: "Disables a source and cancels its queued jobs; purge also deletes a version's code snapshot.",
+        description: "Disables a source and cancels its queued jobs. A mailing list keeps its messages, which extracts cite.",
         effect: DESTRUCTIVE,
         schema: schema::<RemoveSourceArgs>,
     },
     ToolSpec {
         name: "list_sources",
-        description: "Lists sources with their jobs and configuration (such as follow), and what can be added: \
-            the configured test slices only, or any list and version.",
+        description: "Lists sources with their jobs and configuration (such as follow), the commit history, and \
+            what can be added: the configured test slices of mail only, or any list; any version of the history.",
         effect: READ,
         schema: schema::<NoArgs>,
     },
@@ -70,7 +70,7 @@ pub static TOOLS: &[ToolSpec] = &[
         name: "ingest_status",
         description: "Reports progress: jobs by kind with recent errors; months and seed threads retrieved; \
             messages, threads, authors, patches and anchors parsed; chunks embedded; threads extracted, pending \
-            and skipped; features, decisions, positions and citations; code snapshots; graph vertices and edges.",
+            and skipped; features, decisions, positions and citations; the commit history; graph vertices and edges.",
         effect: READ,
         schema: schema::<NoArgs>,
     },

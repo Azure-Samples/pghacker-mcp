@@ -156,11 +156,9 @@ async fn range_of(
         return Ok((None, "every branch".into()));
     };
     let addr = |rev: Option<String>| async move {
-        let snapshot = crate::rev::resolve(client, s, repo, rev.as_deref()).await?;
-        snapshot
-            .history
-            .map(|h| h.addr)
-            .context("the revision has no place in the history")
+        crate::rev::resolve(client, s, repo, rev.as_deref())
+            .await
+            .map(|snapshot| snapshot.history.addr)
     };
     let range = match spec.split_once("..") {
         Some((since, upto)) => {

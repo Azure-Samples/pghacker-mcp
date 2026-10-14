@@ -90,12 +90,12 @@ pub fn is_timeout(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&SqlState::QUERY_CANCELED)
 }
 
-/// Lines to read: in these files (or the whole snapshot), matching every
-/// `require` filter and none of the exact `reject` filters.
+/// Lines to read at the history's commit: in these files (or all of the
+/// commit's), matching every `require` filter and none of the exact
+/// `reject` filters.
 pub struct LineQuery<'a> {
-    pub snapshot_id: i32,
-    /// Read the commit history instead of the snapshot's lines.
-    pub history: Option<&'a crate::history::History>,
+    /// Where the commit is in the history.
+    pub history: &'a crate::history::History,
     /// Some files are mounted from other commits than the history's.
     pub mounted: bool,
     pub file_ids: Option<&'a [i32]>,
@@ -129,41 +129,6 @@ pub struct Candidates {
 }
 
 type Param = Box<dyn ToSql + Sync + Send>;
-
-/// The query's SQL and parameters.
-pub fn line_sql(q: &LineQuery<'_>) -> (String, Vec<Param>) {
-    let mut params: Vec<Param> = Vec::new();
-    let scope = match q.file_ids {
-        Some(ids) => {
-            params.push(Box::new(ids.to_vec()));
-            "unnest($1::int4[]) AS f(id)"
-        }
-        None => {
-            params.push(Box::new(q.snapshot_id));
-            "(SELECT id FROM code_files WHERE snapshot_id = $1) AS f"
-        }
-    };
-    let mut sql = if q.scope_first {
-        // Fence the file lookup before applying text filters. The InitPlan
-        // array also avoids estimating thousands of file IDs as most of the
-        // entire archive, which can turn a scoped lookup into a global scan.
-        format!(
-            "SELECT l.file_id, l.line_no, l.line FROM \
-             (SELECT file_id, line_no, line FROM code_lines \
-              WHERE file_id = ANY(ARRAY(SELECT id FROM {scope})) OFFSET 0) AS l WHERE true"
-        )
-    } else {
-        let scope = if q.file_ids.is_some() {
-            "l.file_id = ANY($1::int4[])"
-        } else {
-            "l.file_id = ANY(ARRAY(SELECT id FROM code_files WHERE snapshot_id = $1))"
-        };
-        format!("SELECT l.file_id, l.line_no, l.line FROM code_lines l WHERE {scope}")
-    };
-    push_filters(&mut sql, &mut params, q);
-    sql.push_str(&format!(" LIMIT {}", q.cap + 1));
-    (sql, params)
-}
 
 /// Appends the query's text filters on `l.line`.
 pub(crate) fn push_filters(sql: &mut String, params: &mut Vec<Param>, q: &LineQuery<'_>) {
@@ -268,55 +233,25 @@ pub async fn candidates(
     q: &LineQuery<'_>,
     budget: &Budget,
 ) -> Result<Candidates> {
-    if let Some(h) = q.history {
-        return crate::history::candidates(client, q, h, budget).await;
-    }
-    let (sql, params) = line_sql(q);
-    let mut out = Candidates::default();
-    out.rows = stream_rows(client, &sql, &params, q.cap, budget, &mut out, |row| Row {
-        file_id: row.get(0),
-        line_no: row.get(1),
-        line: row.get(2),
-    })
-    .await?;
-    Ok(out)
+    crate::history::candidates(client, q, q.history, budget).await
 }
 
 /// Lines `lo..=hi` of files, as (file id, line number) → text.
 pub async fn line_ranges(
     client: &impl GenericClient,
-    history: Option<&crate::history::History>,
+    history: &crate::history::History,
     ranges: &[(i32, i32, i32)],
     budget: &Budget,
 ) -> Result<HashMap<(i32, i32), String>> {
-    let mut out = HashMap::new();
     if ranges.is_empty() {
-        return Ok(out);
+        return Ok(HashMap::new());
     }
     if !budget.apply(client).await? {
         bail!("the code-search time budget ran out before reading context; narrow the search");
     }
-    if let Some(h) = history {
-        return crate::history::line_ranges(client, h, ranges)
-            .await
-            .context("cannot read context lines");
-    }
-    let ids: Vec<i32> = ranges.iter().map(|r| r.0).collect();
-    let los: Vec<i32> = ranges.iter().map(|r| r.1).collect();
-    let his: Vec<i32> = ranges.iter().map(|r| r.2).collect();
-    let rows = client
-        .query(
-            "SELECT l.file_id, l.line_no, l.line \
-             FROM unnest($1::int4[], $2::int4[], $3::int4[]) AS r(fid, lo, hi) \
-             JOIN code_lines l ON l.file_id = r.fid AND l.line_no BETWEEN r.lo AND r.hi",
-            &[&ids, &los, &his],
-        )
+    crate::history::line_ranges(client, history, ranges)
         .await
-        .context("cannot read context lines")?;
-    for row in rows {
-        out.insert((row.get(0), row.get(1)), row.get(2));
-    }
-    Ok(out)
+        .context("cannot read context lines")
 }
 
 /// Merges per-line ranges into disjoint ranges per file.
@@ -338,7 +273,7 @@ mod tests {
     use crate::pattern::{Cond, Op};
 
     #[test]
-    fn builds_the_line_query() {
+    fn builds_the_line_filters() {
         let positive = Filter::Any {
             conds: vec![
                 Cond {
@@ -371,9 +306,13 @@ mod tests {
             exact: false,
         };
         let ids = [1, 2];
+        let h = crate::history::History {
+            schema: "pghacker".into(),
+            addr: 7,
+            build: "build".into(),
+        };
         let q = LineQuery {
-            snapshot_id: 7,
-            history: None,
+            history: &h,
             mounted: false,
             file_ids: Some(&ids),
             require: vec![&positive],
@@ -381,14 +320,13 @@ mod tests {
             cap: 10,
             scope_first: false,
         };
-        let (sql, params) = line_sql(&q);
+        let (mut sql, mut params) = (String::new(), Vec::new());
+        push_filters(&mut sql, &mut params, &q);
         assert_eq!(
             sql,
-            "SELECT l.file_id, l.line_no, l.line FROM code_lines l WHERE \
-             l.file_id = ANY($1::int4[]) AND (l.line LIKE $2::text OR l.line ~* $3::text) \
-             AND NOT (l.line LIKE $4::text) LIMIT 11"
+            " AND (l.line LIKE $1::text OR l.line ~* $2::text) AND NOT (l.line LIKE $3::text)"
         );
-        assert_eq!(params.len(), 4);
+        assert_eq!(params.len(), 3);
     }
 
     #[test]
@@ -413,30 +351,6 @@ mod tests {
         assert!(scope_first(1_000_000, &[&weak]));
         assert!(scope_first(1_000_000, &[&Filter::All { exact: false }]));
         assert!(!scope_first(1_000_000, &[&weak, &strong]));
-        let mut q = LineQuery {
-            snapshot_id: 7,
-            history: None,
-            mounted: false,
-            file_ids: None,
-            require: vec![&weak],
-            reject: vec![],
-            cap: 10,
-            scope_first: true,
-        };
-        let (sql, params) = line_sql(&q);
-        assert_eq!(
-            sql,
-            "SELECT l.file_id, l.line_no, l.line FROM \
-             (SELECT file_id, line_no, line FROM code_lines \
-              WHERE file_id = ANY(ARRAY(SELECT id FROM \
-                  (SELECT id FROM code_files WHERE snapshot_id = $1) AS f)) OFFSET 0) AS l WHERE true \
-             AND (l.line LIKE $2::text) LIMIT 11"
-        );
-        assert_eq!(params.len(), 2);
-        let ids = [3, 5];
-        q.file_ids = Some(&ids);
-        let (sql, _) = line_sql(&q);
-        assert!(sql.contains("ANY(ARRAY(SELECT id FROM unnest($1::int4[]) AS f(id)))"));
     }
 
     #[test]

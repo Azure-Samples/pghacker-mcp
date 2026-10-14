@@ -1,4 +1,4 @@
-//! read_file and list_files: a snapshot's files with line numbers, and its
+//! read_file and list_files: a commit's files with line numbers, and its
 //! folders.
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -27,7 +27,7 @@ pub struct ReadFileArgs {
     /// The last line to read. Default: as many as fit (2000 lines, 200 KB).
     #[serde(default)]
     pub end_line: Option<u32>,
-    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
+    /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }
@@ -68,7 +68,7 @@ pub struct ListFilesArgs {
     /// Entries to return: default 500, at most 5000.
     #[serde(default)]
     pub limit: Option<u32>,
-    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
+    /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }
@@ -104,7 +104,7 @@ pub struct ListFilesResult {
     #[serde(rename = "ref")]
     pub git_ref: String,
     pub sha: String,
-    /// The folders this version loaded; the rest of the tree is not indexed.
+    /// The folders the history keeps; the rest of the tree is not indexed.
     pub loaded_paths: Vec<String>,
     pub path: String,
     pub total: u64,
@@ -195,30 +195,17 @@ pub async fn read_file(
         bail!("end_line {wanted_end} is before start_line {start}");
     }
     let end = wanted_end.min(start + MAX_READ_LINES - 1);
-    let rows: Vec<(i32, String)> = match &snapshot.history {
-        Some(h) => {
-            let mut lines: Vec<(i32, String)> =
-                crate::history::line_ranges(client, h, &[(file.id, start as i32, end as i32)])
-                    .await
-                    .context("cannot read the file's lines")?
-                    .into_iter()
-                    .map(|((_, n), line)| (n, line))
-                    .collect();
-            lines.sort_unstable_by_key(|(n, _)| *n);
-            lines
-        }
-        None => client
-            .query(
-                "SELECT line_no, line FROM code_lines WHERE file_id = $1 \
-                 AND line_no BETWEEN $2 AND $3 ORDER BY line_no",
-                &[&file.id, &(start as i32), &(end as i32)],
-            )
-            .await
-            .context("cannot read the file's lines")?
-            .iter()
-            .map(|row| (row.get(0), row.get(1)))
-            .collect(),
-    };
+    let mut rows: Vec<(i32, String)> = crate::history::line_ranges(
+        client,
+        &snapshot.history,
+        &[(file.id, start as i32, end as i32)],
+    )
+    .await
+    .context("cannot read the file's lines")?
+    .into_iter()
+    .map(|((_, n), line)| (n, line))
+    .collect();
+    rows.sort_unstable_by_key(|(n, _)| *n);
     let mut content = String::new();
     let mut last = start - 1;
     for (n, line) in rows {
@@ -250,11 +237,9 @@ pub async fn list_files(
     args: &ListFilesArgs,
 ) -> Result<ListFilesResult> {
     let raw = args.path.as_deref().unwrap_or("").trim();
-    if let Some(h) = &snapshot.history
-        && crate::snapshot::bare_root(raw)
-    {
+    if crate::snapshot::bare_root(raw) {
         let root = raw.trim_matches('/');
-        return virtual_listing(client, snapshot, h, root, args).await;
+        return virtual_listing(client, snapshot, root, args).await;
     }
     let table = FileTable::view(client, snapshot, &[raw.to_owned()]).await?;
     let base = if raw.is_empty() || raw == "." || raw == "/" {
@@ -357,11 +342,10 @@ fn file_entry(f: &crate::snapshot::FileEntry) -> Entry {
 async fn virtual_listing(
     client: &impl GenericClient,
     snapshot: &Snapshot,
-    h: &crate::history::History,
     root: &str,
     args: &ListFilesArgs,
 ) -> Result<ListFilesResult> {
-    let s = crate::history::checked(&h.schema)?;
+    let s = crate::history::checked(&snapshot.history.schema)?;
     let limit = args
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)

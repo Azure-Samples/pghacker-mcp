@@ -6,7 +6,7 @@
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, extraction, graph};
+use pghacker_indexer::{Indexer, extraction, graph, history};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 
@@ -46,20 +46,36 @@ INSERT INTO citations (extract_kind, extract_id, message_id, quote) VALUES
     ('feature', 1, 100, 'adding the PLAN clause'), ('feature', 1, 100, 'PLAN clause to JSON_TABLE'),
     ('decision', 1, 102, 'simplify the nested path'), ('position', 1, 100, 'Here is a patch'),
     ('position', 2, 101, 'not convinced');
-INSERT INTO code_snapshots (id, repo, ref, sha, version, state) VALUES (1, 'postgres', 'REL_19_STABLE', 'aaa', '19', 'ready');
-SELECT setval('code_snapshots_id_seq', 100);
-INSERT INTO code_files (snapshot_id, path, subsystem, blob_sha, size, line_count) VALUES
-    (1, 'src/backend/parser/parse_jsontable.c', 'parser', 'b1', 10, 1),
-    (1, 'src/backend/parser/gram.y', 'parser', 'b2', 10, 1),
-    (1, 'src/backend/executor/execMain.c', 'executor', 'b3', 10, 1),
-    (1, 'README', NULL, 'b4', 10, 1);
+INSERT INTO code_file_versions (id, lineage, path, blob_sha, lo, hi, size, line_count, is_binary, final_newline, bom, subsystem) VALUES
+    (1, 1, 'src/backend/parser/parse_jsontable.c', 'b1', 0, 9223372036854775807, 10, 1, false, true, false, 'parser'),
+    (2, 2, 'src/backend/parser/gram.y', 'b2', 0, 9223372036854775807, 10, 1, false, true, false, 'parser'),
+    (3, 3, 'src/backend/executor/execMain.c', 'b3', 0, 9223372036854775807, 10, 1, false, true, false, 'executor'),
+    (4, 4, 'README', 'b4', 0, 9223372036854775807, 10, 1, false, true, false, NULL);
 "#;
+
+/// An insert of the history's file versions, whose rows [`version`] gives.
+const VERSION_COLUMNS: &str = "INSERT INTO code_file_versions
+    (id, lineage, path, blob_sha, lo, hi, size, line_count, is_binary, final_newline, bom, subsystem) VALUES";
+
+/// A file version of the history at `path`, alive from a commit on.
+fn version(id: u64, path: &str, subsystem: &str) -> String {
+    format!(
+        "({id}, {id}, '{path}', 'v{id}', 4294967296, 9223372036854775807, 1, 1, false, true, false, {subsystem})"
+    )
+}
+
+/// Loads the fixture. The history's tables have no triggers: as a sync does,
+/// its versions' graph entries are recorded after them.
+async fn load(client: &Client) {
+    client.batch_execute(FIXTURE).await.unwrap();
+    assert!(history::capture_files(client, -1).await.unwrap() > 0);
+}
 
 /// A fresh database with the fixture, and the graph built by a full sync.
 async fn synced() -> (TestDb, Client) {
     let db = TestDb::create().await.unwrap();
     let mut client = db.indexer().await.unwrap();
-    client.batch_execute(FIXTURE).await.unwrap();
+    load(&client).await;
     let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
         .await
         .unwrap();
@@ -147,7 +163,7 @@ async fn changes_alone_build_the_graph() {
     // An empty graph and every row captured: applying the changes builds it.
     let db = TestDb::create().await.unwrap();
     let mut client = db.indexer().await.unwrap();
-    client.batch_execute(FIXTURE).await.unwrap();
+    load(&client).await;
     assert!(changes(&client).await > 0);
     assert!(drain(&mut client, 7).await > 0);
     let drift = graph::check(&mut client).await.unwrap();
@@ -378,35 +394,32 @@ async fn merges_and_their_undoing_follow() {
 }
 
 #[tokio::test]
-async fn snapshots_follow_as_they_load_and_go() {
+async fn history_files_follow_syncs_and_installs() {
     let (_db, mut client) = synced().await;
     assert_eq!(
         props(&client, "file:doc/src/sgml/release-19.sgml").await["loaded"],
         false
     );
-    // A snapshot loads as load_snapshot does: files while loading, then ready.
+    // A sync adds versions, a new file's and an existing file's, which no
+    // trigger captures: it records their entries itself.
+    let newest = history::newest_version(&client).await.unwrap();
+    assert_eq!(newest, 4);
     client
-        .batch_execute(
-            "INSERT INTO code_snapshots (id, repo, ref, sha, version, state) VALUES (2, 'postgres', 'REL_19_0', 'bbb', '19', 'loading');
-             INSERT INTO code_files (snapshot_id, path, subsystem, blob_sha, size, line_count) VALUES
-                 (2, 'doc/src/sgml/release-19.sgml', 'doc', 'c1', 10, 1),
-                 (2, 'src/backend/parser/gram.y', 'parser', 'c2', 10, 1);",
-        )
+        .batch_execute(&format!(
+            "{VERSION_COLUMNS} {}, {};
+             UPDATE code_file_versions SET hi = 4294967296 WHERE id = 2;",
+            version(5, "doc/src/sgml/release-19.sgml", "'doc'"),
+            version(6, "src/backend/parser/gram.y", "'parser'"),
+        ))
         .await
         .unwrap();
-    assert_eq!(
-        changes(&client).await,
-        0,
-        "files of a loading snapshot don't count yet"
-    );
-    client
-        .batch_execute("UPDATE code_snapshots SET state = 'ready' WHERE id = 2")
-        .await
-        .unwrap();
+    assert_eq!(changes(&client).await, 0, "the history has no triggers");
+    assert!(history::capture_files(&client, newest).await.unwrap() > 0);
     converged(&mut client).await;
     assert_eq!(
-        props(&client, "file:doc/src/sgml/release-19.sgml").await["loaded"],
-        true
+        props(&client, "file:doc/src/sgml/release-19.sgml").await,
+        json!({ "key": "file:doc/src/sgml/release-19.sgml", "path": "doc/src/sgml/release-19.sgml",
+                "subsystem": "doc", "loaded": true })
     );
     assert!(
         has_edge(
@@ -417,11 +430,22 @@ async fn snapshots_follow_as_they_load_and_go() {
         )
         .await
     );
-    // Purging the first snapshot leaves the files that another source names.
+    // An install swaps in a history without some files, and asks for a full
+    // sync: the files that another source names stay.
     client
-        .batch_execute("DELETE FROM code_snapshots WHERE id = 1")
+        .batch_execute(
+            "DELETE FROM code_file_versions
+             WHERE path IN ('README', 'src/backend/executor/execMain.c', 'src/backend/parser/parse_jsontable.c')",
+        )
         .await
         .unwrap();
+    graph::request_full(&client, "the commit history was installed")
+        .await
+        .unwrap();
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert!(report.full.is_some());
     converged(&mut client).await;
     assert!(!has_vertex(&client, "file:README").await);
     assert!(!has_vertex(&client, "subsystem:executor").await);
@@ -439,12 +463,20 @@ async fn snapshots_follow_as_they_load_and_go() {
         false,
         "an anchor and a feature still name it"
     );
+    // Entries recorded for files that leave apply incrementally too.
     client
-        .batch_execute("UPDATE code_snapshots SET state = 'failed' WHERE id = 2")
+        .batch_execute(
+            "INSERT INTO graph_changes (label, key, end_key)
+             SELECT DISTINCT e.* FROM code_file_versions v
+             CROSS JOIN LATERAL graph_code_file_entries(v.path, v.subsystem) e WHERE v.subsystem = 'parser';
+             DELETE FROM code_file_versions WHERE subsystem = 'parser';",
+        )
         .await
         .unwrap();
     converged(&mut client).await;
     assert!(!has_vertex(&client, "subsystem:parser").await);
+    assert!(!has_vertex(&client, "file:src/backend/parser/gram.y").await);
+    assert!(has_vertex(&client, "subsystem:doc").await);
 }
 
 #[tokio::test]
@@ -452,12 +484,11 @@ async fn updates_that_the_graph_ignores_capture_nothing() {
     let (_db, client) = synced().await;
     client
         .batch_execute(
-            "UPDATE anchors SET resolved = 'REL_19_STABLE@aaa:' || value WHERE kind = 'file';
+            "UPDATE anchors SET resolved = '/branch/REL_19_STABLE/' || value WHERE kind = 'file';
              UPDATE threads SET extraction_state = 'extracted', extracted_version = 1, updated_at = now();
              UPDATE features SET description = 'Rewritten.', updated_at = now();
              UPDATE decisions SET rationale = 'Rewritten.';
              UPDATE messages SET body = 'Rewritten.', body_clean = 'Rewritten.';
-             UPDATE code_snapshots SET committed_at = now();
              UPDATE authors SET updated_at = now();
              UPDATE citations SET quote = quote || '.';
              UPDATE features SET status = status;",
@@ -564,7 +595,7 @@ async fn a_restore_rebuilds_the_graph() {
         .batch_execute(
             "TRUNCATE graph_nodes, graph_edges, graph_sync_runs, graph_changes, graph_sync_state, graph_label_counts,
                       authors, threads, messages, anchors, features, decisions, positions, citations, feature_threads,
-                      feature_files, code_snapshots, code_files, author_names CASCADE;
+                      feature_files, code_file_versions, author_names CASCADE;
              DELETE FROM pghacker_graph._ag_label_edge;
              DELETE FROM pghacker_graph._ag_label_vertex;",
         )
@@ -579,7 +610,7 @@ async fn a_restore_rebuilds_the_graph() {
         .unwrap()
         .get(0);
     assert!(requested, "a TRUNCATE asks for a full sync");
-    client.batch_execute(FIXTURE).await.unwrap();
+    load(&client).await;
     client
         .batch_execute("TRUNCATE graph_changes; SELECT graph_request_full('corpus restore');")
         .await
@@ -884,50 +915,47 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
                 ),
             }
         }
-        17 => match rng.below(4) {
-            // As load_snapshot does: files while loading, then ready.
-            0 => {
-                let mut sql = format!(
-                    "INSERT INTO code_snapshots (id, repo, ref, sha, version, state)
-                     VALUES ({n} + 1000, 'postgres', 'REL_{n}', 'sha{n}', '19', 'loading');"
-                );
-                let paths: Vec<&str> = FILES.iter().copied().filter(|_| rng.chance(50)).collect();
-                for path in paths {
-                    sql.push_str(&format!(
-                        "INSERT INTO code_files (snapshot_id, path, subsystem, blob_sha, size, line_count)
-                         VALUES ({n} + 1000, '{path}', {}, 'b', 1, 1);",
-                        rng.of(SUBSYSTEMS)
-                    ));
-                }
-                if rng.chance(80) {
-                    sql.push_str(&format!("UPDATE code_snapshots SET state = 'ready' WHERE id = {n} + 1000;"));
-                }
-                sql
+        17 => {
+            // As a sync does: new versions, whose graph entries it records.
+            let newest = history::newest_version(&*client).await.unwrap();
+            let paths: Vec<&str> = FILES.iter().copied().filter(|_| rng.chance(50)).collect();
+            if paths.is_empty() {
+                return;
             }
-            1 => format!(
-                "UPDATE code_snapshots SET state = CASE state WHEN 'ready' THEN 'failed' ELSE 'ready' END
-                 WHERE id = (SELECT id FROM code_snapshots ORDER BY id OFFSET {row} LIMIT 1)"
-            ),
-            2 => format!(
-                "UPDATE code_snapshots SET repo = CASE repo WHEN 'postgres' THEN 'replay' ELSE 'postgres' END
-                 WHERE id = (SELECT id FROM code_snapshots ORDER BY id OFFSET {row} LIMIT 1)"
-            ),
-            _ => format!("DELETE FROM code_snapshots WHERE id = (SELECT id FROM code_snapshots ORDER BY id OFFSET {row} LIMIT 1)"),
-        },
-        18 => match rng.below(3) {
-            0 => format!(
-                "UPDATE code_files SET subsystem = {} WHERE id = (SELECT id FROM code_files ORDER BY id OFFSET {row} LIMIT 1)",
-                rng.of(SUBSYSTEMS)
-            ),
-            1 => format!(
-                "INSERT INTO code_files (snapshot_id, path, subsystem, blob_sha, size, line_count)
-                 SELECT id, '{}', {}, 'b', 1, 1 FROM code_snapshots ORDER BY id OFFSET {row} LIMIT 1
-                 ON CONFLICT DO NOTHING",
-                rng.of(FILES),
-                rng.of(SUBSYSTEMS)
-            ),
-            _ => format!("DELETE FROM code_files WHERE id = (SELECT id FROM code_files ORDER BY id OFFSET {row} LIMIT 1)"),
-        },
+            let mut versions = Vec::new();
+            for (k, path) in paths.into_iter().enumerate() {
+                versions.push(version(1000 + n * 10 + k as u64, path, rng.of(SUBSYSTEMS)));
+            }
+            let sql = format!("{VERSION_COLUMNS} {}", versions.join(", "));
+            client.batch_execute(&sql).await.unwrap();
+            history::capture_files(&*client, newest).await.unwrap();
+            return;
+        }
+        18 => {
+            // Versions that leave the history or change, as an install might
+            // make them, with the graph entries of their old and new rows.
+            let changed = if rng.chance(50) {
+                format!(
+                    "DELETE FROM code_file_versions v
+                     WHERE v.id = (SELECT id FROM code_file_versions ORDER BY id OFFSET {row} LIMIT 1)
+                     RETURNING v.path, v.subsystem"
+                )
+            } else {
+                format!(
+                    "UPDATE code_file_versions v SET subsystem = {}
+                     WHERE v.id = (SELECT id FROM code_file_versions ORDER BY id OFFSET {row} LIMIT 1)
+                     RETURNING v.path, v.subsystem",
+                    rng.of(SUBSYSTEMS)
+                )
+            };
+            format!(
+                "WITH old AS (SELECT path, subsystem FROM code_file_versions ORDER BY id OFFSET {row} LIMIT 1),
+                      new AS ({changed})
+                 INSERT INTO graph_changes (label, key, end_key)
+                 SELECT DISTINCT e.* FROM (SELECT * FROM old UNION ALL SELECT * FROM new) r
+                 CROSS JOIN LATERAL graph_code_file_entries(r.path, r.subsystem) e"
+            )
+        }
         19..=21 => {
             // Part of what's waiting, in small batches.
             for _ in 0..=rng.below(3) {

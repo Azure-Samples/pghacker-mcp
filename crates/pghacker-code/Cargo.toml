@@ -1,6 +1,6 @@
 [package]
 name = "pghacker-code"
-description = "Loads source code snapshots from git into code_files and code_lines"
+description = "Builds PostgreSQL's commit history from git, keeps it in sync, and checks it against git"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 chrono.workspace = true
-futures-util.workspace = true
 gix = { workspace = true, features = ["sha1", "max-performance-safe", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "blob-diff", "revision"] }
 pghacker-core.workspace = true
 serde.workspace = true

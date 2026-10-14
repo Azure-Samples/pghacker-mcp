@@ -65,7 +65,8 @@ enum History {
         /// Walk without storing, and print the walk's numbers.
         #[arg(long)]
         dry_run: bool,
-        /// Swap the build into schema pghacker when it is done.
+        /// Swap the build into schema pghacker when it is done, and ask for
+        /// a full graph sync: the graph's files come from the history.
         #[arg(long)]
         install: bool,
         /// Where syncs fetch new commits from.
@@ -201,7 +202,19 @@ async fn history(env: &Env, action: History) -> Result<()> {
                     "secs": started.elapsed().as_secs(),
                 })
             } else {
-                serde_json::to_value(history::build(&env.admin_database_url()?, &opts).await?)?
+                let database_url = env.admin_database_url()?;
+                let stats = history::build(&database_url, &opts).await?;
+                if opts.install {
+                    // The graph's files come from the history, which the
+                    // install swapped in whole.
+                    let client = db::connect(&database_url, "pghacker-indexer").await?;
+                    client
+                        .batch_execute("SET search_path = pghacker, ag_catalog, public")
+                        .await?;
+                    graph::request_full(&client, "the commit history was installed").await?;
+                    jobs::wake(&client, jobs::kind::GRAPH_SYNC).await?;
+                }
+                serde_json::to_value(stats)?
             }
         }
         History::Sync {
@@ -223,7 +236,15 @@ async fn history(env: &Env, action: History) -> Result<()> {
                 tokio::task::spawn_blocking(move || history::fetch::update_clone(&repo_url, &dir))
                     .await??;
             }
-            let stats = history::sync::sync(
+            // The installed history's new files reach the graph, as the job's do.
+            let capture = if schema == pghacker_core::code::DEFAULT_HISTORY_SCHEMA {
+                let recorder = db::connect(&url, "pghacker-indexer").await?;
+                let newest = pghacker_indexer::history::newest_version(&recorder).await?;
+                Some((recorder, newest))
+            } else {
+                None
+            };
+            let synced = history::sync::sync(
                 client,
                 history::sync::SyncOptions {
                     git_dir,
@@ -231,8 +252,11 @@ async fn history(env: &Env, action: History) -> Result<()> {
                     batch,
                 },
             )
-            .await?;
-            serde_json::to_value(stats)?
+            .await;
+            if let Some((recorder, newest)) = capture {
+                pghacker_indexer::history::capture_files(&recorder, newest).await?;
+            }
+            serde_json::to_value(synced?)?
         }
         History::Regroup { schema } => {
             let client = db::connect(&env.admin_database_url()?, "pghacker-indexer").await?;

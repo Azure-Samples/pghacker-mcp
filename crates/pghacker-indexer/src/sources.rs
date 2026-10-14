@@ -1,17 +1,17 @@
-//! Sources: the mailing lists and PostgreSQL versions the indexer retrieves.
-//! Adding one queues the jobs that retrieve it.
+//! Sources: the mailing lists the indexer retrieves, and the PostgreSQL
+//! versions of the commit history. Adding a list queues the jobs that
+//! retrieve it; adding a version loads nothing, since the history holds every
+//! branch, tag and commit, and names the commit it has ([`in_history`]).
 //!
-//! `PGHACKER_SOURCES` decides what can be added. `test-slices`, the default,
-//! retrieves only the configured test slices. `open` retrieves any list of the
-//! postgresql.org archive (chosen months, a range, or the whole archive, plus
-//! seed threads, and optionally following the list: its current month is
-//! retrieved again every hour) and any branch, tag or commit of PostgreSQL.
+//! `PGHACKER_SOURCES` decides which lists can be added. `test-slices`, the
+//! default, retrieves only the configured test slices. `open` retrieves any
+//! list of the postgresql.org archive (chosen months, a range, or the whole
+//! archive, plus seed threads, and optionally following the list: its current
+//! month is retrieved again every hour).
 
-use std::process::Stdio;
 use std::str::FromStr;
-use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Datelike, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,24 +20,17 @@ use tokio_postgres::GenericClient;
 
 use crate::Indexer;
 use crate::jobs::{self, kind};
-use crate::slices::is_full_sha;
-
-/// PostgreSQL's repository, and its GitHub mirror: the code sources allowed.
-pub const OFFICIAL_REPOS: &[&str] = &[
-    "https://git.postgresql.org/git/postgresql.git",
-    "https://github.com/postgres/postgres.git",
-];
 
 /// The jobs listed in add_source's reply; the rest are counted.
 const LISTED_JOBS: usize = 20;
 
-/// What add_source may add: `PGHACKER_SOURCES`.
+/// Which lists add_source may add: `PGHACKER_SOURCES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SourcesMode {
     /// The configured test slices only.
     #[default]
     TestSlices,
-    /// Any list of the archive, and any branch, tag or commit of PostgreSQL.
+    /// Any list of the archive.
     Open,
 }
 
@@ -97,21 +90,15 @@ pub struct AddSourceArgs {
     /// again every hour (true), or stop (false). Unchanged when omitted.
     #[serde(default)]
     pub follow: Option<bool>,
-    /// postgres_version: the branch or tag to load (default: REL_<name>_STABLE,
-    /// or master while the version has no stable branch).
+    /// postgres_version: the branch or tag to look up in the commit history
+    /// (default: REL_<name>_STABLE, or master while the version has no
+    /// stable branch).
     #[serde(default)]
     pub branch: Option<String>,
-    /// postgres_version: the full commit SHA (default: the branch's or tag's
-    /// current commit).
+    /// postgres_version: a full commit SHA to look up instead of a branch or
+    /// tag's current commit.
     #[serde(default)]
     pub sha: Option<String>,
-    /// postgres_version: path prefixes to load (default: the whole tree).
-    #[serde(default)]
-    pub paths: Option<Vec<String>>,
-    /// postgres_version: the git URL, PostgreSQL's repository or its GitHub
-    /// mirror (default: https://git.postgresql.org/git/postgresql.git).
-    #[serde(default)]
-    pub repo_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -127,10 +114,6 @@ pub struct SeedThreadArg {
 pub struct RemoveSourceArgs {
     pub kind: SourceKind,
     pub name: String,
-    /// Also delete what the source loaded: a version's code snapshot. Mailing
-    /// lists keep their messages, which extracts cite.
-    #[serde(default)]
-    pub purge: bool,
 }
 
 /// A job to queue.
@@ -141,13 +124,11 @@ struct PlannedJob {
     priority: i32,
 }
 
-/// What adding a source does: its configuration (merged into the stored
-/// one), the jobs it queues, and what the reply says about them.
+/// What adding a list does: its configuration (merged into the stored one),
+/// the jobs it queues, and what the reply says about them.
 struct Plan {
     config: Value,
     jobs: Vec<PlannedJob>,
-    /// A code snapshot replaces a loaded snapshot of the same commit with other paths.
-    snapshot: Option<Value>,
     summary: Value,
 }
 
@@ -155,42 +136,19 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
     let name = args.name.trim().to_owned();
     ensure!(!name.is_empty(), "name is empty");
     let source_kind = args.kind;
-    if source_kind == SourceKind::PostgresVersion
-        && let Some(schema) = pghacker_core::code::history_schema()
-    {
+    if source_kind == SourceKind::PostgresVersion {
         let client = indexer.pool.get().await?;
+        let schema = pghacker_core::code::history_schema();
         return in_history(&**client, schema, &name, &args).await;
     }
-    let plan = match (indexer.settings.sources, args.kind) {
-        (SourcesMode::TestSlices, SourceKind::MailingList) => {
-            test_list_plan(indexer, &name, &args)?
-        }
-        (SourcesMode::TestSlices, SourceKind::PostgresVersion) => {
-            test_version_plan(indexer, &name, args)?
-        }
-        (SourcesMode::Open, SourceKind::MailingList) => list_plan(indexer, &name, &args).await?,
-        (SourcesMode::Open, SourceKind::PostgresVersion) => version_plan(&name, args).await?,
+    let plan = match indexer.settings.sources {
+        SourcesMode::TestSlices => test_list_plan(indexer, &name, &args)?,
+        SourcesMode::Open => list_plan(indexer, &name, &args).await?,
     };
 
     let mut client = indexer.pool.get().await?;
     let tx = client.transaction().await?;
     let source_id = upsert(&*tx, source_kind, &name, &plan.config).await?;
-    if let Some(snapshot) = &plan.snapshot {
-        // A loaded snapshot of the same commit with other paths is replaced.
-        let sha = snapshot["sha"].as_str().unwrap_or_default();
-        let paths: Vec<String> = serde_json::from_value(snapshot["paths"].clone())?;
-        tx.execute(
-            "DELETE FROM code_snapshots WHERE repo = 'postgres' AND sha = $1 AND paths <> $2",
-            &[&sha, &paths],
-        )
-        .await?;
-        tx.execute(
-            "UPDATE jobs SET state = 'cancelled' WHERE kind = $1 AND key = $2 AND state = 'done'
-             AND payload <> $3",
-            &[&kind::CODE_SNAPSHOT, &format!("postgres/{sha}"), snapshot],
-        )
-        .await?;
-    }
     let mut queued = Vec::new();
     for job in &plan.jobs {
         if jobs::enqueue(
@@ -257,7 +215,6 @@ fn test_list_plan(indexer: &Indexer, name: &str, args: &AddSourceArgs) -> Result
     Ok(Plan {
         config: json!({}),
         jobs: list_jobs(name, &slice.months, &seeds),
-        snapshot: None,
         summary: json!({}),
     })
 }
@@ -302,7 +259,6 @@ async fn list_plan(indexer: &Indexer, name: &str, args: &AddSourceArgs) -> Resul
     Ok(Plan {
         config,
         jobs: list_jobs(name, &months, &seeds),
-        snapshot: None,
         summary,
     })
 }
@@ -402,99 +358,6 @@ fn is_month(month: &str) -> bool {
             .is_ok_and(|m| (1..=12).contains(&m))
 }
 
-/// A test-slices version: the configured commit and paths, or a given commit.
-fn test_version_plan(indexer: &Indexer, name: &str, args: AddSourceArgs) -> Result<Plan> {
-    let slice = &indexer.slices.code;
-    if name != slice.version && args.sha.is_none() {
-        bail!("version {name} has no default commit; pass branch and sha");
-    }
-    let branch = args.branch.unwrap_or_else(|| slice.branch.clone());
-    let sha = args
-        .sha
-        .unwrap_or_else(|| slice.sha.clone())
-        .to_ascii_lowercase();
-    ensure!(
-        is_full_sha(&sha),
-        "sha must be a full 40-character commit SHA"
-    );
-    let paths = args.paths.unwrap_or_else(|| slice.paths.clone());
-    let repo_url = args.repo_url.unwrap_or_else(|| slice.repo_url.clone());
-    Ok(snapshot_plan(name, &repo_url, &branch, &sha, paths))
-}
-
-/// Any branch, tag or commit of PostgreSQL's repository.
-async fn version_plan(name: &str, args: AddSourceArgs) -> Result<Plan> {
-    ensure!(
-        name == "master" || (name.len() <= 2 && name.bytes().all(|b| b.is_ascii_digit())),
-        "name must be a major version, such as 19, or master"
-    );
-    let repo_url = official_repo(args.repo_url.as_deref())?;
-    let paths = args.paths.unwrap_or_default();
-    for path in &paths {
-        ensure!(
-            !path.is_empty()
-                && !path.starts_with('/')
-                && !path.split('/').any(|part| part == ".." || part == "."),
-            "paths must be relative paths in the repository, not {path:?}"
-        );
-    }
-    let (branch, sha) = match (args.branch, args.sha) {
-        (branch, Some(sha)) => {
-            let sha = sha.trim().to_ascii_lowercase();
-            ensure!(
-                is_full_sha(&sha),
-                "sha must be a full 40-character commit SHA"
-            );
-            let branch = branch.unwrap_or_else(|| stable_branch(name));
-            validate_ref(&branch)?;
-            (branch, sha)
-        }
-        (Some(branch), None) => {
-            let sha = resolve_ref(&repo_url, &branch)
-                .await?
-                .ok_or_else(|| anyhow!("{repo_url} has no branch or tag {branch}"))?;
-            (branch, sha)
-        }
-        (None, None) => {
-            let stable = stable_branch(name);
-            match resolve_ref(&repo_url, &stable).await? {
-                Some(sha) => (stable, sha),
-                None => {
-                    let sha = resolve_ref(&repo_url, "master")
-                        .await?
-                        .ok_or_else(|| anyhow!("{repo_url} has no master branch"))?;
-                    ("master".to_owned(), sha)
-                }
-            }
-        }
-    };
-    Ok(snapshot_plan(name, &repo_url, &branch, &sha, paths))
-}
-
-fn snapshot_plan(name: &str, repo_url: &str, branch: &str, sha: &str, paths: Vec<String>) -> Plan {
-    let config = json!({ "repo_url": repo_url, "branch": branch, "sha": sha, "paths": paths });
-    let payload = json!({
-        "repo": "postgres", "repo_url": repo_url, "branch": branch, "sha": sha,
-        "version": name, "paths": paths,
-    });
-    Plan {
-        config,
-        jobs: vec![PlannedJob {
-            kind: kind::CODE_SNAPSHOT,
-            key: format!("postgres/{sha}"),
-            payload: payload.clone(),
-            priority: 3,
-        }],
-        snapshot: Some(payload),
-        summary: json!({
-            "snapshot": {
-                "branch": branch, "sha": sha,
-                "paths": if paths.is_empty() { json!("the whole tree") } else { json!(paths) },
-            },
-        }),
-    }
-}
-
 /// A major version's stable branch: `REL_19_STABLE`; master's is master.
 fn stable_branch(name: &str) -> String {
     if name == "master" {
@@ -504,8 +367,8 @@ fn stable_branch(name: &str) -> String {
     }
 }
 
-/// A PostgreSQL version when the code tools read the commit history in
-/// `schema`: it holds every branch, tag and commit, so nothing is loaded.
+/// A PostgreSQL version, from the commit history in `schema` that the code
+/// tools read: it holds every branch, tag and commit, so nothing is loaded.
 /// The commit the version names (its `sha`, else its `branch`, else its
 /// stable branch, else master), or, when the history lacks it, the history
 /// sync is asked to run now.
@@ -604,23 +467,12 @@ pub async fn in_history(
     }
 }
 
-/// The repository URL, which must be one of [`OFFICIAL_REPOS`].
-pub fn official_repo(url: Option<&str>) -> Result<String> {
-    let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
-        return Ok(OFFICIAL_REPOS[0].to_owned());
-    };
-    let normalized = url.trim_end_matches('/');
-    let normalized = if normalized.ends_with(".git") {
-        normalized.to_owned()
-    } else {
-        format!("{normalized}.git")
-    };
-    ensure!(
-        OFFICIAL_REPOS.contains(&normalized.as_str()),
-        "repo_url must be PostgreSQL's repository: {}",
-        OFFICIAL_REPOS.join(" or ")
-    );
-    Ok(normalized)
+/// A full, lower-case commit SHA.
+fn is_full_sha(sha: &str) -> bool {
+    sha.len() == 40
+        && sha
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 fn validate_ref(name: &str) -> Result<()> {
@@ -634,52 +486,6 @@ fn validate_ref(name: &str) -> Result<()> {
         "{name:?} isn't a branch or tag name"
     );
     Ok(())
-}
-
-/// The commit that branch or tag `name` of `url` points to, if it exists:
-/// `git ls-remote`, preferring a tag's peeled commit, then the tag, then a branch.
-pub async fn resolve_ref(url: &str, name: &str) -> Result<Option<String>> {
-    validate_ref(name)?;
-    let patterns = [
-        format!("refs/tags/{name}^{{}}"),
-        format!("refs/tags/{name}"),
-        format!("refs/heads/{name}"),
-    ];
-    let output = tokio::time::timeout(
-        Duration::from_secs(60),
-        tokio::process::Command::new("git")
-            .arg("ls-remote")
-            .arg(url)
-            .args(&patterns)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow!("git ls-remote {url} took over 60 s"))?
-    .context("cannot run git ls-remote")?;
-    ensure!(
-        output.status.success(),
-        "git ls-remote {url} failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(pick_ref(
-        &String::from_utf8_lossy(&output.stdout),
-        &patterns,
-    ))
-}
-
-/// The SHA of the first of `patterns` that `ls_remote`'s output lists.
-fn pick_ref(ls_remote: &str, patterns: &[String]) -> Option<String> {
-    let refs: Vec<(&str, &str)> = ls_remote
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .collect();
-    patterns.iter().find_map(|pattern| {
-        refs.iter()
-            .find(|(sha, name)| name == pattern && is_full_sha(sha))
-            .map(|(sha, _)| (*sha).to_owned())
-    })
 }
 
 /// Queues the refresh of the current month of every followed list (and of
@@ -772,22 +578,10 @@ pub async fn remove_source(indexer: &Indexer, args: RemoveSourceArgs) -> Result<
             &[&id],
         )
         .await?;
-    let mut purged = 0;
-    if args.purge && args.kind == SourceKind::PostgresVersion {
-        purged = tx
-            .execute("DELETE FROM code_snapshots WHERE source_id = $1", &[&id])
-            .await?;
-        tx.execute(
-            "UPDATE jobs SET state = 'cancelled' WHERE source_id = $1 AND kind = $2",
-            &[&id, &kind::CODE_SNAPSHOT],
-        )
-        .await?;
-    }
     tx.commit().await?;
     Ok(json!({
         "source": { "id": id, "kind": args.kind.as_str(), "name": args.name, "enabled": false },
         "jobs_cancelled": cancelled,
-        "snapshots_purged": purged,
     }))
 }
 
@@ -820,24 +614,23 @@ pub async fn list_sources(indexer: &Indexer) -> Result<Value> {
             })
         })
         .collect();
+    let versions = "Any branch, tag or commit of PostgreSQL in the commit history (this reply's history): \
+        a major version (19: its REL_19_STABLE branch, or master while it has none) or master, at a branch \
+        or tag's current commit or a given sha. Nothing is loaded: add_source names the commit, or starts \
+        the history's sync when the history lacks it.";
     let available = match indexer.settings.sources {
         SourcesMode::TestSlices => json!({
             "mode": "test-slices",
             "mailing_lists": [indexer.slices.mail.list],
-            "postgres_versions": [{
-                "name": indexer.slices.code.version, "branch": indexer.slices.code.branch,
-                "sha": indexer.slices.code.sha, "paths": indexer.slices.code.paths,
-            }],
-            "note": "This deployment retrieves the configured test slices only.",
+            "postgres_versions": versions,
+            "note": "This deployment retrieves the configured test slices of mail only.",
         }),
         SourcesMode::Open => json!({
             "mode": "open",
             "mailing_lists": "Any list at https://www.postgresql.org/list/, such as pgsql-hackers, \
                 pgsql-bugs, pgsql-committers or pgsql-general: chosen months, a range (from, to), or the \
                 whole archive; seed threads; and follow, to retrieve the current month again every hour.",
-            "postgres_versions": "Any branch, tag or commit of PostgreSQL (https://git.postgresql.org/git/postgresql.git): \
-                a major version (19: its REL_19_STABLE branch, or master while it has none) or master, \
-                at a branch or tag's current commit or a given sha; the whole tree, or chosen paths.",
+            "postgres_versions": versions,
         }),
     };
     let history = crate::history::summary(&**client).await?;
@@ -902,50 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn code_comes_only_from_postgresql() {
-        assert_eq!(official_repo(None).unwrap(), OFFICIAL_REPOS[0]);
-        assert_eq!(
-            official_repo(Some("https://github.com/postgres/postgres")).unwrap(),
-            OFFICIAL_REPOS[1]
-        );
-        assert!(official_repo(Some("https://github.com/someone/postgres.git")).is_err());
+    fn versions_name_valid_refs_and_shas() {
+        assert!(is_full_sha("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_full_sha("0123456789ABCDEF0123456789abcdef01234567"));
+        assert!(!is_full_sha("0123456"));
         assert!(validate_ref("REL_19_STABLE").is_ok());
         assert!(validate_ref("--upload-pack=x").is_err());
         assert!(validate_ref("a..b").is_err());
         assert_eq!(stable_branch("19"), "REL_19_STABLE");
         assert_eq!(stable_branch("master"), "master");
-    }
-
-    #[tokio::test]
-    #[ignore = "runs git ls-remote against git.postgresql.org"]
-    async fn resolves_branches_and_tags_of_postgresql() {
-        let url = OFFICIAL_REPOS[0];
-        let stable = resolve_ref(url, "REL_18_STABLE").await.unwrap();
-        assert!(stable.is_some_and(|sha| is_full_sha(&sha)));
-        // An annotated tag resolves to its commit.
-        let tag = resolve_ref(url, "REL_18_0").await.unwrap().unwrap();
-        assert_eq!(tag.len(), 40);
-        assert!(resolve_ref(url, "REL_99_STABLE").await.unwrap().is_none());
-    }
-
-    #[test]
-    fn picks_a_tags_commit_over_the_tag_and_branches() {
-        let a = "a".repeat(40);
-        let b = "b".repeat(40);
-        let c = "c".repeat(40);
-        let output = format!(
-            "{a}\trefs/heads/REL_18_0\n{b}\trefs/tags/REL_18_0\n{c}\trefs/tags/REL_18_0^{{}}\n"
-        );
-        let patterns = [
-            "refs/tags/REL_18_0^{}".to_owned(),
-            "refs/tags/REL_18_0".to_owned(),
-            "refs/heads/REL_18_0".to_owned(),
-        ];
-        assert_eq!(pick_ref(&output, &patterns), Some(c));
-        assert_eq!(
-            pick_ref(&format!("{a}\trefs/heads/REL_18_0\n"), &patterns),
-            Some(a)
-        );
-        assert_eq!(pick_ref("", &patterns), None);
     }
 }

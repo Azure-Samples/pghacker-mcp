@@ -121,7 +121,8 @@ fn release_line(name: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// The major version a ref belongs to, as the snapshots label it.
+/// The major version a ref belongs to: `19` for `REL_19_STABLE` and its
+/// releases, `9` for `REL9_6_STABLE`, and `master` for master.
 pub fn version_of(name: &str) -> Option<String> {
     if name.eq_ignore_ascii_case("master") {
         return Some("master".into());
@@ -202,8 +203,8 @@ pub fn default_ref(refs: &[Ref]) -> Option<&Ref> {
         .or_else(|| refs.iter().find(|r| r.name == "master"))
 }
 
-/// Resolves `version` in the history in `schema` to a commit, as a
-/// snapshot that the code tools read through the history.
+/// Resolves `version` in the history in `schema` to the commit that the
+/// code tools read.
 pub async fn resolve(
     client: &impl GenericClient,
     schema: &str,
@@ -350,16 +351,15 @@ async fn snapshot_at(
         .await?;
     let git_ref = named.unwrap_or_else(|| row.get(1));
     Ok(Snapshot {
-        id: 0,
         repo: repo.to_owned(),
         version: version_of(&git_ref),
         git_ref,
         sha: row.get(0),
-        history: Some(crate::history::History {
+        history: crate::history::History {
             schema: s.to_owned(),
             addr,
             build: row.get(2),
-        }),
+        },
     })
 }
 

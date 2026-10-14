@@ -1,10 +1,8 @@
-//! Resolves anchors. Against loaded code snapshots, a path mentioned in mail
-//! becomes a file ID, `REL_19_STABLE@<sha>:<path>`, from the newest version
-//! that has it. When the code tools read the commit history, a path becomes
-//! a virtual path the tools read (`/branch/<newest release line>/<path>`,
-//! else `/branch/master/<path>`, else `/commit/<sha>/<path>` where its
-//! newest version was made), and an abbreviated commit SHA the commit's full
-//! SHA.
+//! Resolves anchors against the commit history that the code tools read: a
+//! path mentioned in mail becomes a virtual path the tools read
+//! (`/branch/<newest release line>/<path>`, else `/branch/master/<path>`,
+//! else `/commit/<sha>/<path>` where its newest version was made), and an
+//! abbreviated commit SHA the commit's full SHA.
 
 use anyhow::Result;
 use tokio_postgres::GenericClient;
@@ -14,10 +12,7 @@ const MIN_PREFIX: usize = 7;
 
 /// Resolves the anchors that the code now covers; returns how many.
 pub async fn resolve(client: &impl GenericClient) -> Result<u64> {
-    match pghacker_core::code::history_schema() {
-        Some(schema) => resolve_in_history(client, schema).await,
-        None => resolve_in_snapshots(client).await,
-    }
+    resolve_in_history(client, pghacker_core::code::history_schema()).await
 }
 
 /// Resolves file and commit anchors to the commit history in `schema`.
@@ -100,23 +95,4 @@ pub async fn resolve_in_history(client: &impl GenericClient, schema: &str) -> Re
         )
         .await?;
     Ok(files + commits)
-}
-
-/// Resolves the file anchors that a snapshot now covers.
-async fn resolve_in_snapshots(client: &impl GenericClient) -> Result<u64> {
-    Ok(client
-        .execute(
-            "UPDATE anchors a SET resolved = r.file_id
-             FROM (
-                 SELECT DISTINCT ON (f.path) f.path, s.ref || '@' || s.sha || ':' || f.path AS file_id
-                 FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-                 WHERE s.state = 'ready' AND s.repo = 'postgres'
-                 ORDER BY f.path, (s.version ~ '^[0-9]+$') DESC,
-                          CASE WHEN s.version ~ '^[0-9]+$' THEN s.version::int END DESC NULLS LAST,
-                          s.loaded_at DESC
-             ) r
-             WHERE a.kind = 'file' AND a.value = r.path AND a.resolved IS DISTINCT FROM r.file_id",
-            &[],
-        )
-        .await?)
 }

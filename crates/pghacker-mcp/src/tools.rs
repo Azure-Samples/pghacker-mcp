@@ -19,16 +19,8 @@ pub struct NoArgs {}
 
 const READ: Effect = Effect::Read;
 
-pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and code with \
-citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
-(search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full text, \
-semantic search or both; search_patches finds lines in the patches posted, by thread. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
-read-only SQL and Cypher. Code: search (first-class code search), grep (grep command lines), read_file and \
-list_files over the PostgreSQL source loaded (see list_files or get_ontology). Cite Message-IDs and file paths \
-with line numbers in answers.";
-
-/// The instructions when the code tools read the commit history.
-pub const HISTORY_INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and \
+/// The server's instructions.
+pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and \
 code with citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
 (search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full \
 text, semantic search or both; search_patches finds lines in the patches posted, by thread, and the commits that \
@@ -40,13 +32,9 @@ tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) 
 git show and git log, with the threads that discussed each commit. Cite Message-IDs, commit SHAs and file \
 paths with line numbers in answers.";
 
-/// The server's instructions: the history's when the code tools read it.
+/// The server's instructions.
 pub fn instructions() -> &'static str {
-    if code::history::schema_from_env().is_some() {
-        HISTORY_INSTRUCTIONS
-    } else {
-        INSTRUCTIONS
-    }
+    INSTRUCTIONS
 }
 
 pub static TOOLS: &[ToolSpec] = &[
@@ -149,13 +137,10 @@ pub static TOOLS: &[ToolSpec] = &[
     },
 ];
 
-/// How many of TOOLS, at the end, need the commit history.
-const HISTORY_TOOLS: usize = 3;
-
-/// The tools served: the history's only with PGHACKER_CODE_HISTORY, when
-/// the code tools' and query's descriptions also say how to reach it.
+/// The tools served, with the notes on the commit history that the code
+/// tools' and query's descriptions add.
 pub fn served() -> &'static [ToolSpec] {
-    static WITH_HISTORY: LazyLock<Vec<ToolSpec>> = LazyLock::new(|| {
+    static SERVED: LazyLock<Vec<ToolSpec>> = LazyLock::new(|| {
         TOOLS
             .iter()
             .map(|tool| ToolSpec {
@@ -166,14 +151,10 @@ pub fn served() -> &'static [ToolSpec] {
             })
             .collect()
     });
-    if code::history::schema_from_env().is_some() {
-        &WITH_HISTORY
-    } else {
-        &TOOLS[..TOOLS.len() - HISTORY_TOOLS]
-    }
+    &SERVED
 }
 
-/// A tool's description when the code tools read the commit history.
+/// A tool's description, with its note on the commit history.
 fn with_history(tool: &ToolSpec) -> &'static str {
     let note = match tool.name {
         "search" | "grep" | "read_file" | "list_files" => code::HISTORY_NOTE,
@@ -251,29 +232,23 @@ impl Server {
             }
             "search_patches" => {
                 let args: code::SearchPatchesArgs = parse(name, arguments)?;
-                code::search_patches(client, code::history::schema_from_env(), &args)
+                code::search_patches(client, Some(code::history::schema_from_env()), &args)
                     .await
                     .and_then(|result| Ok(serde_json::to_value(result)?))
             }
-            "search_commits" if served().iter().any(|t| t.name == name) => {
+            "search_commits" => {
                 let args: code::SearchCommitsArgs = parse(name, arguments)?;
-                match code::history::schema_from_env() {
-                    Some(schema) => code::search_commits(client, schema, "postgres", &args)
-                        .await
-                        .and_then(|result| Ok(serde_json::to_value(result)?)),
-                    None => Err(anyhow::anyhow!("search_commits needs the commit history")),
-                }
+                code::search_commits(client, code::history::schema_from_env(), "postgres", &args)
+                    .await
+                    .and_then(|result| Ok(serde_json::to_value(result)?))
             }
-            "get_commit" if served().iter().any(|t| t.name == name) => {
+            "get_commit" => {
                 let args: code::GetCommitArgs = parse(name, arguments)?;
-                match code::history::schema_from_env() {
-                    Some(schema) => code::get_commit(client, schema, "postgres", &args)
-                        .await
-                        .and_then(|result| Ok(serde_json::to_value(result)?)),
-                    None => Err(anyhow::anyhow!("get_commit needs the commit history")),
-                }
+                code::get_commit(client, code::history::schema_from_env(), "postgres", &args)
+                    .await
+                    .and_then(|result| Ok(serde_json::to_value(result)?))
             }
-            "blame" if served().iter().any(|t| t.name == name) => {
+            "blame" => {
                 let args: code::BlameArgs = parse(name, arguments)?;
                 match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
                     Ok(snapshot) => code::blame(client, &snapshot, &args)
@@ -335,18 +310,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn history_tools_come_last() {
-        let names: Vec<&str> = TOOLS[TOOLS.len() - HISTORY_TOOLS..]
-            .iter()
-            .map(|t| t.name)
-            .collect();
-        assert_eq!(names, ["blame", "get_commit", "search_commits"]);
+    fn every_tool_is_served() {
+        let names: Vec<&str> = served().iter().map(|t| t.name).collect();
+        assert_eq!(names.len(), 16);
+        for name in ["blame", "get_commit", "search_commits", "search_patches"] {
+            assert!(names.contains(&name), "{name}");
+        }
     }
 
     #[test]
-    fn with_the_history_the_code_tools_and_query_say_how_to_reach_it() {
-        for tool in TOOLS {
-            let described = with_history(tool);
+    fn the_code_tools_and_query_say_how_to_reach_the_history() {
+        for (tool, served) in TOOLS.iter().zip(served()) {
+            let described = served.description;
             assert!(described.starts_with(tool.description), "{}", tool.name);
             let note = match tool.name {
                 "search" | "grep" | "read_file" | "list_files" => Some(code::HISTORY_NOTE),
@@ -365,11 +340,10 @@ mod tests {
             "REL_17_STABLE@",
         ] {
             assert!(code::HISTORY_NOTE.contains(needed), "{needed}");
-            assert!(HISTORY_INSTRUCTIONS.contains(needed), "{needed}");
+            assert!(INSTRUCTIONS.contains(needed), "{needed}");
         }
-        for tool in &TOOLS[TOOLS.len() - HISTORY_TOOLS..] {
-            assert!(HISTORY_INSTRUCTIONS.contains(tool.name), "{}", tool.name);
-            assert!(!INSTRUCTIONS.contains(tool.name), "{}", tool.name);
+        for tool in TOOLS {
+            assert!(INSTRUCTIONS.contains(tool.name), "{}", tool.name);
         }
         for table in ["code_commits", "code_commit_threads", "code_line_instances"] {
             assert!(sql::HISTORY_NOTE.contains(table), "{table}");

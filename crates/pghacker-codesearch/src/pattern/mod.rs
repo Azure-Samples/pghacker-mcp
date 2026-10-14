@@ -1,5 +1,6 @@
 //! Search patterns: grep's and ripgrep's dialects, translated twice, into
-//! conditions on `code_lines.line` that pg_trgm's index can use, and into an
+//! conditions on the text of the commit history's lines
+//! (`code_line_instances.line`) that pg_trgm's index can use, and into an
 //! exact Rust matcher that decides which candidate lines match.
 
 pub mod are;
@@ -88,7 +89,7 @@ impl Filter {
 
     /// An index hint, not a matching rule: every alternative has at least
     /// four internal trigrams. Short terms are cheaper to scan in scope than
-    /// to enumerate from an index shared by all snapshots.
+    /// to enumerate from an index shared by every commit's lines.
     pub fn has_index_literal(&self) -> bool {
         let Filter::Any { conds, .. } = self else {
             return false;

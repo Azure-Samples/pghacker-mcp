@@ -117,20 +117,6 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
         )
         .await?
         .get(0);
-    let snapshots: Vec<Value> = client
-        .query(
-            "SELECT repo, version, ref, sha, state, file_count, line_count, paths, loaded_at FROM code_snapshots ORDER BY id",
-            &[],
-        )
-        .await?
-        .iter()
-        .map(|row| {
-            json!({ "repo": row.get::<_, String>(0), "version": row.get::<_, Option<String>>(1),
-                    "ref": row.get::<_, String>(2), "sha": row.get::<_, String>(3), "state": row.get::<_, String>(4),
-                    "files": row.get::<_, i32>(5), "lines": row.get::<_, i64>(6), "paths": row.get::<_, Vec<String>>(7),
-                    "loaded_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(8) })
-        })
-        .collect();
     // The counts that the sync keeps; until a full sync has written them,
     // counted from the bookkeeping.
     let kept: bool = client
@@ -201,7 +187,7 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
             "positions": counts.get::<_, i64>(13),
             "citations": counts.get::<_, i64>(14),
         },
-        "code": { "snapshots": snapshots, "history": crate::history::summary(&**client).await? },
+        "code": { "history": crate::history::summary(&**client).await? },
         "graph": graph,
     }))
 }

@@ -55,9 +55,7 @@ async fn operand(
     if !range_like && table.exists(first) {
         return Ok((None, rest.clone()));
     }
-    let Some(h) = &snapshot.history else {
-        bail!("grep: /history needs the commit history");
-    };
+    let h = &snapshot.history;
     let names = match first.split_once("..") {
         Some((a, b)) => vec![a.to_owned(), b.to_owned()],
         None => vec![first.to_owned()],
@@ -82,9 +80,7 @@ pub(crate) async fn grep(
     compiled: &Compiled,
     budget: &Budget,
 ) -> Result<Option<(Vec<u8>, Vec<String>, i32)>> {
-    let Some(h) = &snapshot.history else {
-        bail!("grep: /history needs the commit history, which this deployment doesn't serve yet");
-    };
+    let h = &snapshot.history;
     if opts.invert || opts.before > 0 || opts.after > 0 || opts.mode == Mode::FilesWithoutMatch {
         bail!("grep: in /history, -v, -L and context lines aren't supported");
     }

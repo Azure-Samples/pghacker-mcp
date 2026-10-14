@@ -1,6 +1,7 @@
-//! The PG19 replay: loads the PG19 subset, generates searches from its own
-//! code with a fixed seed, and checks each three ways: `search` and the grep
-//! tool's selected lines against ripgrep (patterns translated to Rust
+//! The PG19 replay: serves the PG19 subset from a commit history of its own
+//! (schema `replay_pg19`, branch REL_19_STABLE), generates searches from its
+//! own code with a fixed seed, and checks each three ways: `search` and the
+//! grep tool's selected lines against ripgrep (patterns translated to Rust
 //! syntax), and the grep tool's whole output against GNU grep running the
 //! same command line in Docker.
 
@@ -11,12 +12,12 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{StreamExt, stream};
-use pghacker_code::{RepoSource, SnapshotSpec};
 use pghacker_codesearch::glob::fnmatch;
 use pghacker_codesearch::grep::{self as grep_tool, Limits};
 use pghacker_codesearch::pattern::Dialect;
 use pghacker_codesearch::pattern::gnu::gnu_to_rust;
 use pghacker_codesearch::search::{MatchMode, OutputMode, Strings};
+use pghacker_codesearch::snapshot::FileTable;
 use pghacker_codesearch::{SearchArgs, Snapshot, search};
 use pghacker_core::db;
 use regex::Regex;
@@ -24,11 +25,13 @@ use serde::Serialize;
 use tokio_postgres::Client;
 
 use crate::rg::{RgLines, RgOpts, rg_lines};
-use crate::{Ctx, gnu, percentile, vacuum};
+use crate::{Ctx, gnu, percentile, tree};
 
 const URL: &str = "https://github.com/postgres/postgres.git";
 const REF: &str = "REL_19_STABLE";
 const SHA: &str = "2359968b449a0fd53cfc04d4a644ae02370adec6";
+/// The history the subset is served from.
+const SCHEMA: &str = "replay_pg19";
 const PATHS: [&str; 4] = [
     "src/backend/parser",
     "src/backend/utils/adt",
@@ -691,19 +694,15 @@ fn search_args(c: &Case, corpus: &Corpus) -> Result<SearchArgs> {
     Ok(args)
 }
 
-/// The PG19 subset's snapshot, fetched from GitHub.
-fn spec(ctx: &Ctx) -> SnapshotSpec {
-    SnapshotSpec {
+/// The PG19 subset, fetched from GitHub and served on its branch.
+fn spec() -> tree::Spec {
+    tree::Spec {
         repo: "postgres".into(),
-        git_ref: REF.into(),
+        source: tree::Source::Remote(URL.into()),
         sha: SHA.into(),
-        version: Some("19".into()),
         paths: strings(&PATHS),
-        source: RepoSource::Remote {
-            url: URL.into(),
-            cache_dir: ctx.root.join(".runtime").join("git"),
-        },
-        source_id: None,
+        branch: REF.into(),
+        schema: SCHEMA.into(),
     }
 }
 
@@ -714,57 +713,25 @@ fn tree_dir(ctx: &Ctx) -> PathBuf {
         .join(format!("postgres-{}", &SHA[..12]))
 }
 
-/// Materializes the subset's files when they're missing, for a replay that
-/// runs without `pg19` first, such as the engines' on a deployment.
-pub async fn ensure_tree(ctx: &Ctx) -> Result<()> {
-    let tree = tree_dir(ctx);
-    if !tree.is_dir() {
-        let spec = spec(ctx);
-        let written =
-            tokio::task::spawn_blocking(move || pghacker_code::materialize(&spec, &tree)).await??;
-        println!("materialized {written} files of the PG19 subset");
-    }
-    Ok(())
-}
-
-/// The generated searches as (family, grep command line, search
-/// arguments), from the PG19 subset tree that `pg19` materializes: a
-/// workload for other replays.
-pub fn workload(
-    ctx: &Ctx,
-    count: usize,
-    seed: u64,
-) -> Result<Vec<(String, String, Option<SearchArgs>)>> {
-    let tree = tree_dir(ctx);
-    if !tree.is_dir() {
-        bail!(
-            "run `pghacker-replay pg19` first: it materializes {}",
-            tree.display()
-        );
-    }
-    let mut files = Vec::new();
-    let mut stack = vec![tree.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if let Ok(rel) = path.strip_prefix(&tree) {
-                files.push(rel.to_string_lossy().into_owned());
-            }
-        }
-    }
-    files.sort();
-    let corpus = read_corpus(&tree, &files)?;
-    Ok(generate(&corpus, count, seed)
+/// The commit's text files, in the order the database sorts paths: the
+/// order the corpus has always been read in, so that a seed gives the same
+/// searches.
+async fn text_files(client: &Client, snapshot: &Snapshot) -> Result<Vec<String>> {
+    let table = FileTable::load(client, snapshot).await?;
+    let paths: Vec<String> = table
+        .files
         .iter()
-        .map(|c| {
-            (
-                c.family.to_owned(),
-                c.command.clone(),
-                search_args(c, &corpus).ok(),
-            )
-        })
+        .filter(|f| !f.is_binary)
+        .map(|f| f.path.clone())
+        .collect();
+    Ok(client
+        .query(
+            "SELECT p FROM unnest($1::text[]) AS p ORDER BY p",
+            &[&paths],
+        )
+        .await?
+        .iter()
+        .map(|r| r.get(0))
         .collect())
 }
 
@@ -887,45 +854,27 @@ async fn check(
 
 pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> {
     let started = Instant::now();
-    let spec = spec(ctx);
-    let mut indexer = db::connect(&ctx.indexer_url()?, "pghacker-replay").await?;
-    let t = Instant::now();
-    let mut stats = pghacker_code::load_snapshot(&mut indexer, &spec).await?;
-    let load_s = t.elapsed().as_secs_f64();
-    crate::count_reused(&indexer, &mut stats).await?;
-    println!(
-        "PG19 subset: {} snapshot {}: {} files ({} text, {} binary), {} lines in {load_s:.1}s",
-        if stats.reused { "reused" } else { "loaded" },
-        stats.snapshot_id,
-        stats.files,
-        stats.text_files,
-        stats.binary_files,
-        stats.lines
-    );
-    vacuum(ctx).await?;
-    let tree = tree_dir(ctx);
-    let (s, tr) = (spec.clone(), tree.clone());
-    let written =
-        tokio::task::spawn_blocking(move || pghacker_code::materialize(&s, &tr)).await??;
-    println!("materialized {written} files");
-    let snapshot = Snapshot {
-        id: stats.snapshot_id,
-        repo: "postgres".into(),
-        version: Some("19".into()),
-        git_ref: REF.into(),
-        sha: SHA.into(),
-        history: None,
-    };
     let reader = db::connect(&ctx.reader_url()?, "pghacker-replay").await?;
-    let files: Vec<String> = reader
-        .query(
-            "SELECT path FROM code_files WHERE snapshot_id = $1 AND NOT is_binary ORDER BY path",
-            &[&snapshot.id],
-        )
-        .await?
-        .iter()
-        .map(|r| r.get(0))
-        .collect();
+    let t = Instant::now();
+    let served = tree::serve(&ctx.admin_url()?, &reader, &ctx.runtime, &spec()).await?;
+    let load_s = t.elapsed().as_secs_f64();
+    let snapshot = served.snapshot.clone();
+    println!(
+        "PG19 subset: {} history in {SCHEMA}, commit {} on {REF}: {} files ({} text, {} binary), {} lines in {load_s:.1}s",
+        if served.built { "built" } else { "reused" },
+        &snapshot.sha[..12],
+        served.files,
+        served.text_files,
+        served.binary_files,
+        served.lines
+    );
+    let tree = tree_dir(ctx);
+    let (git_dir, commit, tr) = (served.git_dir.clone(), snapshot.sha.clone(), tree.clone());
+    let written =
+        tokio::task::spawn_blocking(move || crate::tree::materialize(&git_dir, &commit, &tr))
+            .await??;
+    println!("materialized {written} files");
+    let files = text_files(&reader, &snapshot).await?;
     let corpus = Arc::new(read_corpus(&tree, &files).context("cannot read the tree")?);
     let cases = generate(&corpus, count, seed);
     println!(
@@ -1046,9 +995,10 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
         .collect();
     let summary = serde_json::json!({
         "snapshot": {
-            "ref": REF, "sha": SHA, "paths": PATHS, "files": stats.files,
-            "text_files": stats.text_files, "binary_files": stats.binary_files,
-            "lines": stats.lines, "load_seconds": load_s, "reused": stats.reused,
+            "ref": REF, "sha": SHA, "paths": PATHS, "schema": SCHEMA,
+            "commit": snapshot.sha, "files": served.files,
+            "text_files": served.text_files, "binary_files": served.binary_files,
+            "lines": served.lines, "load_seconds": load_s, "reused": !served.built,
         },
         "searches": outcomes.len(),
         "seed": seed,

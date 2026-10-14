@@ -81,7 +81,7 @@ pub(crate) async fn range_of(
         async move {
             crate::rev::resolve(client, &h.schema, &repo, Some(&rev))
                 .await
-                .map(|s| s.history.map_or(0, |h| h.addr))
+                .map(|s| s.history.addr)
         }
     };
     Ok(Some(match spec.split_once("..") {
@@ -123,8 +123,7 @@ pub(crate) async fn matching(
 ) -> Result<(Vec<Matched>, Candidates)> {
     let s = checked(&h.schema)?;
     let q = LineQuery {
-        snapshot_id: 0,
-        history: Some(h),
+        history: h,
         mounted: false,
         file_ids: None,
         require,
@@ -241,9 +240,7 @@ pub(crate) async fn search(
     patterns: &Patterns<'_>,
     budget: &Budget,
 ) -> Result<SearchResult> {
-    let Some(h) = &snapshot.history else {
-        bail!("history search reads the commit history, which this deployment doesn't serve yet");
-    };
+    let h = &snapshot.history;
     let spec = args.history.as_deref().unwrap_or("all");
     let s = checked(&h.schema)?;
     let range = range_of(client, snapshot, h, spec).await?;

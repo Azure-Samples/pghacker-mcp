@@ -228,8 +228,8 @@ function embedEnvironment(config, inherited) {
 
 /**
  * PGHACKER_CODE_HISTORY, from .env or the shell: the schema whose commit
- * history the code tools read (pghacker once installed), for the indexer
- * and pghacker-mcp alike. Unset, they read the snapshots.
+ * history the code tools read, for the indexer and pghacker-mcp alike, such
+ * as a build's before it is installed. Unset, they read pghacker's.
  */
 export function codeHistoryEnvironment(config, inherited = process.env) {
   const schema = String(config.values.PGHACKER_CODE_HISTORY ?? inherited.PGHACKER_CODE_HISTORY ?? "").trim();

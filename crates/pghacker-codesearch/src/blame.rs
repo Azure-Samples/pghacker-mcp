@@ -267,9 +267,7 @@ pub async fn blame(
     snapshot: &Snapshot,
     args: &BlameArgs,
 ) -> Result<BlameResult> {
-    let Some(h) = &snapshot.history else {
-        bail!("blame reads the commit history, which this deployment doesn't serve yet");
-    };
+    let h = &snapshot.history;
     let s = checked(&h.schema)?;
     let mount = mount_of(&args.path);
     let table = FileTable::view(client, snapshot, std::slice::from_ref(&args.path)).await?;
@@ -340,10 +338,12 @@ pub async fn blame(
     if args.reverse {
         // The commit this version is read at: the call's, or its mount's.
         let at = match &mount {
-            Some((root, name)) => crate::rev::resolve_mount(client, s, &snapshot.repo, root, name)
-                .await?
-                .history
-                .map_or(h.addr, |m| m.addr),
+            Some((root, name)) => {
+                crate::rev::resolve_mount(client, s, &snapshot.repo, root, name)
+                    .await?
+                    .history
+                    .addr
+            }
             None => h.addr,
         };
         for id in &ids {

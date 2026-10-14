@@ -1,6 +1,6 @@
 //! The grep tool: a grep command line, with its trailing pipeline, run over a
-//! snapshot as GNU grep 3.11 would run it at the source root, output and
-//! all.
+//! commit's tree as GNU grep 3.11 would run it at the source root, output
+//! and all.
 
 pub mod format;
 pub mod history;
@@ -32,7 +32,7 @@ pub const MAX_OUTPUT: usize = 1 << 20;
 pub struct GrepArgs {
     /// A grep command line, run at the source root, such as `grep -rn "makeNode(" src/backend | head -20`.
     pub command: String,
-    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
+    /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
 }
@@ -68,7 +68,7 @@ pub struct Output {
 pub struct Searched {
     /// The name grep prints.
     pub display: String,
-    /// The snapshot path.
+    /// The file's path, as the tools show it.
     pub path: String,
     /// Selected line numbers (all of them, before -m).
     pub lines: Vec<i32>,
@@ -213,8 +213,8 @@ fn expand(words: &[Word], table: &FileTable, repo: &str, cwd: &str) -> Vec<Strin
 }
 
 /// Bash pathname expansion of `pattern` (a fnmatch pattern, quoted
-/// characters escaped) against the snapshot: the matches in byte order, as
-/// typed (a `./` or absolute prefix kept).
+/// characters escaped) against the commit's tree: the matches in byte
+/// order, as typed (a `./` or absolute prefix kept).
 fn glob_paths(pattern: &str, table: &FileTable, repo: &str, cwd: &str) -> Vec<String> {
     let comps: Vec<&str> = pattern.split('/').collect();
     let first_wild = comps
@@ -568,8 +568,7 @@ async fn selection(
         .sum();
     let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
-        snapshot_id: snapshot.id,
-        history: snapshot.history.as_ref(),
+        history: &snapshot.history,
         mounted: files.iter().any(|&k| k >= table.own),
         file_ids: Some(&ids),
         require,
@@ -733,7 +732,7 @@ async fn run_inner(
             }
             for ((id, n), text) in engine::line_ranges(
                 client,
-                snapshot.history.as_ref(),
+                &snapshot.history,
                 &engine::merge_ranges(ranges),
                 budget,
             )

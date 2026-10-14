@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use pghacker_core::code::{LATEST_FIRST, history_schema, newest_first};
+use pghacker_core::code::history_schema;
 use pghacker_core::{EDGE_LABELS, GRAPH, VERTEX_LABELS};
 
 /// Each vertex label's properties.
@@ -72,13 +72,6 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
     describe(client, history_schema()).await
 }
 
-/// How the code tools read snapshots.
-const SNAPSHOT_NOTE: &str = "A snapshot is the tree as of committed_at: for a release branch, what \
-    that release contains; work committed to master after the branch point goes to a later release. \
-    The code tools read a version's default, its latest snapshot; name a release (18.3), a ref from \
-    other_refs or a commit SHA as the version to read another, and no version for the newest release \
-    line.";
-
 /// How the code tools, and SQL, read the commit history.
 const HISTORY_NOTE: &str = "The code tools read the commit history: every commit of every branch \
     and tag. version names a major version (its stable branch), a release (18.3, its tag), a branch, \
@@ -138,54 +131,9 @@ async fn history_loaded(client: &impl GenericClient, schema: &str) -> Result<Val
     }))
 }
 
-/// The loaded snapshots: one entry per version, newest first: its default
-/// snapshot, the latest (the newest commit), and the refs of the others,
-/// which stay readable.
-async fn snapshots_loaded(client: &impl GenericClient) -> Result<Value> {
-    let mut code: Vec<(String, Option<String>, Value, Vec<String>)> = Vec::new();
-    for row in client
-        .query(
-            &format!(
-                "SELECT repo, version, ref, sha, paths, file_count, line_count, committed_at
-                 FROM code_snapshots WHERE state = 'ready' ORDER BY {LATEST_FIRST}"
-            ),
-            &[],
-        )
-        .await?
-    {
-        let (repo, version, git_ref): (String, Option<String>, String) =
-            (row.get(0), row.get(1), row.get(2));
-        match code
-            .iter_mut()
-            .find(|(r, v, ..)| *r == repo && *v == version)
-        {
-            Some((.., others)) => others.push(git_ref),
-            None => {
-                let latest = json!({ "ref": git_ref, "sha": row.get::<_, String>(3),
-                                     "committed_at": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>(7),
-                                     "paths": row.get::<_, Vec<String>>(4), "files": row.get::<_, i32>(5),
-                                     "lines": row.get::<_, i64>(6) });
-                code.push((repo, version, latest, Vec::new()));
-            }
-        }
-    }
-    code.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| newest_first(a.1.as_deref().unwrap_or(""), b.1.as_deref().unwrap_or("")))
-    });
-    Ok(Value::Array(
-        code
-        .into_iter()
-        .map(|(repo, version, latest, others)| {
-            json!({ "repo": repo, "version": version, "default": latest, "other_refs": others })
-        })
-        .collect(),
-    ))
-}
-
-/// get_ontology. With `history`, the code tools read the commit history in
-/// that schema: `loaded.code` describes it instead of the snapshots.
-pub async fn describe(client: &impl GenericClient, history: Option<&str>) -> Result<Value> {
+/// get_ontology, with `loaded.code` describing the commit history in
+/// `history`, the schema the code tools read.
+pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Value> {
     let kept: HashMap<String, i64> = client
         .query("SELECT label, count FROM graph_label_counts", &[])
         .await?
@@ -239,17 +187,12 @@ pub async fn describe(client: &impl GenericClient, history: Option<&str>) -> Res
             &[],
         )
         .await?;
-    let (code, code_note) = match history {
-        Some(schema) => (history_loaded(client, schema).await?, HISTORY_NOTE),
-        None => (snapshots_loaded(client).await?, SNAPSHOT_NOTE),
-    };
+    let code = history_loaded(client, history).await?;
     let mut sql = vec![
         "SELECT a.display_name, count(*) FROM messages m JOIN authors a ON a.id = m.author_id GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
         "SELECT f.slug, f.status, f.release, count(ft.thread_id) AS threads FROM features f LEFT JOIN feature_threads ft ON ft.feature_id = f.id WHERE f.merged_into IS NULL GROUP BY f.id ORDER BY threads DESC",
     ];
-    if history.is_some() {
-        sql.extend(HISTORY_SQL);
-    }
+    sql.extend(HISTORY_SQL);
     Ok(json!({
         "graph": {
             "name": GRAPH,
@@ -292,7 +235,7 @@ pub async fn describe(client: &impl GenericClient, history: Option<&str>) -> Res
             },
             "embeddings": { "chunks_embedded": coverage.get::<_, i64>(10), "chunks": coverage.get::<_, i64>(11) },
             "code": code,
-            "code_note": code_note,
+            "code_note": HISTORY_NOTE,
         },
     }))
 }

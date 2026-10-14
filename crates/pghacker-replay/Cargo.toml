@@ -13,6 +13,7 @@ chrono.workspace = true
 clap.workspace = true
 deadpool-postgres.workspace = true
 futures-util.workspace = true
+gix = { workspace = true, features = ["sha1", "max-performance-safe", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 pghacker-code.workspace = true
 pghacker-codesearch.workspace = true
 pghacker-core.workspace = true
@@ -24,6 +25,9 @@ tokio-postgres.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 # A performance-tuning program, not an API example: it compares wide searches
 # and pipeline counts on the full PG19 tree with GNU grep. Cargo builds it as an
 # example.
@@ -32,12 +36,13 @@ name = "profile_full"
 path = "perf_tuning/profile_full.rs"
 doc-scrape-examples = false
 
-# Times one call through both engines in pghacker_bench.
+# Times one code-tool call through a commit history.
 [[example]]
 name = "profile_history"
 path = "perf_tuning/profile_history.rs"
 doc-scrape-examples = false
 
+# Checks a commit history build against git.
 [[example]]
 name = "history_parity"
 path = "perf_tuning/history_parity.rs"

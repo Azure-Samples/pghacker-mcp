@@ -30,7 +30,7 @@ tempfile.workspace = true
 tokio.workspace = true
 
 # A performance-tuning program, not an API example: it profiles code searches
-# on a synthetic multi-snapshot database. Cargo builds it as an example.
+# on a synthetic commit history. Cargo builds it as an example.
 [[example]]
 name = "profile_search"
 path = "perf_tuning/profile_search.rs"

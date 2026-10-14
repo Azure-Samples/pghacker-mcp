@@ -1,30 +1,27 @@
-//! Code snapshots: which of several is the latest, as the code tools and the
-//! ontology both choose it. Every loaded snapshot is kept; the latest is only
-//! the default.
+//! The commit history that the code tools read, and how versions sort.
 
 use std::cmp::Ordering;
 use std::sync::LazyLock;
 
-/// Names the schema of a history build to read code from instead of the
-/// snapshots, such as `pghacker_history`, or `pghacker` once installed.
+/// Overrides the schema of the commit history the code tools read, such as
+/// a build's own `pghacker_history` before it is installed.
 pub const HISTORY_ENV: &str = "PGHACKER_CODE_HISTORY";
 
-/// The history schema the flag names, if any: the code tools then read the
-/// commit history, and anchors resolve to its virtual paths.
-pub fn history_schema() -> Option<&'static str> {
-    static SCHEMA: LazyLock<Option<String>> = LazyLock::new(|| {
+/// Where an install puts the commit history.
+pub const DEFAULT_HISTORY_SCHEMA: &str = "pghacker";
+
+/// The schema of the commit history that the code tools read and anchors
+/// resolve to: [`HISTORY_ENV`]'s, else [`DEFAULT_HISTORY_SCHEMA`].
+pub fn history_schema() -> &'static str {
+    static SCHEMA: LazyLock<String> = LazyLock::new(|| {
         std::env::var(HISTORY_ENV)
             .ok()
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_HISTORY_SCHEMA.to_owned())
     });
-    SCHEMA.as_deref()
+    &SCHEMA
 }
-
-/// `ORDER BY` for snapshots, latest first: the newest commit, so a release
-/// branch's head comes before its releases, and a later release before an
-/// earlier one.
-pub const LATEST_FIRST: &str = "committed_at DESC NULLS LAST, loaded_at DESC NULLS LAST, id DESC";
 
 /// A numbered release line, such as 19, or 9 for 9.0 to 9.6; None for names
 /// such as master.

@@ -4,11 +4,15 @@
 //! became. Vertex properties never include emails.
 //!
 //! Triggers on the tables record in `graph_changes` the keys of the vertices
-//! and edges that each change may affect (migration 0010). [`sync_changes`]
-//! recomputes just those from the tables, in bounded batches:
+//! and edges that each change may affect (migration 0010). The commit
+//! history's file versions, which give the File and Subsystem vertices and
+//! the PART_OF edges, have no triggers: what changes them records their keys
+//! itself ([`crate::history::capture_files`]). [`sync_changes`] recomputes
+//! just those from the tables, in bounded batches:
 //!
 //! - A vertex is wanted if its row exists and isn't merged; a file, release,
-//!   subsystem, commit or CommitFest entry if any row names it.
+//!   subsystem, commit or CommitFest entry if any row names it. A file is
+//!   `loaded` when the commit history has it.
 //! - An edge is wanted if a row implies it and both its vertices are in the
 //!   graph.
 //! - A vertex that leaves the graph takes its edges with it, and one that
@@ -159,13 +163,6 @@ macro_rules! extract_key {
     };
 }
 
-/// Whether code file `f`'s snapshot `s` counts: a ready snapshot of postgres.
-macro_rules! ready {
-    () => {
-        "s.state = 'ready' AND s.repo = 'postgres'"
-    };
-}
-
 /// The numeric IDs in the keys with a prefix, from a text[] parameter.
 macro_rules! ids {
     ($prefix:literal, $param:literal) => {
@@ -237,21 +234,14 @@ UNION ALL
 SELECT 'subsystem:' || x.subsystem, 'Subsystem', ",
     subsystem_props!(),
     "
-FROM (SELECT DISTINCT f.subsystem FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-      WHERE ",
-    ready!(),
-    " AND f.subsystem IS NOT NULL) x
+FROM (SELECT DISTINCT v.subsystem FROM code_file_versions v WHERE v.subsystem IS NOT NULL) x
 UNION ALL
 SELECT 'file:' || p.path, 'File', ",
     file_props!(),
     "
 FROM (
     SELECT path, max(subsystem) AS subsystem, bool_or(loaded) AS loaded FROM (
-        SELECT f.path, f.subsystem, true AS loaded
-        FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-        WHERE ",
-    ready!(),
-    "
+        SELECT v.path, max(v.subsystem) AS subsystem, true AS loaded FROM code_file_versions v GROUP BY v.path
         UNION ALL SELECT a.value, NULL, false FROM anchors a WHERE a.kind = 'file'
         UNION ALL SELECT ff.path, NULL, false FROM feature_files ff
     ) x GROUP BY path
@@ -281,9 +271,8 @@ UNION ALL
 SELECT 'MENTIONS', 'message:' || m.message_id, ", anchor_key!(), "
 FROM anchors a JOIN messages m ON m.id = a.message_id
 UNION ALL
-SELECT 'PART_OF', 'file:' || f.path, 'subsystem:' || f.subsystem
-FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-WHERE ", ready!(), " AND f.subsystem IS NOT NULL
+SELECT DISTINCT 'PART_OF', 'file:' || v.path, 'subsystem:' || v.subsystem
+FROM code_file_versions v WHERE v.subsystem IS NOT NULL
 UNION ALL
 SELECT 'DISCUSSES', 'thread:' || ft.thread_id, 'feature:' || f.slug
 FROM feature_threads ft JOIN features f ON f.id = ft.feature_id
@@ -368,10 +357,7 @@ SELECT 'subsystem:' || x.subsystem, 'Subsystem', ",
 FROM unnest(",
     names!("subsystem:", "$1"),
     ") x (subsystem)
-WHERE EXISTS (SELECT FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-              WHERE ",
-    ready!(),
-    " AND f.subsystem = x.subsystem)
+WHERE EXISTS (SELECT FROM code_file_versions v WHERE v.subsystem = x.subsystem)
 UNION ALL
 SELECT 'file:' || p.path, 'File', ",
     file_props!(),
@@ -379,11 +365,8 @@ SELECT 'file:' || p.path, 'File', ",
 FROM (SELECT x.path, c.subsystem, c.loaded FROM unnest(",
     names!("file:", "$1"),
     ") x (path)
-      CROSS JOIN LATERAL (SELECT max(f.subsystem) AS subsystem, count(*) > 0 AS loaded
-                          FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-                          WHERE ",
-    ready!(),
-    " AND f.path = x.path) c) p
+      CROSS JOIN LATERAL (SELECT max(v.subsystem) AS subsystem, count(*) > 0 AS loaded
+                          FROM code_file_versions v WHERE v.path = x.path) c) p
 WHERE p.loaded OR EXISTS (SELECT FROM anchors a WHERE a.kind = 'file' AND a.value = p.path)
    OR EXISTS (SELECT FROM feature_files ff WHERE ff.path = p.path)
 UNION ALL
@@ -483,13 +466,11 @@ JOIN messages m ON m.id = a.message_id"
         ends: &["subsystem:"],
         by_end: false,
         sql: concat!(
-            "SELECT 'file:' || f.path, 'subsystem:' || f.subsystem
-FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-WHERE ", ready!(), " AND f.subsystem IS NOT NULL AND f.path = ANY (", names!("file:", "$1"), ")
+            "SELECT DISTINCT 'file:' || v.path, 'subsystem:' || v.subsystem FROM code_file_versions v
+WHERE v.subsystem IS NOT NULL AND v.path = ANY (", names!("file:", "$1"), ")
 UNION ALL
-SELECT 'file:' || f.path, 'subsystem:' || f.subsystem
-FROM code_files f JOIN code_snapshots s ON s.id = f.snapshot_id
-WHERE ", ready!(), " AND f.subsystem = ANY (", names!("subsystem:", "$2"), ")"
+SELECT DISTINCT 'file:' || v.path, 'subsystem:' || v.subsystem FROM code_file_versions v
+WHERE v.subsystem = ANY (", names!("subsystem:", "$2"), ")"
         ),
     },
     EdgeSource {

@@ -347,10 +347,10 @@ async fn searches_extracts_with_citations() {
 }
 
 #[tokio::test]
-async fn describes_the_commit_history_when_the_code_tools_read_it() {
+async fn describes_the_commit_history_the_code_tools_read() {
     let db = corpus().await;
     let reader = db.reader().await.unwrap();
-    let out = ontology::describe(&reader, Some("pghacker")).await.unwrap();
+    let out = ontology::describe(&reader, "pghacker").await.unwrap();
     assert_eq!(
         out["loaded"]["code"],
         Value::Null,
@@ -376,7 +376,7 @@ async fn describes_the_commit_history_when_the_code_tools_read_it() {
         )
         .await
         .unwrap();
-    let out = ontology::describe(&reader, Some("pghacker")).await.unwrap();
+    let out = ontology::describe(&reader, "pghacker").await.unwrap();
     let code = &out["loaded"]["code"];
     assert_eq!((&code["commits"], &code["tags"]), (&json!(3), &json!(1)));
     let mut branches: Vec<&str> = code["branches"]
@@ -412,50 +412,22 @@ async fn describes_the_commit_history_when_the_code_tools_read_it() {
             panic!("{q}: {error}");
         }
     }
-    // Without the history, the snapshots, as before.
-    let out = ontology::describe(&reader, None).await.unwrap();
-    assert!(out["loaded"]["code"].is_array());
-    assert!(
-        out["loaded"]["code_note"]
-            .as_str()
-            .unwrap()
-            .contains("other_refs")
-    );
-    assert_eq!(out["examples"]["sql"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn describes_the_ontology() {
     let db = corpus().await;
-    db.indexer()
-        .await
-        .unwrap()
-        .batch_execute(
-            "INSERT INTO code_snapshots (repo, ref, sha, version, state, committed_at) VALUES
-               ('postgres', 'REL_19_0', 'abd', '19', 'ready', '2026-09-20 12:00:00+00'),
-               ('postgres', 'REL_19_STABLE', 'abc', '19', 'ready', '2026-09-30 12:00:00+00'),
-               ('postgres', 'REL_18_6', 'abe', '18', 'ready', '2026-08-10 12:00:00+00')",
-        )
-        .await
-        .unwrap();
     let reader = db.reader().await.unwrap();
     let out = match ontology::get_ontology(&reader).await {
         Ok(out) => out,
         Err(error) => panic!("{error:?}"),
     };
-    // One entry per version, newest first, defaulting to its latest snapshot.
-    let code = &out["loaded"]["code"];
-    assert_eq!(code.as_array().unwrap().len(), 2);
-    assert_eq!(code[0]["version"], "19");
-    assert_eq!(code[0]["default"]["ref"], "REL_19_STABLE");
-    assert_eq!(code[0]["default"]["committed_at"], "2026-09-30T12:00:00Z");
-    assert_eq!(code[0]["other_refs"], serde_json::json!(["REL_19_0"]));
-    assert_eq!(code[1]["default"]["ref"], "REL_18_6");
+    assert_eq!(out["loaded"]["code"], Value::Null, "no history is built");
     assert!(
         out["loaded"]["code_note"]
             .as_str()
             .unwrap()
-            .contains("other_refs")
+            .contains("commit history")
     );
     let tables: Vec<&str> = out["tables"]
         .as_array()
@@ -464,6 +436,7 @@ async fn describes_the_ontology() {
         .map(|t| t["table"].as_str().unwrap())
         .collect();
     assert!(tables.contains(&"messages") && tables.contains(&"features"));
+    assert!(tables.contains(&"code_commits") && !tables.contains(&"code_lines"));
     assert!(!tables.contains(&"author_emails") && !tables.contains(&"jobs"));
     assert!(
         !tables.contains(&"distinct_pairs"),

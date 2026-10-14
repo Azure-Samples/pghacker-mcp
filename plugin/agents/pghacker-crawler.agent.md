@@ -28,17 +28,17 @@ this deployment can add:
 
 - `mode: test-slices` (local development): `add_source` retrieves only the
   configured test slices: two months of pgsql-hackers plus seed threads on
-  SQL/PGQ and SQL/JSON, and a PG19 code subset.
+  SQL/PGQ and SQL/JSON.
 - `mode: open` (the Azure deployment): any list of the postgresql.org archive
   (`months`, a range with `from` and `to`, or the whole archive when you give
   neither and no `seed_threads`), whole threads (`seed_threads`), and
-  `follow: true` to retrieve the list's current month again every hour; and
-  any PostgreSQL version's code (`19`, `master`) at a branch, tag or commit,
-  the whole tree unless the user names paths.
-- When the code tools read the commit history (`list_sources.history`),
-  every branch, tag and commit is already there: `add_source` for a version
-  loads nothing and names the commit (`covered`), or, for one the history
-  lacks, starts its sync.
+  `follow: true` to retrieve the list's current month again every hour.
+- The code tools read the commit history (`list_sources.history`), where
+  every branch, tag and commit already is: `add_source` for a PostgreSQL
+  version (`19`, `master`) loads nothing and names the commit (`covered`),
+  or, for one the history lacks, starts its sync. When `history` is null, no
+  history is installed and the code tools have no code: say so, since an
+  operator builds it.
 
 Add what the user asks for. Confirm the scope before a large addition: a
 whole archive is decades of mail, and a model extracts every thread in it,

@@ -1,5 +1,5 @@
 //! The first-class search operation: text, regex or identifier queries over a
-//! snapshot's lines, with scope, filters, output shapes, paging, coverage
+//! commit's lines, with scope, filters, output shapes, paging, coverage
 //! order, a time budget and similar names when nothing matches.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -155,7 +155,7 @@ pub struct SearchArgs {
     /// Time limit in milliseconds: default 4000, at most 10000.
     #[serde(default)]
     pub budget_ms: Option<u32>,
-    /// PostgreSQL version: a major version such as 19 (its latest snapshot), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
+    /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
     /// Search the commit history instead of one version: `all`, a branch, tag or commit with its history (REL_17_STABLE), or a range A..B (B's history that isn't A's). Gives each line once per path and text, with the commit that added it, those that removed it, and the branches and releases that have it.
@@ -293,7 +293,7 @@ impl Patterns<'_> {
 }
 
 /// Runs the line query for `files` (indices into `table`; `whole` when they
-/// are all of the snapshot's text files) and keeps the lines the patterns
+/// are all of the commit's text files) and keeps the lines the patterns
 /// match.
 pub(crate) async fn find_lines(
     client: &impl GenericClient,
@@ -326,8 +326,7 @@ pub(crate) async fn find_lines(
         .sum();
     let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
-        snapshot_id: snapshot.id,
-        history: snapshot.history.as_ref(),
+        history: &snapshot.history,
         mounted: files.iter().any(|&k| k >= table.own),
         file_ids: if whole { None } else { Some(&ids) },
         require,
@@ -777,7 +776,7 @@ async fn search_inner(
                     .collect();
                 context_lines = engine::line_ranges(
                     client,
-                    snapshot.history.as_ref(),
+                    &snapshot.history,
                     &engine::merge_ranges(ranges),
                     budget,
                 )
@@ -1019,7 +1018,7 @@ async fn complement(
             .collect();
         let text = engine::line_ranges(
             client,
-            snapshot.history.as_ref(),
+            &snapshot.history,
             &engine::merge_ranges(ranges),
             budget,
         )
@@ -1090,17 +1089,13 @@ async fn similar_names(
         return Ok((None, false));
     }
     let ids: Vec<i32> = files.iter().map(|&k| table.files[k].id).collect();
-    let scope = if whole {
-        "l.file_id IN (SELECT id FROM code_files WHERE snapshot_id = $1)"
+    // $1 is the commit (or the files) and $2 the pattern; $3 is the files'
+    // lineages.
+    let h = &snapshot.history;
+    let lineages = if whole {
+        Vec::new()
     } else {
-        "l.file_id = ANY($1::int4[])"
-    };
-    // In the history, $1 is the commit (or the files) and $2 the pattern;
-    // $3 is the files' lineages.
-    let history = snapshot.history.as_ref();
-    let lineages = match (history, whole) {
-        (Some(h), false) => crate::history::lineages_of(client, h, &ids).await?,
-        _ => Vec::new(),
+        crate::history::lineages_of(client, h, &ids).await?
     };
     let mut similar = Similar::default();
     let mut timed_out = false;
@@ -1108,31 +1103,21 @@ async fn similar_names(
         let Some(id) = pattern::identifier_pattern(name) else {
             continue;
         };
-        let spell_sql = match history {
-            Some(h) => format!(
-                "SELECT m[1], count(DISTINCT l.id) FROM {}, \
-                 regexp_matches(l.line, $2, 'gi') m GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5",
-                crate::history::lines_matching(h, "l.line ~* $2", whole)?
-            ),
-            None => format!(
-                "SELECT m[1], count(DISTINCT (l.file_id, l.line_no)) FROM code_lines l, \
-                 regexp_matches(l.line, $2, 'gi') m WHERE {scope} AND l.line ~* $2 \
-                 GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5"
-            ),
-        };
+        let spell_sql = format!(
+            "SELECT m[1], count(DISTINCT l.id) FROM {}, \
+             regexp_matches(l.line, $2, 'gi') m GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5",
+            crate::history::lines_matching(h, "l.line ~* $2", whole)?
+        );
         if !budget.apply(client).await? {
             timed_out = true;
             break;
         }
-        let rows = match (history, whole) {
-            (Some(h), true) => client.query(spell_sql.as_str(), &[&h.addr, &id]).await,
-            (Some(_), false) => {
-                client
-                    .query(spell_sql.as_str(), &[&ids, &id, &lineages])
-                    .await
-            }
-            (None, true) => client.query(spell_sql.as_str(), &[&snapshot.id, &id]).await,
-            (None, false) => client.query(spell_sql.as_str(), &[&ids, &id]).await,
+        let rows = if whole {
+            client.query(spell_sql.as_str(), &[&h.addr, &id]).await
+        } else {
+            client
+                .query(spell_sql.as_str(), &[&ids, &id, &lineages])
+                .await
         };
         let rows = match rows {
             Ok(rows) => rows,
@@ -1153,10 +1138,7 @@ async fn similar_names(
             }
         }
         let word = name.trim();
-        let source = match history {
-            Some(h) => crate::history::lines_matching(h, "l.line %> $2", whole)?,
-            None => format!("code_lines l WHERE {scope} AND l.line %> $2"),
-        };
+        let source = crate::history::lines_matching(h, "l.line %> $2", whole)?;
         let sim_sql = format!(
             "SELECT w, round(similarity(w, $2)::numeric, 2)::float8, count(*) FROM \
              (SELECT (regexp_matches(l.line, '[A-Za-z_$][A-Za-z0-9_$]*', 'g'))[1] AS w \
@@ -1167,15 +1149,12 @@ async fn similar_names(
             timed_out = true;
             break;
         }
-        let rows = match (history, whole) {
-            (Some(h), true) => client.query(sim_sql.as_str(), &[&h.addr, &word]).await,
-            (Some(_), false) => {
-                client
-                    .query(sim_sql.as_str(), &[&ids, &word, &lineages])
-                    .await
-            }
-            (None, true) => client.query(sim_sql.as_str(), &[&snapshot.id, &word]).await,
-            (None, false) => client.query(sim_sql.as_str(), &[&ids, &word]).await,
+        let rows = if whole {
+            client.query(sim_sql.as_str(), &[&h.addr, &word]).await
+        } else {
+            client
+                .query(sim_sql.as_str(), &[&ids, &word, &lineages])
+                .await
         };
         let rows = match rows {
             Ok(rows) => rows,

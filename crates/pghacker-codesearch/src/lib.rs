@@ -1,6 +1,7 @@
 //! Code search over pg_trgm: the search operation, grep command lines,
-//! read_file and list_files, over source snapshots that pghacker-code loads
-//! into `code_files` and `code_lines`.
+//! read_file and list_files, over the commit history that pghacker-code
+//! builds: every commit's files and lines, stored once as file versions and
+//! line instances.
 //!
 //! PostgreSQL narrows the lines with pg_trgm for selective patterns, or
 //! scans the selected files first for small scopes and short patterns. A
@@ -110,8 +111,8 @@ List folders and files of the loaded PostgreSQL source: path (default the root),
 as *.c or nodes/*.h, and depth (default 1). The result names the version and commit and the \
 folders loaded (loaded_paths); paths are relative to the source root.";
 
-/// What search, grep, read_file and list_files add to their descriptions
-/// when they read the commit history.
+/// What search, grep, read_file and list_files add to their descriptions:
+/// the commit history makes every commit readable.
 pub const HISTORY_NOTE: &str = "\
 Every commit is readable: version also takes a branch or tag as of a date \
 (REL_17_STABLE@2024-06-01) or commits back (master~3), and paths below /branch/<name>/, \

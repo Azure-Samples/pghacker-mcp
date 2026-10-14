@@ -1,80 +1,121 @@
-//! A synthetic snapshot for the integration tests.
+//! A synthetic commit history for the integration tests: git repositories
+//! of PG-like files, built into the test database's commit history where
+//! the code tools read it.
 
 #![allow(dead_code)]
 
-use anyhow::Result;
-use pghacker_codesearch::Snapshot;
-use tokio_postgres::Client;
+use std::path::Path;
+use std::process::Command;
 
-/// Lines as the loader splits them: on `\n`, without a final empty line.
-pub fn split_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
+use anyhow::Result;
+use pghacker_code::history::{BuildOptions, build};
+use pghacker_codesearch::{Snapshot, resolve_snapshot};
+use pghacker_core::code::{DEFAULT_HISTORY_SCHEMA, history_schema};
+use pghacker_core::testing::TestDb;
+
+/// The path prefixes the fixture histories keep.
+pub const PATHS: [&str; 2] = ["src", "contrib"];
+
+/// (path, content) files; a content of None is a binary file.
+pub type Files<'a> = [(&'a str, Option<&'a str>)];
+
+/// Runs git in `dir` as a fixed author, `tick` minutes into 2026, and
+/// returns its output, trimmed.
+pub fn git(dir: &Path, tick: u32, args: &[&str]) -> String {
+    let date = format!("{} +0000", 1_767_225_600 + tick * 60);
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.org")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.org")
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Inserts a ready snapshot of `repo` with these (path, content) files; a
-/// content of None is a binary file.
-pub async fn load(
-    client: &Client,
-    repo: &str,
-    version: &str,
-    files: &[(&str, Option<&str>)],
-) -> Result<Snapshot> {
-    let row = client
-        .query_one(
-            "INSERT INTO code_snapshots (repo, ref, sha, version, paths, state, loaded_at) \
-             VALUES ($1, 'REL_' || $2 || '_STABLE', md5($1 || $2), $2, ARRAY['src', 'contrib'], \
-                     'ready', now()) RETURNING id, sha",
-            &[&repo, &version],
-        )
-        .await?;
-    let id: i32 = row.get(0);
-    let sha: String = row.get(1);
+/// Writes these files into the work tree at `dir`, a binary file with NUL
+/// bytes.
+pub fn write_files(dir: &Path, files: &Files<'_>) {
     for (path, content) in files {
-        let lines = content.map(split_lines).unwrap_or_default();
-        let file: i32 = client
-            .query_one(
-                "INSERT INTO code_files (snapshot_id, path, blob_sha, size, line_count, \
-                 is_binary, final_newline) VALUES ($1, $2, md5($2), $3, $4, $5, $6) RETURNING id",
-                &[
-                    &id,
-                    path,
-                    &(content.map_or(16, str::len) as i32),
-                    &(lines.len() as i32),
-                    &content.is_none(),
-                    &content.is_none_or(|c| c.is_empty() || c.ends_with('\n')),
-                ],
-            )
-            .await?
-            .get(0);
-        if !lines.is_empty() {
-            let texts: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
-            client
-                .execute(
-                    "INSERT INTO code_lines (file_id, line_no, line) \
-                     SELECT $1, n, t FROM unnest($2::text[]) WITH ORDINALITY AS u(t, n)",
-                    &[&file, &texts],
-                )
-                .await?;
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        match content {
+            Some(text) => std::fs::write(path, text).unwrap(),
+            None => std::fs::write(path, b"\x00\x01binary").unwrap(),
         }
     }
-    client
-        .batch_execute("ANALYZE code_files, code_lines")
-        .await?;
-    Ok(Snapshot {
-        id,
-        repo: repo.to_owned(),
-        version: Some(version.to_owned()),
-        git_ref: format!("REL_{version}_STABLE"),
-        sha,
-        history: None,
-    })
+}
+
+/// Builds the commit history of the repository at `git_dir`, keeping
+/// `paths`, where the code tools read it: installed in `pghacker`, or in
+/// the schema PGHACKER_CODE_HISTORY names.
+pub async fn install(db: &TestDb, git_dir: &Path, paths: &[&str]) -> Result<()> {
+    let schema = history_schema();
+    let install = schema == DEFAULT_HISTORY_SCHEMA;
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: git_dir.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: if install {
+                "pghacker_fixture".into()
+            } else {
+                schema.into()
+            },
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            install,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// A history of `repo` with these files committed on the branch
+/// REL_<version>_STABLE: version `version`'s commit, as the code tools read
+/// it.
+pub async fn load(db: &TestDb, repo: &str, version: &str, files: &Files<'_>) -> Result<Snapshot> {
+    load_versions(db, repo, &[(version, files)]).await
+}
+
+/// A history of `repo` with a branch REL_<version>_STABLE per version, each
+/// forked from a master commit outside the kept paths and holding just its
+/// files in one commit, so the versions share no lines. Returns the first
+/// version's commit, as the code tools read it.
+pub async fn load_versions(
+    db: &TestDb,
+    repo: &str,
+    versions: &[(&str, &Files<'_>)],
+) -> Result<Snapshot> {
+    let dir = tempfile::tempdir()?;
+    let d = dir.path();
+    git(d, 0, &["init", "-q", "-b", "master"]);
+    std::fs::write(d.join("README"), "outside the kept paths\n")?;
+    git(d, 0, &["add", "-A"]);
+    git(d, 0, &["commit", "-q", "-m", "base"]);
+    let base = git(d, 0, &["rev-parse", "HEAD"]);
+    for (k, (version, files)) in versions.iter().enumerate() {
+        let tick = k as u32 + 1;
+        let branch = format!("REL_{version}_STABLE");
+        git(d, tick, &["checkout", "-q", "-b", &branch, &base]);
+        write_files(d, files);
+        git(d, tick, &["add", "-A"]);
+        git(d, tick, &["commit", "-q", "--allow-empty", "-m", version]);
+    }
+    install(db, d, &PATHS).await?;
+    let reader = db.reader().await?;
+    resolve_snapshot(&reader, repo, Some(versions[0].0)).await
 }
 
 pub const GRAM: &str = "\

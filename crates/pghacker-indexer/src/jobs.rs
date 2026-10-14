@@ -15,7 +15,6 @@ use crate::Indexer;
 pub mod kind {
     pub const MBOX_MONTH: &str = "mbox_month";
     pub const SEED_THREAD: &str = "seed_thread";
-    pub const CODE_SNAPSHOT: &str = "code_snapshot";
     pub const EMBED: &str = "embed";
     pub const RESOLVE_ANCHORS: &str = "resolve_anchors";
     pub const GRAPH_SYNC: &str = "graph_sync";
@@ -124,30 +123,26 @@ pub async fn wake(client: &impl GenericClient, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Claims the next due job, if any: of `kinds` only, when given, and never of
-/// `except`.
+/// Claims the next due job, if any: of `kinds` only, when given.
 pub async fn claim(
     client: &impl GenericClient,
     node: &str,
     kinds: Option<&[&str]>,
-    except: &[&str],
 ) -> Result<Option<Job>> {
     let kinds: Option<Vec<String>> =
         kinds.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect());
-    let except: Vec<String> = except.iter().map(|kind| (*kind).to_owned()).collect();
     let row = client
         .query_opt(
             "UPDATE jobs SET state = 'running', locked_by = $1, locked_at = now(), attempts = attempts + 1
              WHERE id = (
                  SELECT id FROM jobs
                  WHERE state = 'queued' AND run_after <= now() AND ($2::text[] IS NULL OR kind = ANY ($2))
-                     AND kind <> ALL ($3)
                  ORDER BY priority DESC, run_after, id
                  FOR UPDATE SKIP LOCKED
                  LIMIT 1
              )
              RETURNING id, source_id, kind, key, payload, attempts, max_attempts",
-            &[&node, &kinds, &except],
+            &[&node, &kinds],
         )
         .await?;
     Ok(row.map(|row| Job {
@@ -292,43 +287,6 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             after_ingest(indexer).await?;
             settle(job, stats)
         }
-        kind::CODE_SNAPSHOT => {
-            let paths: Vec<String> =
-                serde_json::from_value(job.payload.get("paths").cloned().unwrap_or(json!([])))?;
-            let spec = pghacker_code::SnapshotSpec {
-                repo: text("repo")?,
-                git_ref: text("branch")?,
-                sha: text("sha")?,
-                version: job
-                    .payload
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                paths,
-                source: pghacker_code::RepoSource::Remote {
-                    url: text("repo_url")?,
-                    cache_dir: indexer.settings.git_dir.clone(),
-                },
-                source_id: job.source_id,
-            };
-            let mut client = indexer.pool.get().await?;
-            let stats = pghacker_code::load_snapshot(&mut client, &spec).await?;
-            wake(&**client, kind::RESOLVE_ANCHORS).await?;
-            wake(&**client, kind::GRAPH_SYNC).await?;
-            if !indexer.settings.keep_downloads {
-                let clone = pghacker_code::remote_clone_dir(
-                    &indexer.settings.git_dir,
-                    &spec.repo,
-                    &spec.sha,
-                );
-                if let Err(error) = tokio::fs::remove_dir_all(&clone).await
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!(path = %clone.display(), %error, "cannot remove a loaded clone");
-                }
-            }
-            Ok(Outcome::Done(serde_json::to_value(stats)?))
-        }
         kind::EMBED => {
             let report = crate::embedding::backfill(indexer, 40).await?;
             let after = if report.more {
@@ -465,9 +423,9 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
         let indexer = indexer.clone();
         let shutdown = shutdown.clone();
         let node = format!("{node}/{worker}");
-        let (kinds, except) = lane(worker, workers);
+        let kinds = lane(worker, workers);
         handles.push(tokio::spawn(async move {
-            worker_loop(indexer, node, kinds, except, shutdown).await
+            worker_loop(indexer, node, kinds, shutdown).await
         }));
     }
     for handle in handles {
@@ -486,37 +444,23 @@ const RECURRING_KINDS: &[&str] = &[
     kind::PATCH_LINES,
 ];
 
-const NOT_CODE: &[&str] = &[kind::CODE_SNAPSHOT];
-
-/// The job kinds worker `worker` of `workers` claims: only these, when given,
-/// and never those. Worker 0 runs only the recurring jobs, so embedding,
-/// anchors and the graph keep up while the others download. With three or
-/// more workers, worker 1 runs anything and the rest anything but code
-/// snapshots, so neither source starves the other: a batch of snapshots loads
-/// one at a time while mail keeps coming in, and a mail backfill still leaves
-/// a worker for code.
-pub fn lane(
-    worker: usize,
-    workers: usize,
-) -> (Option<&'static [&'static str]>, &'static [&'static str]) {
-    match worker {
-        0 if workers > 1 => (Some(RECURRING_KINDS), &[]),
-        1 => (None, &[]),
-        _ if workers > 2 => (None, NOT_CODE),
-        _ => (None, &[]),
-    }
+/// The job kinds worker `worker` of `workers` claims: only these, when given.
+/// With more than one worker, worker 0 runs only the recurring jobs, so
+/// embedding, anchors and the graph keep up while the others download; the
+/// others run anything.
+pub fn lane(worker: usize, workers: usize) -> Option<&'static [&'static str]> {
+    (worker == 0 && workers > 1).then_some(RECURRING_KINDS)
 }
 
 async fn worker_loop(
     indexer: Indexer,
     node: String,
     kinds: Option<&'static [&'static str]>,
-    except: &'static [&'static str],
     shutdown: CancellationToken,
 ) {
     while !shutdown.is_cancelled() {
         let claimed = match indexer.pool.get().await {
-            Ok(client) => claim(&**client, &node, kinds, except).await,
+            Ok(client) => claim(&**client, &node, kinds).await,
             Err(error) => Err(error.into()),
         };
         match claimed {

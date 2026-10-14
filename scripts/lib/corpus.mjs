@@ -13,7 +13,7 @@ export const EXCLUDED_TABLES = [
 ];
 
 /** Tables whose rows mean a corpus is already there. */
-export const CORPUS_TABLES = ["messages", "threads", "features", "decisions", "positions", "code_snapshots"];
+export const CORPUS_TABLES = ["messages", "threads", "features", "decisions", "positions", "code_commits"];
 
 /** The repositories whose code may be in a corpus: PostgreSQL's. */
 export const CODE_REPOS = ["postgres"];
@@ -42,7 +42,8 @@ export const MIGRATIONS_SQL = `SELECT coalesce(json_agg(json_build_object('versi
 export const EXTENSIONS_SQL = `SELECT json_object_agg(extname, extversion ORDER BY extname) FROM pg_extension
   WHERE extname IN ('age', 'vector', 'pg_trgm', 'pg_textsearch')`;
 
-export const REPOS_SQL = `SELECT coalesce(json_agg(DISTINCT repo), '[]') FROM pghacker.code_snapshots`;
+// The commit history is PostgreSQL's.
+export const REPOS_SQL = `SELECT CASE WHEN EXISTS (SELECT FROM pghacker.code_history) THEN '["postgres"]'::json ELSE '[]'::json END`;
 
 /** Schema pghacker's foreign keys, read with search_path empty so that their references are qualified. */
 export const FOREIGN_KEYS_SQL = `SET search_path = pg_catalog; SELECT coalesce(json_agg(json_build_object(
