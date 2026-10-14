@@ -630,9 +630,14 @@ pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
             alive_at("b", "$1")
         )
     } else {
+        // The scope's lineages narrow the scan, which may then start from
+        // them rather than the whole history's trigram matches.
         format!(
             "(SELECT l.id, l.lineage, l.line, l.lo, l.hi, l.alive \
-              FROM {s}.code_line_instances l WHERE {cond} OFFSET 0) l \
+              FROM {s}.code_line_instances l \
+              WHERE l.lineage = ANY(ARRAY(SELECT lineage FROM {s}.code_file_versions \
+                                          WHERE id = ANY($1::int4[]))) \
+                AND {cond} OFFSET 0) l \
              JOIN (SELECT lineage, lo FROM {s}.code_file_versions \
                    WHERE id = ANY($1::int4[]) OFFSET 0) v \
              ON v.lineage = l.lineage AND {}",
