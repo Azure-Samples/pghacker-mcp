@@ -43,13 +43,56 @@ CREATE TABLE code_lanes (
 );
 
 CREATE TABLE code_commits (
-    addr          int8 PRIMARY KEY,
-    sha           text NOT NULL UNIQUE,
-    lane          int2 NOT NULL,
-    committed_at  timestamptz NOT NULL,
-    author_name   text NOT NULL,
-    subject       text NOT NULL
+    addr            int8 PRIMARY KEY,
+    sha             text NOT NULL UNIQUE,
+    lane            int2 NOT NULL,
+    committed_at    timestamptz NOT NULL,
+    authored_at     timestamptz NOT NULL,
+    -- Names only: emails aren't kept, as with mail.
+    author_name     text NOT NULL,
+    committer_name  text NOT NULL,
+    subject         text NOT NULL,
+    -- The whole message, subject first.
+    message         text NOT NULL,
+    -- Its trailers by key, values in order: people by name, Discussion as
+    -- written (postgr.es/m URLs or message IDs), the others whole. Keys:
+    -- Discussion, Author, Co-authored-by, Reviewed-by, Reported-by,
+    -- Tested-by, Suggested-by, Diagnosed-by, Analyzed-by, Backpatch-through,
+    -- Security, Bug.
+    trailers        jsonb NOT NULL DEFAULT '{}',
+    -- A hash of the changes without whitespace, line numbers or context,
+    -- independent of file order (like git patch-id --stable, but not the
+    -- same value); NULL when no file changed.
+    patch_id        text,
+    -- Commits applying one change to several lanes (the same patch_id, or
+    -- the same subject and author within a week, touching a common file)
+    -- share their group's first commit's address, master's when it has
+    -- one; NULL for a commit alone.
+    backpatch       int8
 );
+CREATE INDEX code_commits_backpatch ON code_commits (backpatch) WHERE backpatch IS NOT NULL;
+CREATE INDEX code_commits_committed_at ON code_commits (committed_at);
+CREATE INDEX code_commits_message_trgm ON code_commits USING gin (message gin_trgm_ops);
+
+-- What each commit changed, file by file, as git show --stat counts it
+-- (changes of mode alone, symlinks and submodules aside).
+CREATE TABLE code_commit_files (
+    addr         int8 NOT NULL,
+    path         text NOT NULL,
+    -- Where a rename moved the file from.
+    old_path     text,
+    status       text NOT NULL CHECK (status IN ('A', 'D', 'M', 'R')),
+    added        int4 NOT NULL,
+    removed      int4 NOT NULL,
+    -- Either side is binary: no lines counted.
+    is_binary    boolean NOT NULL,
+    -- The version the commit made (NULL when deleted) and the one it ended
+    -- (NULL when added).
+    version      int4,
+    old_version  int4,
+    PRIMARY KEY (addr, path)
+);
+CREATE INDEX code_commit_files_path ON code_commit_files (path text_pattern_ops, addr);
 
 CREATE TABLE code_refs (
     kind  text NOT NULL CHECK (kind IN ('branch', 'tag')),

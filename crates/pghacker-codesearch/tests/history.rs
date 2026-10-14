@@ -969,3 +969,239 @@ async fn blame_agrees_with_git_blame() {
     let at_head = ours(at("REL_1_STABLE").await, "src/a.c", false, true).await;
     assert!(gone(&at_head).is_empty());
 }
+
+/// A C file of functions f0..f5, with `edit` applied to its lines.
+fn c_file(edit: impl Fn(&mut Vec<String>)) -> String {
+    let mut lines = vec!["/* a.c */".to_owned()];
+    for f in 0..6 {
+        lines.push(String::new());
+        lines.push("static int".into());
+        lines.push(format!("f{f}(void)"));
+        lines.push("{".into());
+        for i in 0..8 {
+            lines.push(format!("\tint v{i} = {f}{i};"));
+        }
+        lines.push("\treturn 0;".into());
+        lines.push("}".into());
+    }
+    edit(&mut lines);
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
+/// A diff without the lines the history doesn't keep: file modes, blob
+/// ids and rename similarity.
+fn comparable(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter(|l| {
+            ![
+                "index ",
+                "new file",
+                "deleted file",
+                "similarity index",
+                "old mode",
+                "new mode",
+            ]
+            .iter()
+            .any(|p| l.starts_with(p))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn get_commit_matches_git_show() {
+    use pghacker_codesearch::{GetCommitArgs, get_commit};
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let write = |path: &str, data: &[u8]| {
+        let path = d.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, data).unwrap();
+    };
+    let commit = |tick: u32, message: &str| {
+        git(d, tick, &["add", "-A"]);
+        git(d, tick, &["commit", "-q", "-m", message]);
+        git(d, tick, &["rev-parse", "HEAD"])
+    };
+    git(d, 0, &["init", "-q", "-b", "master"]);
+    write("src/a.c", c_file(|_| {}).as_bytes());
+    write("doc/readme.txt", b"one\ntwo\nthree");
+    write("bin.dat", b"\x00\x01\x02");
+    write("src/empty.c", b"");
+    let c0 = commit(1, "c0");
+    // Far-apart changes, close ones, a line gaining its newline.
+    write(
+        "src/a.c",
+        c_file(|l| {
+            l[8] = "\tint v3 = 3;".into();
+            l.insert(25, "\t/* new in f1 */".into());
+            l[37] = "\tint v5 = 25 + 1;".into();
+            l[39] = "\tint v7 = 27 + 1;".into();
+            l[61] = "\tint v5 = 4;".into();
+        })
+        .as_bytes(),
+    );
+    write("doc/readme.txt", b"one\ntwo\nthree\nfour\n");
+    write("bin.dat", b"\x00\x09");
+    let c1 = commit(2, "c1");
+    git(d, 3, &["checkout", "-q", "-b", "REL_1_STABLE", &c1]);
+    write(
+        "src/a.c",
+        c_file(|l| {
+            l[8] = "\tint v3 = 3;".into();
+            l.insert(25, "\t/* new in f1 */".into());
+            l[37] = "\tint v5 = 25 + 1;".into();
+            l[39] = "\tint v7 = 27 + 1;".into();
+            l[61] = "\tint v5 = 4;".into();
+            l[46] = "\tint v1 = 31 + 1;".into();
+        })
+        .as_bytes(),
+    );
+    let b1 = commit(3, "b1");
+    git(d, 3, &["tag", "REL_1_0", &b1]);
+    git(d, 4, &["checkout", "-q", "master"]);
+    // Rename with a change, a deletion, a file without a final newline.
+    std::fs::remove_file(d.join("src/a.c")).unwrap();
+    write(
+        "src/b.c",
+        c_file(|l| {
+            l[8] = "\tint v3 = 3;".into();
+            l.insert(25, "\t/* new in f1 */".into());
+            l[37] = "\tint v5 = 25 + 1;".into();
+            l[39] = "\tint v7 = 27 + 1;".into();
+            l[61] = "\tint v5 = 4;".into();
+            l[75] = "\tint v7 = 57 + 1;".into();
+        })
+        .as_bytes(),
+    );
+    std::fs::remove_file(d.join("doc/readme.txt")).unwrap();
+    write("src/new.c", b"int\nnew_function(void)\n{\n}");
+    let c2 = commit(5, "c2");
+    // Changes at the top, a binary deletion, a final newline added.
+    let b = std::fs::read_to_string(d.join("src/b.c")).unwrap();
+    write(
+        "src/b.c",
+        b.lines()
+            .skip(2)
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+            .as_bytes(),
+    );
+    std::fs::remove_file(d.join("bin.dat")).unwrap();
+    write("src/new.c", b"int\nnew_function(void)\n{\n}\n");
+    let c3 = commit(6, "c3");
+
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: d.to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: Vec::new(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let show = |sha: &str, args: GetCommitArgs| {
+        let reader = &reader;
+        let sha = sha.to_owned();
+        async move {
+            let args = GetCommitArgs {
+                commit: sha[..12].to_owned(),
+                ..args
+            };
+            get_commit(reader, SCHEMA, "postgres", &args).await.unwrap()
+        }
+    };
+    for sha in [&c0, &c1, &b1, &c2, &c3] {
+        let ours = show(sha, GetCommitArgs::default()).await;
+        assert_eq!(&ours.sha, sha);
+        let git_show = git(d, 0, &["show", "--format=", "-M50%", sha]);
+        assert_eq!(
+            comparable(ours.diff.trim()),
+            comparable(&git_show),
+            "commit {sha}"
+        );
+        for u in ["0", "1"] {
+            let ours = show(
+                sha,
+                GetCommitArgs {
+                    context: Some(u.parse().unwrap()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let git_show = git(
+                d,
+                0,
+                &["show", "--format=", "-M50%", &format!("-U{u}"), sha],
+            );
+            assert_eq!(
+                comparable(ours.diff.trim()),
+                comparable(&git_show),
+                "commit {sha} -U{u}"
+            );
+        }
+    }
+    let c2_shown = show(&c2, GetCommitArgs::default()).await;
+    let files: Vec<(&str, Option<&str>, &str)> = c2_shown
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.old_path.as_deref(), f.status.as_str()))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("doc/readme.txt", None, "D"),
+            ("src/b.c", Some("src/a.c"), "R"),
+            ("src/new.c", None, "A")
+        ]
+    );
+    assert_eq!(c2_shown.parent.as_deref(), Some(c1.as_str()));
+    assert_eq!(c2_shown.subject, "c2");
+    // Paths and no diff.
+    let only = show(
+        &c2,
+        GetCommitArgs {
+            paths: vec!["src/a.c".into(), "*.txt".into()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let headers: Vec<&str> = only
+        .diff
+        .lines()
+        .filter(|l| l.starts_with("diff --git"))
+        .collect();
+    assert_eq!(
+        headers,
+        [
+            "diff --git a/doc/readme.txt b/doc/readme.txt",
+            "diff --git a/src/a.c b/src/b.c"
+        ]
+    );
+    let bare = show(
+        &c2,
+        GetCommitArgs {
+            diff: Some(false),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(bare.diff.is_empty() && bare.files.len() == 3);
+    // A master commit's first release is on the branch forked from it.
+    let releases: Vec<(String, String)> = show(&c1, GetCommitArgs::default())
+        .await
+        .releases
+        .into_iter()
+        .map(|r| (r.branch, r.tag))
+        .collect();
+    assert_eq!(
+        releases,
+        [("REL_1_STABLE".to_owned(), "REL_1_0".to_owned())]
+    );
+}

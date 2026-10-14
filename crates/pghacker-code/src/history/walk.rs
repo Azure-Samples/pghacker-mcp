@@ -18,6 +18,7 @@ use gix::bstr::ByteSlice;
 use gix::diff::blob::sources::byte_lines;
 use gix::diff::blob::{Algorithm, Diff, InternedInput};
 use gix::diff::tree_with_rewrites::Change;
+use sha2::{Digest, Sha256};
 
 use super::graph::Graph;
 
@@ -48,6 +49,103 @@ pub struct Version {
     pub bom: bool,
 }
 
+/// One file a commit changed, as git show --stat counts it. Changes of
+/// mode alone, symlinks and submodules aren't recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChange {
+    pub path: String,
+    /// Where a rename moved the file from.
+    pub old_path: Option<String>,
+    /// A(dded), D(eleted), M(odified), or R(enamed, perhaps modified too).
+    pub status: char,
+    pub added: u32,
+    pub removed: u32,
+    /// Either side is binary: no lines counted.
+    pub binary: bool,
+    /// The version the commit made (none when deleted) and the one it
+    /// ended (none when added).
+    pub version: Option<u32>,
+    pub old_version: Option<u32>,
+}
+
+/// What one commit changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitChanges {
+    pub files: Vec<FileChange>,
+    /// A hash of the changes without whitespace, line numbers or context,
+    /// independent of file order: equal for a commit and its exact
+    /// back-patches. Like git patch-id --stable, but not the same value.
+    pub patch_id: Option<String>,
+}
+
+/// One file's change as the walk sees it: line counts, and a hash of its
+/// paths and changed lines without whitespace.
+struct Delta {
+    added: u32,
+    removed: u32,
+    hash: Sha256,
+}
+
+impl Delta {
+    fn new(header: &[&str]) -> Self {
+        let mut hash = Sha256::new();
+        for part in header {
+            hash.update(part.as_bytes());
+            hash.update([0u8]);
+        }
+        Self {
+            added: 0,
+            removed: 0,
+            hash,
+        }
+    }
+
+    fn line(&mut self, sign: u8, token: &[u8]) {
+        if sign == b'+' {
+            self.added += 1;
+        } else {
+            self.removed += 1;
+        }
+        self.hash.update([sign]);
+        for part in token.split(u8::is_ascii_whitespace) {
+            self.hash.update(part);
+        }
+        self.hash.update(b"\n");
+    }
+
+    /// Binary content: its blobs stand for its lines.
+    fn binary(&mut self, old: Option<ObjectId>, new: Option<ObjectId>) {
+        (self.added, self.removed) = (0, 0);
+        for id in [old, new].into_iter().flatten() {
+            self.hash.update(id.as_bytes());
+        }
+    }
+}
+
+/// The sum of a commit's file hashes, so their order doesn't matter.
+#[derive(Default)]
+struct PatchId {
+    sum: [u8; 32],
+    files: usize,
+}
+
+impl PatchId {
+    fn add(&mut self, hash: Sha256) {
+        let digest = hash.finalize();
+        let mut carry = 0u16;
+        for (s, d) in self.sum.iter_mut().zip(digest.iter()) {
+            carry += u16::from(*s) + u16::from(*d);
+            *s = carry as u8;
+            carry >>= 8;
+        }
+        self.files += 1;
+    }
+
+    fn hex(&self) -> Option<String> {
+        (self.files > 0).then(|| self.sum[..20].iter().map(|b| format!("{b:02x}")).collect())
+    }
+}
+
 /// Every line instance, lineage and file version the walk made.
 #[derive(Default)]
 pub struct Arena {
@@ -63,6 +161,8 @@ pub struct Arena {
     pub heads: Vec<u32>,
     pub lineages: Vec<Lineage>,
     pub versions: Vec<Version>,
+    /// Per commit that changed files, by address.
+    pub changes: Vec<(i64, CommitChanges)>,
 }
 
 impl Arena {
@@ -158,6 +258,7 @@ pub(crate) struct File {
     pub blob: ObjectId,
     /// Its line instances, in order; empty for binary content.
     pub lines: Arc<[u32]>,
+    pub binary: bool,
 }
 
 pub(crate) type Files = HashMap<String, File>;
@@ -234,6 +335,8 @@ pub trait Ledger {
     fn kill(&mut self, id: u32, at: i64);
     fn new_version(&mut self, version: Version) -> Result<u32>;
     fn kill_version(&mut self, id: u32, at: i64);
+    /// What a commit changed, once it is applied.
+    fn changed(&mut self, at: i64, changes: CommitChanges) -> Result<()>;
 }
 
 /// A bulk build's ledger: the arena, with new lines' text sent to a sink.
@@ -273,6 +376,11 @@ impl<S: LineSink> Ledger for ArenaLedger<S> {
     fn kill_version(&mut self, id: u32, at: i64) {
         self.arena.versions[id as usize].deaths.push(at);
     }
+
+    fn changed(&mut self, at: i64, changes: CommitChanges) -> Result<()> {
+        self.arena.changes.push((at, changes));
+        Ok(())
+    }
 }
 
 /// Applies commits to lanes' trees.
@@ -283,6 +391,9 @@ pub struct Walker<'r, L: Ledger> {
     pub stats: WalkStats,
     cache: gix::diff::blob::Platform,
     tree_state: gix::diff::tree::State,
+    /// The current commit's changes.
+    changed: Vec<FileChange>,
+    patch: PatchId,
 }
 
 impl<'r, S: LineSink> Walker<'r, ArenaLedger<S>> {
@@ -311,6 +422,8 @@ impl<'r, L: Ledger> Walker<'r, L> {
             stats: WalkStats::default(),
             cache,
             tree_state: Default::default(),
+            changed: Vec::new(),
+            patch: PatchId::default(),
         })
     }
 
@@ -508,22 +621,22 @@ impl<'r, L: Ledger> Walker<'r, L> {
 
         for p in deletions {
             if let Some(file) = files.remove(&p) {
-                self.delete(file, at);
+                self.delete(file, &p, at);
             }
         }
         // Every source leaves before any destination arrives.
         let mut moving = Vec::new();
         for (src, dst, id) in renames {
             match files.remove(&src) {
-                Some(file) if self.tracked(&dst) => moving.push((file, dst, id)),
-                Some(file) => self.delete(file, at),
+                Some(file) if self.tracked(&dst) => moving.push((file, src, dst, id)),
+                Some(file) => self.delete(file, &src, at),
                 None if self.tracked(&dst) => additions.push((dst, id)),
                 None => {}
             }
         }
-        for (file, dst, id) in moving {
+        for (file, src, dst, id) in moving {
             self.stats.renames += 1;
-            let file = self.change(file, &dst, id, at)?;
+            let file = self.change(file, Some(&src), &dst, id, at)?;
             files.insert(dst, file);
         }
         for (p, id) in modifications {
@@ -537,7 +650,7 @@ impl<'r, L: Ledger> Walker<'r, L> {
                 }
                 Some(file) => {
                     self.stats.files_modified += 1;
-                    let file = self.change(file, &p, id, at)?;
+                    let file = self.change(file, None, &p, id, at)?;
                     files.insert(p, file);
                 }
                 None => additions.push((p, id)),
@@ -548,66 +661,154 @@ impl<'r, L: Ledger> Walker<'r, L> {
                 continue;
             }
             if let Some(file) = files.remove(&p) {
-                let file = self.change(file, &p, id, at)?;
+                let file = self.change(file, None, &p, id, at)?;
                 files.insert(p, file);
                 continue;
             }
             let file = self.add(&p, id, at)?;
             files.insert(p, file);
         }
+        let changes = CommitChanges {
+            files: std::mem::take(&mut self.changed),
+            patch_id: std::mem::take(&mut self.patch).hex(),
+        };
+        if !changes.files.is_empty() {
+            self.ledger.changed(at, changes)?;
+        }
         Ok(())
     }
 
-    fn delete(&mut self, file: File, at: i64) {
+    fn record(&mut self, change: FileChange, delta: Delta) {
+        self.patch.add(delta.hash);
+        self.changed.push(change);
+    }
+
+    fn delete(&mut self, file: File, path: &str, at: i64) {
         self.stats.files_deleted += 1;
         self.ledger.kill_version(file.version, at);
         for &id in file.lines.iter() {
             self.ledger.kill(id, at);
         }
         self.stats.lines_deleted += file.lines.len() as u64;
+        // The blob stands for the lines it had.
+        let mut delta = Delta::new(&["D", path]);
+        delta.binary(Some(file.blob), None);
+        let removed = if file.binary {
+            0
+        } else {
+            file.lines.len() as u32
+        };
+        self.record(
+            FileChange {
+                path: path.to_owned(),
+                old_path: None,
+                status: 'D',
+                added: 0,
+                removed,
+                binary: file.binary,
+                version: None,
+                old_version: Some(file.version),
+            },
+            delta,
+        );
     }
 
     fn add(&mut self, path: &str, id: ObjectId, at: i64) -> Result<File> {
         self.stats.files_added += 1;
         let blob = self.read(id)?;
         let lineage = self.ledger.new_lineage(path, at)?;
-        let lines = self.insert(lineage, &blob, NONE, at)?;
+        let mut delta = Delta::new(&["A", path]);
+        let lines = self.insert(lineage, &blob, NONE, at, &mut delta)?;
+        if !blob.text {
+            delta.binary(None, Some(id));
+        }
         let version = self.new_version(lineage, path, id, &blob, at, lines.len())?;
+        self.record(
+            FileChange {
+                path: path.to_owned(),
+                old_path: None,
+                status: 'A',
+                added: delta.added,
+                removed: 0,
+                binary: !blob.text,
+                version: Some(version),
+                old_version: None,
+            },
+            delta,
+        );
         Ok(File {
             lineage,
             version,
             blob: id,
             lines: lines.into(),
+            binary: !blob.text,
         })
     }
 
-    /// `file`'s next version: at `path` (a rename when it differs), with
+    /// `file`'s next version: at `path`, moved from `from` by a rename, with
     /// blob `id`.
-    fn change(&mut self, file: File, path: &str, id: ObjectId, at: i64) -> Result<File> {
+    fn change(
+        &mut self,
+        file: File,
+        from: Option<&str>,
+        path: &str,
+        id: ObjectId,
+        at: i64,
+    ) -> Result<File> {
         self.ledger.kill_version(file.version, at);
         let new = self.read(id)?;
+        let mut delta = match from {
+            Some(src) => Delta::new(&["R", src, path]),
+            None => Delta::new(&["M", path]),
+        };
         let lines: Arc<[u32]> = if file.blob == id {
             file.lines.clone()
         } else {
             let old = self.read(file.blob)?;
-            self.diff(&file, &old, &new, at)?.into()
+            self.diff(&file, &old, &new, at, &mut delta)?.into()
         };
+        let binary = file.binary || !new.text;
+        if binary && file.blob != id {
+            delta.binary(Some(file.blob), Some(id));
+        }
         let version = self.new_version(file.lineage, path, id, &new, at, lines.len())?;
+        self.record(
+            FileChange {
+                path: path.to_owned(),
+                old_path: from.map(str::to_owned),
+                status: if from.is_some() { 'R' } else { 'M' },
+                added: delta.added,
+                removed: delta.removed,
+                binary,
+                version: Some(version),
+                old_version: Some(file.version),
+            },
+            delta,
+        );
         Ok(File {
             lineage: file.lineage,
             version,
             blob: id,
             lines,
+            binary: !new.text,
         })
     }
 
     /// Every line of `blob` as new instances after `after`.
-    fn insert(&mut self, lineage: u32, blob: &Blob, mut after: u32, at: i64) -> Result<Vec<u32>> {
+    fn insert(
+        &mut self,
+        lineage: u32,
+        blob: &Blob,
+        mut after: u32,
+        at: i64,
+        delta: &mut Delta,
+    ) -> Result<Vec<u32>> {
         let mut out = Vec::new();
         if !blob.text {
             return Ok(out);
         }
         for token in byte_lines(blob.body()) {
+            delta.line(b'+', token);
             after = self.born(lineage, after, NONE, at, line_text(token))?;
             out.push(after);
         }
@@ -632,7 +833,14 @@ impl<'r, L: Ledger> Walker<'r, L> {
 
     /// The new version's instances: the old ones it keeps and new ones for
     /// the lines Myers's diff (with git's indent heuristic) adds.
-    fn diff(&mut self, file: &File, old: &Blob, new: &Blob, at: i64) -> Result<Vec<u32>> {
+    fn diff(
+        &mut self,
+        file: &File,
+        old: &Blob,
+        new: &Blob,
+        at: i64,
+        delta: &mut Delta,
+    ) -> Result<Vec<u32>> {
         if !new.text {
             for &id in file.lines.iter() {
                 self.ledger.kill(id, at);
@@ -641,7 +849,7 @@ impl<'r, L: Ledger> Walker<'r, L> {
             return Ok(Vec::new());
         }
         if !old.text {
-            return self.insert(file.lineage, new, NONE, at);
+            return self.insert(file.lineage, new, NONE, at, delta);
         }
         let input = InternedInput::new(byte_lines(old.body()), byte_lines(new.body()));
         if input.before.len() != file.lines.len() {
@@ -654,6 +862,17 @@ impl<'r, L: Ledger> Walker<'r, L> {
         }
         let mut diff = Diff::compute(Algorithm::Myers, &input);
         diff.postprocess_lines(&input);
+        // Lines exclude a BOM, but git sees a first line that gained or lost
+        // one as changed: count it when the diff kept that line.
+        let first_kept = diff.hunks().next().is_none_or(|h| {
+            let side = if old.bom { &h.before } else { &h.after };
+            side.start > 0 || side.is_empty()
+        });
+        let lines = if old.bom { &input.before } else { &input.after };
+        if old.bom != new.bom && first_kept && !lines.is_empty() {
+            delta.line(b'-', b"\xef\xbb\xbf");
+            delta.line(b'+', b"");
+        }
         let old_ids = &file.lines;
         let mut out = Vec::with_capacity(input.after.len());
         let mut pos = 0usize;
@@ -662,6 +881,9 @@ impl<'r, L: Ledger> Walker<'r, L> {
             out.extend_from_slice(&old_ids[pos..b0]);
             for &id in &old_ids[b0..b1] {
                 self.ledger.kill(id, at);
+            }
+            for &token in &input.before[b0..b1] {
+                delta.line(b'-', input.interner[token]);
             }
             self.stats.lines_deleted += (b1 - b0) as u64;
             // New lines follow the lines they replace, else the line before.
@@ -676,6 +898,7 @@ impl<'r, L: Ledger> Walker<'r, L> {
             let one_for_one = hunk.after.len() == b1 - b0;
             for (i, j) in hunk.after.clone().enumerate() {
                 let token = input.interner[input.after[j as usize]];
+                delta.line(b'+', token);
                 let replaces = if one_for_one { old_ids[b0 + i] } else { NONE };
                 after = self.born(file.lineage, after, replaces, at, line_text(token))?;
                 out.push(after);

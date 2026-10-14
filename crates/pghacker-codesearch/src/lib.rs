@@ -9,6 +9,8 @@
 //! prints, refusing incomplete searches rather than counting partial output.
 
 pub mod blame;
+pub mod commit;
+pub mod diff;
 pub mod engine;
 pub mod files;
 pub mod glob;
@@ -22,6 +24,7 @@ pub mod search;
 pub mod snapshot;
 
 pub use blame::{BlameArgs, BlameResult, blame};
+pub use commit::{CommitResult, GetCommitArgs, get_commit};
 pub use files::{
     ListFilesArgs, ListFilesResult, ReadFileArgs, ReadFileResult, list_files, read_file,
 };
@@ -67,6 +70,15 @@ and end_line (at most 2000 lines), and version. It follows renames and, by defau
 through the reformatting commits (pgindent runs) in .git-blame-ignore-revs to the commit that \
 wrote the line. reverse gives the commit that removed each line after this version, on its \
 branch. Commits come once each, with date, author, branch and subject.";
+
+/// The get_commit tool's description, for agents.
+pub const GET_COMMIT_DESCRIPTION: &str = "\
+Show a PostgreSQL commit as git show does: commit (a SHA or prefix, a branch or tag, or a revision \
+such as REL_17_STABLE~2), with its message and parsed trailers (Author, Reviewed-by, \
+Discussion, Backpatch-through...), the pgsql-hackers threads its Discussion trailers name, the \
+same change back-patched to other branches, the first release on each branch with the change, \
+the files changed with line counts, and the unified diff (paths limits it to files or folders; \
+context sets the lines around changes; diff: false leaves it out).";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\

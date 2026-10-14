@@ -11,15 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use chrono::DateTime;
 use gix::ObjectId;
 use tokio::runtime::Handle;
 use tokio_postgres::{Client, Transaction};
 
 use super::addr::{self, Alive};
-use super::graph::Graph;
-use super::store::{WEAVE_STEP, readable_schema};
-use super::walk::{File, Files, Ledger, NONE, Version, WalkStats, Walker};
+use super::graph::{Commit, Graph};
+use super::store::{CommitRow, WEAVE_STEP, readable_schema};
+use super::walk::{CommitChanges, File, Files, Ledger, NONE, Version, WalkStats, Walker};
 
 /// What to sync.
 #[derive(Clone, Debug)]
@@ -35,6 +34,8 @@ pub struct SyncOptions {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct SyncStats {
     pub commits: u64,
+    /// Commits in back-patch groups, after the sync.
+    pub backpatched: u64,
     pub new_lanes: Vec<String>,
     pub refs: u64,
     /// Lineages whose weave keys were renumbered.
@@ -63,6 +64,7 @@ struct MemLedger {
     kills: Vec<(u32, i64)>,
     versions: Vec<(u32, Version)>,
     version_kills: Vec<(u32, i64)>,
+    changes: Vec<(i64, CommitChanges)>,
 }
 
 impl Ledger for MemLedger {
@@ -111,19 +113,18 @@ impl Ledger for MemLedger {
     fn kill_version(&mut self, id: u32, at: i64) {
         self.version_kills.push((id, at));
     }
+
+    fn changed(&mut self, at: i64, changes: CommitChanges) -> Result<()> {
+        self.changes.push((at, changes));
+        Ok(())
+    }
 }
 
-/// A commit to apply.
+/// A commit to apply, at its address and on its lane in the history.
 struct Pending {
-    addr: i64,
-    id: ObjectId,
-    tree: ObjectId,
+    commit: Commit,
     parent_addr: Option<i64>,
     parent_tree: Option<ObjectId>,
-    lane: i16,
-    committed_at: i64,
-    author: String,
-    subject: String,
 }
 
 /// A lane as the tables have it.
@@ -188,15 +189,13 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
                 let commit = &graph.commits[c];
                 let addr = first_addr + j as i64 * step;
                 pending.push(Pending {
-                    addr,
-                    id: commit.id,
-                    tree: commit.tree,
+                    commit: Commit {
+                        addr,
+                        lane: lane as u16,
+                        ..commit.clone()
+                    },
                     parent_addr: parent.map(|p| p.0),
                     parent_tree: parent.map(|p| tree_of(&p.1)),
-                    lane,
-                    committed_at: commit.committed_at,
-                    author: commit.author.clone(),
-                    subject: commit.subject.clone(),
                 });
                 parent = Some((addr, commit.id));
             }
@@ -296,10 +295,10 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
             }
         }
     }
-    pending.sort_by_key(|p| p.addr);
+    pending.sort_by_key(|p| p.commit.addr);
     for p in &pending {
-        known.insert(p.id, p.addr);
-        by_addr.insert(p.addr, p.id);
+        known.insert(p.commit.id, p.commit.addr);
+        by_addr.insert(p.commit.addr, p.commit.id);
     }
 
     // New lanes first, so their commits have somewhere to go.
@@ -337,26 +336,21 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
         let tx = handle.block_on(client.transaction())?;
         let mut heads: HashMap<i16, i64> = HashMap::new();
         for p in batch {
-            let changes = walker.tree_changes(p.parent_tree, p.tree)?;
+            let c = &p.commit;
+            let changes = walker.tree_changes(p.parent_tree, c.tree)?;
             let touched = Walker::<MemLedger>::touched(&changes);
             let mut files = match p.parent_addr {
                 Some(parent) => load_files(handle, &tx, &s, &touched, parent)?,
                 None => Files::new(),
             };
             walker
-                .apply_changes(&mut files, changes, p.addr)
-                .with_context(|| format!("cannot apply commit {}", p.id))?;
+                .apply_changes(&mut files, changes, c.addr)
+                .with_context(|| format!("cannot apply commit {}", c.id))?;
+            let changed = std::mem::take(&mut walker.ledger.changes);
             stats.respread += flush(handle, &tx, &s, &mut walker.ledger)?;
-            let at = DateTime::from_timestamp(p.committed_at, 0).unwrap_or_default();
-            handle.block_on(tx.execute(
-                &format!(
-                    "INSERT INTO {s}.code_commits (addr, sha, lane, committed_at, author_name, subject) \
-                     VALUES ($1, $2, $3, $4, $5, $6)"
-                ),
-                &[&p.addr, &p.id.to_string(), &p.lane, &at, &p.author, &p.subject],
-            ))?;
+            write_commit(handle, &tx, &s, c, changed.first().map(|(_, ch)| ch))?;
             stats.commits += 1;
-            heads.insert(p.lane, p.addr);
+            heads.insert(c.lane as i16, c.addr);
         }
         for (lane, head) in heads {
             handle.block_on(tx.execute(
@@ -399,11 +393,50 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
     ))?;
     handle.block_on(tx.commit())?;
     if stats.commits > 0 {
+        stats.backpatched = handle.block_on(super::backpatch::regroup(&client, &s))?;
         handle.block_on(client.batch_execute(&format!(
-            "ANALYZE {s}.code_line_instances, {s}.code_file_versions, {s}.code_commits"
+            "ANALYZE {s}.code_line_instances, {s}.code_file_versions, {s}.code_commits, \
+             {s}.code_commit_files"
         )))?;
     }
     Ok(stats)
+}
+
+/// A new commit's code_commits row and its code_commit_files rows.
+fn write_commit(
+    handle: &Handle,
+    tx: &Transaction<'_>,
+    s: &str,
+    c: &Commit,
+    changes: Option<&CommitChanges>,
+) -> Result<()> {
+    let row = CommitRow::new(c, changes);
+    let n = row.params().len();
+    let values: Vec<String> = (1..=n).map(|i| format!("${i}")).collect();
+    handle.block_on(tx.execute(
+        &format!(
+            "INSERT INTO {s}.code_commits ({}) VALUES ({})",
+            super::store::COMMIT_COLUMNS,
+            values.join(", ")
+        ),
+        &row.params(),
+    ))?;
+    let Some(changes) = changes else {
+        return Ok(());
+    };
+    for f in super::store::file_rows(c.addr, changes) {
+        let params = f.params();
+        let values: Vec<String> = (1..=params.len()).map(|i| format!("${i}")).collect();
+        handle.block_on(tx.execute(
+            &format!(
+                "INSERT INTO {s}.code_commit_files ({}) VALUES ({})",
+                super::store::FILE_COLUMNS,
+                values.join(", ")
+            ),
+            &params,
+        ))?;
+    }
+    Ok(())
 }
 
 /// The files at `paths` as they are at address `at`.
@@ -417,7 +450,7 @@ fn load_files(
     let mut files = Files::new();
     let rows = handle.block_on(tx.query(
         &format!(
-            "SELECT v.id, v.lineage, v.path, v.blob_sha FROM {s}.code_file_versions v \
+            "SELECT v.id, v.lineage, v.path, v.blob_sha, v.is_binary FROM {s}.code_file_versions v \
              WHERE v.path = ANY($1) AND v.lo <= $2 AND v.hi > $2 \
                AND (v.alive IS NULL OR v.alive @> $2)"
         ),
@@ -450,6 +483,7 @@ fn load_files(
                 version: r.get::<_, i32>(0) as u32,
                 blob: ObjectId::from_hex(r.get::<_, &str>(3).as_bytes())?,
                 lines: Arc::from(lines.remove(&lineage).unwrap_or_default()),
+                binary: r.get(4),
             },
         );
     }

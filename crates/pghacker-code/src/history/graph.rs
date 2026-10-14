@@ -21,8 +21,12 @@ pub struct Commit {
     pub lane: u16,
     /// Seconds since the epoch.
     pub committed_at: i64,
+    pub authored_at: i64,
     pub author: String,
+    pub committer: String,
     pub subject: String,
+    /// The whole message, subject first.
+    pub message: String,
 }
 
 /// Master or a branch: a line of commits.
@@ -228,13 +232,24 @@ impl Graph {
             .with_context(|| format!("cannot read commit {id}"))?;
         let tree = commit.tree_id()?.detach();
         let committed_at = commit.time().map(|t| t.seconds).unwrap_or(0);
-        let author = commit
+        let (author, authored_at) = commit
             .author()
-            .map(|a| a.name.to_str_lossy().into_owned())
+            .map(|a| {
+                let at = a.time().map(|t| t.seconds).unwrap_or(committed_at);
+                (a.name.to_str_lossy().into_owned(), at)
+            })
+            .unwrap_or_default();
+        let committer = commit
+            .committer()
+            .map(|c| c.name.to_str_lossy().into_owned())
             .unwrap_or_default();
         let subject = commit
             .message()
             .map(|m| m.summary().to_str_lossy().into_owned())
+            .unwrap_or_default();
+        let message = commit
+            .message_raw()
+            .map(|m| m.to_str_lossy().trim_end().to_owned())
             .unwrap_or_default();
         let c = self.commits.len();
         self.commits.push(Commit {
@@ -243,8 +258,11 @@ impl Graph {
             addr: address,
             lane,
             committed_at,
+            authored_at,
             author,
+            committer,
             subject,
+            message,
         });
         self.index.insert(id, c);
         Ok(c)

@@ -15,8 +15,8 @@ use tokio_postgres::binary_copy::BinaryCopyInWriter;
 use tokio_postgres::types::Type;
 
 use super::addr::Alive;
-use super::graph::Graph;
-use super::walk::Arena;
+use super::graph::{Commit, Graph};
+use super::walk::{Arena, CommitChanges};
 
 /// An instance link as stored: NULL for none.
 fn replaces(id: u32) -> Option<i32> {
@@ -54,10 +54,11 @@ pub fn readable_schema(name: &str) -> Result<&str> {
 }
 
 /// The history's tables, from migration 0011.
-pub const TABLES: [&str; 7] = [
+pub const TABLES: [&str; 8] = [
     "code_history",
     "code_lanes",
     "code_commits",
+    "code_commit_files",
     "code_refs",
     "code_lineages",
     "code_file_versions",
@@ -146,10 +147,147 @@ pub async fn copy_texts(
     Ok(writer.finish().await?)
 }
 
+/// code_commits' columns as builds and syncs write them; `backpatch` is
+/// set afterwards by [`super::backpatch::regroup`].
+pub(crate) const COMMIT_COLUMNS: &str = "addr, sha, lane, committed_at, authored_at, author_name, \
+     committer_name, subject, message, trailers, patch_id";
+const COMMIT_TYPES: [Type; 11] = [
+    Type::INT8,
+    Type::TEXT,
+    Type::INT2,
+    Type::TIMESTAMPTZ,
+    Type::TIMESTAMPTZ,
+    Type::TEXT,
+    Type::TEXT,
+    Type::TEXT,
+    Type::TEXT,
+    Type::JSONB,
+    Type::TEXT,
+];
+
+/// A code_commits row.
+pub(crate) struct CommitRow {
+    addr: i64,
+    sha: String,
+    lane: i16,
+    committed_at: DateTime<chrono::Utc>,
+    authored_at: DateTime<chrono::Utc>,
+    author: String,
+    committer: String,
+    subject: String,
+    message: String,
+    trailers: serde_json::Value,
+    patch_id: Option<String>,
+}
+
+impl CommitRow {
+    pub(crate) fn new(c: &Commit, changes: Option<&CommitChanges>) -> Self {
+        let time = |t: i64| DateTime::from_timestamp(t, 0).unwrap_or_default();
+        Self {
+            addr: c.addr,
+            sha: c.id.to_string(),
+            lane: c.lane as i16,
+            committed_at: time(c.committed_at),
+            authored_at: time(c.authored_at),
+            author: c.author.clone(),
+            committer: c.committer.clone(),
+            subject: c.subject.clone(),
+            message: c.message.clone(),
+            trailers: serde_json::to_value(super::message::trailers(&c.message))
+                .unwrap_or_default(),
+            patch_id: changes.and_then(|c| c.patch_id.clone()),
+        }
+    }
+
+    pub(crate) fn params(&self) -> [&(dyn tokio_postgres::types::ToSql + Sync); 11] {
+        [
+            &self.addr,
+            &self.sha,
+            &self.lane,
+            &self.committed_at,
+            &self.authored_at,
+            &self.author,
+            &self.committer,
+            &self.subject,
+            &self.message,
+            &self.trailers,
+            &self.patch_id,
+        ]
+    }
+}
+
+pub(crate) const FILE_COLUMNS: &str =
+    "addr, path, old_path, status, added, removed, is_binary, version, old_version";
+const FILE_TYPES: [Type; 9] = [
+    Type::INT8,
+    Type::TEXT,
+    Type::TEXT,
+    Type::TEXT,
+    Type::INT4,
+    Type::INT4,
+    Type::BOOL,
+    Type::INT4,
+    Type::INT4,
+];
+
+/// A code_commit_files row.
+pub(crate) struct FileRow<'a> {
+    addr: i64,
+    path: &'a str,
+    old_path: Option<&'a str>,
+    status: String,
+    added: i32,
+    removed: i32,
+    binary: bool,
+    version: Option<i32>,
+    old_version: Option<i32>,
+}
+
+impl FileRow<'_> {
+    pub(crate) fn params(&self) -> [&(dyn tokio_postgres::types::ToSql + Sync); 9] {
+        [
+            &self.addr,
+            &self.path,
+            &self.old_path,
+            &self.status,
+            &self.added,
+            &self.removed,
+            &self.binary,
+            &self.version,
+            &self.old_version,
+        ]
+    }
+}
+
+/// A commit's code_commit_files rows: one per path, the last change to it.
+pub(crate) fn file_rows(addr: i64, changes: &CommitChanges) -> Vec<FileRow<'_>> {
+    let mut by_path: std::collections::BTreeMap<&str, FileRow<'_>> = Default::default();
+    for f in &changes.files {
+        by_path.insert(
+            &f.path,
+            FileRow {
+                addr,
+                path: &f.path,
+                old_path: f.old_path.as_deref(),
+                status: f.status.to_string(),
+                added: f.added as i32,
+                removed: f.removed as i32,
+                binary: f.binary,
+                version: f.version.map(|v| v as i32),
+                old_version: f.old_version.map(|v| v as i32),
+            },
+        );
+    }
+    by_path.into_values().collect()
+}
+
 /// What the store wrote.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Stored {
     pub commits: u64,
+    pub commit_files: u64,
+    /// Commits in back-patch groups.
+    pub backpatched: u64,
     pub lanes: u64,
     pub refs: u64,
     pub lineages: u64,
@@ -200,40 +338,36 @@ pub async fn write(
         stored.refs += 1;
     }
 
+    let changes: std::collections::HashMap<i64, &CommitChanges> =
+        arena.changes.iter().map(|(a, c)| (*a, c)).collect();
     {
         let sink = client
             .copy_in(&format!(
-                "COPY {s}.code_commits (addr, sha, lane, committed_at, author_name, subject) \
-                 FROM STDIN BINARY"
+                "COPY {s}.code_commits ({COMMIT_COLUMNS}) FROM STDIN BINARY"
             ))
             .await?;
-        let writer = BinaryCopyInWriter::new(
-            sink,
-            &[
-                Type::INT8,
-                Type::TEXT,
-                Type::INT2,
-                Type::TIMESTAMPTZ,
-                Type::TEXT,
-                Type::TEXT,
-            ],
-        );
+        let writer = BinaryCopyInWriter::new(sink, &COMMIT_TYPES);
         let mut writer = std::pin::pin!(writer);
         for c in &graph.commits {
-            let at = DateTime::from_timestamp(c.committed_at, 0).unwrap_or_default();
-            writer
-                .as_mut()
-                .write(&[
-                    &c.addr,
-                    &c.id.to_string(),
-                    &(c.lane as i16),
-                    &at,
-                    &c.author,
-                    &c.subject,
-                ])
-                .await?;
+            let row = CommitRow::new(c, changes.get(&c.addr).copied());
+            writer.as_mut().write(&row.params()).await?;
         }
         stored.commits = writer.finish().await?;
+    }
+    {
+        let sink = client
+            .copy_in(&format!(
+                "COPY {s}.code_commit_files ({FILE_COLUMNS}) FROM STDIN BINARY"
+            ))
+            .await?;
+        let writer = BinaryCopyInWriter::new(sink, &FILE_TYPES);
+        let mut writer = std::pin::pin!(writer);
+        for (addr, c) in &arena.changes {
+            for row in file_rows(*addr, c) {
+                writer.as_mut().write(&row.params()).await?;
+            }
+        }
+        stored.commit_files = writer.finish().await?;
     }
 
     {

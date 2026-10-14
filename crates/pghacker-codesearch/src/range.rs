@@ -149,6 +149,21 @@ pub fn death_at(end: i64) -> Option<i64> {
     (last % MASTER_STEP == 0 || block_end(last) != last).then_some(end)
 }
 
+/// The addresses of a commit's descendants, itself included: on master
+/// every later address; on a branch the rest of its block.
+pub fn descendants(addr: i64) -> (i64, i64) {
+    if addr % MASTER_STEP == 0 {
+        (addr, i64::MAX)
+    } else {
+        (addr, block_end(addr))
+    }
+}
+
+/// Whether `addr` is a master commit.
+pub fn on_master(addr: i64) -> bool {
+    addr % MASTER_STEP == 0
+}
+
 /// The commit after `at` on its lane, master or `at`'s branch, that removed
 /// a line alive at `at` over `spans` (sorted): None while the lane's head has
 /// it. On master, holes the line has on branches don't count.

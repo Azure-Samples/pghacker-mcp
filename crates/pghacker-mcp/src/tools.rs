@@ -107,10 +107,16 @@ pub static TOOLS: &[ToolSpec] = &[
         effect: READ,
         schema: schema::<code::BlameArgs>,
     },
+    ToolSpec {
+        name: "get_commit",
+        description: code::GET_COMMIT_DESCRIPTION,
+        effect: READ,
+        schema: schema::<code::GetCommitArgs>,
+    },
 ];
 
 /// How many of TOOLS, at the end, need the commit history.
-const HISTORY_TOOLS: usize = 1;
+const HISTORY_TOOLS: usize = 2;
 
 /// The tools served: the history's only with PGHACKER_CODE_HISTORY.
 pub fn served() -> &'static [ToolSpec] {
@@ -186,6 +192,15 @@ impl Server {
                     Err(error) => Err(error),
                 }
             }
+            "get_commit" if served().iter().any(|t| t.name == name) => {
+                let args: code::GetCommitArgs = parse(name, arguments)?;
+                match code::history::schema_from_env() {
+                    Some(schema) => code::get_commit(client, schema, "postgres", &args)
+                        .await
+                        .and_then(|result| Ok(serde_json::to_value(result)?)),
+                    None => Err(anyhow::anyhow!("get_commit needs the commit history")),
+                }
+            }
             "blame" if served().iter().any(|t| t.name == name) => {
                 let args: code::BlameArgs = parse(name, arguments)?;
                 match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
@@ -253,6 +268,6 @@ mod tests {
             .iter()
             .map(|t| t.name)
             .collect();
-        assert_eq!(names, ["blame"]);
+        assert_eq!(names, ["blame", "get_commit"]);
     }
 }

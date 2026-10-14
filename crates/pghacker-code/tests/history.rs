@@ -450,7 +450,10 @@ async fn dump(client: &Client, s: &str) -> Vec<String> {
             "SELECT name || ' ' || coalesce(fork_addr::text, '-') || ' ' || lo || ' ' || hi || ' ' || head_addr FROM {s}.code_lanes ORDER BY name"
         ),
         format!(
-            "SELECT c.addr || ' ' || c.sha || ' ' || l.name || ' ' || c.subject FROM {s}.code_commits c JOIN {s}.code_lanes l ON l.id = c.lane ORDER BY c.addr"
+            "SELECT c.addr || ' ' || c.sha || ' ' || l.name || ' ' || c.subject || ' ' || c.authored_at || ' ' || c.committer_name || ' ' || md5(c.message) || ' ' || c.trailers::text || ' ' || coalesce(c.patch_id, '-') || ' ' || coalesce(c.backpatch::text, '-') FROM {s}.code_commits c JOIN {s}.code_lanes l ON l.id = c.lane ORDER BY c.addr"
+        ),
+        format!(
+            "SELECT f.addr || ' ' || f.path || ' ' || coalesce(f.old_path, '-') || ' ' || f.status || ' ' || f.added || ' ' || f.removed || ' ' || f.is_binary || ' ' || coalesce(v.path || '@' || v.lo, '-') || ' ' || coalesce(o.path || '@' || o.lo, '-') FROM {s}.code_commit_files f LEFT JOIN {s}.code_file_versions v ON v.id = f.version LEFT JOIN {s}.code_file_versions o ON o.id = f.old_version ORDER BY f.addr, f.path"
         ),
         format!("SELECT kind || ' ' || name || ' ' || addr FROM {s}.code_refs ORDER BY kind, name"),
         format!("SELECT first_path || ' ' || born FROM {s}.code_lineages ORDER BY 1"),
@@ -590,4 +593,190 @@ async fn a_build_then_syncs_equals_one_build() {
     .await
     .unwrap();
     assert_eq!(verified.mismatches, Vec::<String>::new());
+}
+
+/// A commit's changed files as git counts them (diff-tree --numstat -M50%):
+/// "old_path -> path added removed", binary as "- -". Symlinks and changes
+/// of mode alone are left out, as the history doesn't record them.
+fn git_numstat(repo: &Repo, sha: &str) -> Vec<String> {
+    let args = |format: &'static str| {
+        [
+            "diff-tree",
+            "-r",
+            "--root",
+            "--no-commit-id",
+            "-M50%",
+            "-z",
+            format,
+            sha,
+        ]
+    };
+    // :oldmode newmode oldsha newsha status NUL path NUL [path NUL]
+    let raw = repo.git(&args("--raw"));
+    let mut fields = raw.split('\0').filter(|f| !f.is_empty());
+    let mut skip = std::collections::HashSet::new();
+    while let Some(meta) = fields.next() {
+        let m: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let renamed = m[4].starts_with(['R', 'C']);
+        let first = fields.next().unwrap();
+        let path = if renamed {
+            fields.next().unwrap()
+        } else {
+            first
+        };
+        let symlink = m[0] == "120000" || m[1] == "120000";
+        let mode_only = m[2] == m[3];
+        if symlink || mode_only {
+            skip.insert(path.to_owned());
+        }
+    }
+    let num = repo.git(&args("--numstat"));
+    let mut fields = num.split('\0');
+    let mut out = Vec::new();
+    while let Some(head) = fields.next() {
+        if head.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = head.splitn(3, '\t').collect();
+        let (old, path) = if parts[2].is_empty() {
+            (fields.next().unwrap(), fields.next().unwrap())
+        } else {
+            ("", parts[2])
+        };
+        if !skip.contains(path) {
+            out.push(format!("{old} -> {path} {} {}", parts[0], parts[1]));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn commit_files_and_metadata_match_git() {
+    let repo = fixture();
+    let db = TestDb::create().await.unwrap();
+    build(&db, &repo.path(), Vec::new()).await;
+    let client = db.admin().await.unwrap();
+    for sha in &repo.commits {
+        let ours: Vec<String> = client
+            .query(
+                "SELECT coalesce(f.old_path, '') || ' -> ' || f.path || ' ' || \
+                        CASE WHEN f.is_binary THEN '- -' ELSE f.added || ' ' || f.removed END \
+                 FROM pghacker_history.code_commit_files f \
+                 JOIN pghacker_history.code_commits c ON c.addr = f.addr \
+                 WHERE c.sha = $1",
+                &[sha],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let mut ours = ours;
+        ours.sort();
+        assert_eq!(ours, git_numstat(&repo, sha), "commit {sha}");
+    }
+
+    // Back-patches, trailers and dates on a history of their own.
+    let mut r = Repo::new();
+    r.write("f.c", numbered("f.c", 10).as_bytes());
+    r.write("g.c", numbered("g.c", 10).as_bytes());
+    let base = r.commit("Add f.c and g.c");
+    r.write(
+        "f.c",
+        numbered("f.c", 10)
+            .replace("f.c line 3\n", "f.c line three\n")
+            .as_bytes(),
+    );
+    r.tick += 1;
+    let message = "Fix overflow in f\n\nA body.\n\n\
+                   Author: Jane Doe <jane@example.org>\n\
+                   Reviewed-by: Tom Lane <tgl@example.org>, Robert Haas\n\
+                   Discussion: https://postgr.es/m/abc@example.org\n\
+                   Backpatch-through: 1";
+    r.git(&["add", "-A"]);
+    r.git(&[
+        "commit",
+        "-q",
+        "--date",
+        "2025-01-01T00:00:00Z",
+        "-m",
+        message,
+    ]);
+    let fix = r.git(&["rev-parse", "HEAD"]);
+    r.write(
+        "f.c",
+        numbered("f.c", 10)
+            .replace("f.c line 3\n", "f.c line three\n")
+            .replace("f.c line 9\n", "f.c line nine\n")
+            .as_bytes(),
+    );
+    let typo = r.commit("Fix typo");
+    r.git(&["checkout", "-q", "-b", "REL_1_STABLE", &base]);
+    r.tick += 1;
+    r.git(&["cherry-pick", &fix]);
+    let picked = r.git(&["rev-parse", "HEAD"]);
+    // The same subject on another file: not a back-patch of the fix.
+    r.write(
+        "g.c",
+        numbered("g.c", 10).replace("g.c line 1\n", "").as_bytes(),
+    );
+    let other = r.commit("Fix overflow in f");
+    // The same subject and author, a different change to the same file.
+    r.write(
+        "f.c",
+        numbered("f.c", 10)
+            .replace("f.c line 3\n", "f.c line three\n")
+            .replace("f.c line 8\n", "f.c line eight\n")
+            .as_bytes(),
+    );
+    let typo_back = r.commit("Fix typo");
+    let db2 = TestDb::create().await.unwrap();
+    build(&db2, &r.path(), Vec::new()).await;
+    let client = db2.admin().await.unwrap();
+    let row = |sha: String| {
+        let client = &client;
+        async move {
+            client
+                .query_one(
+                    "SELECT addr, patch_id, backpatch, trailers, message, committer_name, \
+                            (authored_at AT TIME ZONE 'UTC')::text, \
+                            (committed_at AT TIME ZONE 'UTC')::text \
+                     FROM pghacker_history.code_commits WHERE sha = $1",
+                    &[&sha],
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let (fix_row, picked_row) = (row(fix.clone()).await, row(picked).await);
+    let fix_addr: i64 = fix_row.get(0);
+    let patch: Option<String> = fix_row.get(1);
+    assert!(patch.is_some());
+    assert_eq!(picked_row.get::<_, Option<String>>(1), patch);
+    assert_eq!(fix_row.get::<_, Option<i64>>(2), Some(fix_addr));
+    assert_eq!(picked_row.get::<_, Option<i64>>(2), Some(fix_addr));
+    assert_eq!(row(other).await.get::<_, Option<i64>>(2), None);
+    let typo_addr: i64 = row(typo.clone()).await.get(0);
+    assert_eq!(row(typo).await.get::<_, Option<i64>>(2), Some(typo_addr));
+    assert_eq!(
+        row(typo_back).await.get::<_, Option<i64>>(2),
+        Some(typo_addr)
+    );
+    assert_eq!(row(base).await.get::<_, Option<i64>>(2), None);
+
+    let trailers: serde_json::Value = fix_row.get(3);
+    assert_eq!(
+        trailers,
+        serde_json::json!({
+            "Author": ["Jane Doe"],
+            "Reviewed-by": ["Tom Lane", "Robert Haas"],
+            "Discussion": ["https://postgr.es/m/abc@example.org"],
+            "Backpatch-through": ["1"],
+        })
+    );
+    assert_eq!(fix_row.get::<_, String>(4), message);
+    assert_eq!(fix_row.get::<_, String>(5), "Test");
+    assert!(fix_row.get::<_, String>(6).starts_with("2025-01-01"));
+    assert!(fix_row.get::<_, String>(7).starts_with("2026-01-01"));
 }
