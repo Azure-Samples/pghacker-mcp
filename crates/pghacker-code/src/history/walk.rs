@@ -88,7 +88,7 @@ impl Arena {
         out
     }
 
-    fn kill(&mut self, id: u32, at: i64) {
+    pub(crate) fn kill(&mut self, id: u32, at: i64) {
         let slot = &mut self.death[id as usize];
         if *slot == NO_DEATH {
             *slot = at;
@@ -97,7 +97,7 @@ impl Arena {
         }
     }
 
-    fn new_lineage(&mut self, path: &str, born: i64) -> u32 {
+    pub(crate) fn new_lineage(&mut self, path: &str, born: i64) -> u32 {
         let id = self.lineages.len() as u32;
         self.lineages.push(Lineage {
             path: path.to_owned(),
@@ -108,7 +108,7 @@ impl Arena {
     }
 
     /// A new instance in `lineage`'s weave, right after `after` (or first).
-    fn new_instance(&mut self, lineage: u32, born: i64, after: u32) -> Result<u32> {
+    pub(crate) fn new_instance(&mut self, lineage: u32, born: i64, after: u32) -> Result<u32> {
         let id = u32::try_from(self.lineage.len())
             .ok()
             .filter(|&id| id != NONE)
@@ -143,15 +143,15 @@ pub struct WalkStats {
 
 /// A file in a lane's current tree.
 #[derive(Clone)]
-struct File {
-    lineage: u32,
-    version: u32,
-    blob: ObjectId,
+pub(crate) struct File {
+    pub lineage: u32,
+    pub version: u32,
+    pub blob: ObjectId,
     /// Its line instances, in order; empty for binary content.
-    lines: Arc<[u32]>,
+    pub lines: Arc<[u32]>,
 }
 
-type Files = HashMap<String, File>;
+pub(crate) type Files = HashMap<String, File>;
 
 /// A blob read by the loader's rules: binary with a NUL byte or invalid
 /// UTF-8; a leading BOM set aside; lines split after each `\n`.
@@ -207,37 +207,92 @@ impl<F: FnMut(u32, &str) -> Result<()>> LineSink for F {
     }
 }
 
+/// Where the walk records what each commit did: the arena of a bulk
+/// build, or the tables a sync updates.
+pub trait Ledger {
+    fn new_lineage(&mut self, path: &str, born: i64) -> Result<u32>;
+    /// A new line instance right after `after` in its lineage's weave, or
+    /// first when `after` is [`NONE`].
+    fn new_instance(&mut self, lineage: u32, born: i64, after: u32, text: &str) -> Result<u32>;
+    fn kill(&mut self, id: u32, at: i64);
+    fn new_version(&mut self, version: Version) -> Result<u32>;
+    fn kill_version(&mut self, id: u32, at: i64);
+}
+
+/// A bulk build's ledger: the arena, with new lines' text sent to a sink.
+pub struct ArenaLedger<S: LineSink> {
+    pub arena: Arena,
+    pub sink: S,
+}
+
+impl<S: LineSink> Ledger for ArenaLedger<S> {
+    fn new_lineage(&mut self, path: &str, born: i64) -> Result<u32> {
+        Ok(self.arena.new_lineage(path, born))
+    }
+
+    fn new_instance(&mut self, lineage: u32, born: i64, after: u32, text: &str) -> Result<u32> {
+        let id = self.arena.new_instance(lineage, born, after)?;
+        self.sink.line(id, text)?;
+        Ok(id)
+    }
+
+    fn kill(&mut self, id: u32, at: i64) {
+        self.arena.kill(id, at);
+    }
+
+    fn new_version(&mut self, version: Version) -> Result<u32> {
+        let id = u32::try_from(self.arena.versions.len()).context("too many file versions")?;
+        self.arena.versions.push(version);
+        Ok(id)
+    }
+
+    fn kill_version(&mut self, id: u32, at: i64) {
+        self.arena.versions[id as usize].deaths.push(at);
+    }
+}
+
 /// Applies commits to lanes' trees.
-pub struct Walker<'r, S: LineSink> {
+pub struct Walker<'r, L: Ledger> {
     repo: &'r gix::Repository,
     paths: &'r [String],
-    pub arena: Arena,
+    pub ledger: L,
     pub stats: WalkStats,
-    sink: S,
     cache: gix::diff::blob::Platform,
     tree_state: gix::diff::tree::State,
 }
 
-impl<'r, S: LineSink> Walker<'r, S> {
-    /// `sink` gets each new instance's id and text.
+impl<'r, S: LineSink> Walker<'r, ArenaLedger<S>> {
+    /// A bulk build's walker: `sink` gets each new instance's id and text.
     pub fn new(repo: &'r gix::Repository, paths: &'r [String], sink: S) -> Result<Self> {
+        Self::with_ledger(
+            repo,
+            paths,
+            ArenaLedger {
+                arena: Arena::default(),
+                sink,
+            },
+        )
+    }
+}
+
+impl<'r, L: Ledger> Walker<'r, L> {
+    pub fn with_ledger(repo: &'r gix::Repository, paths: &'r [String], ledger: L) -> Result<Self> {
         let cache = repo
             .diff_resource_cache_for_tree_diff()
             .map_err(|e| anyhow!("cannot prepare the diff cache: {e}"))?;
         Ok(Self {
             repo,
             paths,
-            arena: Arena::default(),
+            ledger,
             stats: WalkStats::default(),
-            sink,
             cache,
             tree_state: Default::default(),
         })
     }
 
-    /// The arena, the stats and the sink, once the walk is done.
-    pub fn finish(self) -> (Arena, WalkStats, S) {
-        (self.arena, self.stats, self.sink)
+    /// The ledger and the stats, once the walk is done.
+    pub fn finish(self) -> (L, WalkStats) {
+        (self.ledger, self.stats)
     }
 
     /// Walks every commit of `graph` in address order.
@@ -267,7 +322,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
                 tracing::info!(
                     commits = n + 1,
                     of = total,
-                    instances = self.arena.instances(),
+                    commits_per_sec = (n + 1) as u64 / started.elapsed().as_secs().max(1),
                     secs = started.elapsed().as_secs(),
                     "walking the history"
                 );
@@ -288,7 +343,11 @@ impl<'r, S: LineSink> Walker<'r, S> {
         Ok(Blob::new(blob.detach().data))
     }
 
-    fn tree_changes(&mut self, parent: Option<ObjectId>, tree: ObjectId) -> Result<Vec<Change>> {
+    pub(crate) fn tree_changes(
+        &mut self,
+        parent: Option<ObjectId>,
+        tree: ObjectId,
+    ) -> Result<Vec<Change>> {
         let kind = tree.kind();
         let old = match parent {
             Some(id) => self.repo.find_tree(id)?.detach().data,
@@ -322,11 +381,45 @@ impl<'r, S: LineSink> Walker<'r, S> {
     }
 
     /// Applies one commit's changes to `files`.
-    fn apply(
+    pub(crate) fn apply(
         &mut self,
         files: &mut Files,
         parent: Option<ObjectId>,
         tree: ObjectId,
+        at: i64,
+    ) -> Result<()> {
+        let changes = self.tree_changes(parent, tree)?;
+        self.apply_changes(files, changes, at)
+    }
+
+    /// The paths a commit's changes touch, as sources or destinations.
+    pub(crate) fn touched(changes: &[Change]) -> Vec<String> {
+        let mut out = Vec::new();
+        for change in changes {
+            match change {
+                Change::Addition { location, .. }
+                | Change::Deletion { location, .. }
+                | Change::Modification { location, .. } => out.push(location.to_string()),
+                Change::Rewrite {
+                    source_location,
+                    location,
+                    ..
+                } => {
+                    out.push(source_location.to_string());
+                    out.push(location.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Applies `changes`, one commit's, to `files`.
+    pub(crate) fn apply_changes(
+        &mut self,
+        files: &mut Files,
+        changes: Vec<Change>,
         at: i64,
     ) -> Result<()> {
         let path = |location: &gix::bstr::BString| -> Result<String> {
@@ -339,7 +432,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
         let mut renames = Vec::new();
         let mut modifications = Vec::new();
         let mut additions = Vec::new();
-        for change in self.tree_changes(parent, tree)? {
+        for change in changes {
             match change {
                 Change::Addition {
                     location,
@@ -443,9 +536,9 @@ impl<'r, S: LineSink> Walker<'r, S> {
 
     fn delete(&mut self, file: File, at: i64) {
         self.stats.files_deleted += 1;
-        self.arena.versions[file.version as usize].deaths.push(at);
+        self.ledger.kill_version(file.version, at);
         for &id in file.lines.iter() {
-            self.arena.kill(id, at);
+            self.ledger.kill(id, at);
         }
         self.stats.lines_deleted += file.lines.len() as u64;
     }
@@ -453,7 +546,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
     fn add(&mut self, path: &str, id: ObjectId, at: i64) -> Result<File> {
         self.stats.files_added += 1;
         let blob = self.read(id)?;
-        let lineage = self.arena.new_lineage(path, at);
+        let lineage = self.ledger.new_lineage(path, at)?;
         let lines = self.insert(lineage, &blob, NONE, at)?;
         let version = self.new_version(lineage, path, id, &blob, at, lines.len())?;
         Ok(File {
@@ -467,7 +560,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
     /// `file`'s next version: at `path` (a rename when it differs), with
     /// blob `id`.
     fn change(&mut self, file: File, path: &str, id: ObjectId, at: i64) -> Result<File> {
-        self.arena.versions[file.version as usize].deaths.push(at);
+        self.ledger.kill_version(file.version, at);
         let new = self.read(id)?;
         let lines: Arc<[u32]> = if file.blob == id {
             file.lines.clone()
@@ -498,10 +591,9 @@ impl<'r, S: LineSink> Walker<'r, S> {
     }
 
     fn born(&mut self, lineage: u32, after: u32, at: i64, text: &str) -> Result<u32> {
-        let id = self.arena.new_instance(lineage, at, after)?;
+        let id = self.ledger.new_instance(lineage, at, after, text)?;
         self.stats.lines_added += 1;
         self.stats.line_bytes += text.len() as u64;
-        self.sink.line(id, text)?;
         Ok(id)
     }
 
@@ -510,7 +602,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
     fn diff(&mut self, file: &File, old: &Blob, new: &Blob, at: i64) -> Result<Vec<u32>> {
         if !new.text {
             for &id in file.lines.iter() {
-                self.arena.kill(id, at);
+                self.ledger.kill(id, at);
             }
             self.stats.lines_deleted += file.lines.len() as u64;
             return Ok(Vec::new());
@@ -536,7 +628,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
             let (b0, b1) = (hunk.before.start as usize, hunk.before.end as usize);
             out.extend_from_slice(&old_ids[pos..b0]);
             for &id in &old_ids[b0..b1] {
-                self.arena.kill(id, at);
+                self.ledger.kill(id, at);
             }
             self.stats.lines_deleted += (b1 - b0) as u64;
             // New lines follow the lines they replace, else the line before.
@@ -568,8 +660,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
         lines: usize,
     ) -> Result<u32> {
         debug_assert_eq!(lines, blob.line_count());
-        let id = u32::try_from(self.arena.versions.len()).context("too many file versions")?;
-        self.arena.versions.push(Version {
+        self.ledger.new_version(Version {
             lineage,
             path: path.to_owned(),
             blob: blob_id,
@@ -580,8 +671,7 @@ impl<'r, S: LineSink> Walker<'r, S> {
             binary: !blob.text,
             final_newline: blob.final_newline(),
             bom: blob.bom,
-        });
-        Ok(id)
+        })
     }
 }
 

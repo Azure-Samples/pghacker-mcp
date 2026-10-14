@@ -178,8 +178,10 @@ async fn history_and_snapshots_answer_alike() {
         &BuildOptions {
             git_dir: dir.path().to_owned(),
             master: "master".into(),
+            url: None,
             schema: SCHEMA.into(),
             paths: paths.clone(),
+            install: false,
         },
     )
     .await

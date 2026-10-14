@@ -67,7 +67,28 @@ impl Alive {
         alive
     }
 
-    fn subtract(&mut self, (lo, hi): (i64, i64)) {
+    /// PostgreSQL's int8multirange text form read back: `{[1,5),[7,)}`.
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let inner = text
+            .trim()
+            .strip_prefix('{')
+            .and_then(|t| t.strip_suffix('}'))
+            .ok_or_else(|| anyhow::anyhow!("not a multirange: {text}"))?;
+        let mut out = Vec::new();
+        for part in inner.split("),").filter(|p| !p.is_empty()) {
+            let part = part.trim_end_matches(')');
+            let (lo, hi) = part
+                .strip_prefix('[')
+                .and_then(|p| p.split_once(','))
+                .ok_or_else(|| anyhow::anyhow!("not a range: {part}"))?;
+            let hi = if hi.is_empty() { OPEN } else { hi.parse()? };
+            out.push((lo.parse()?, hi));
+        }
+        Ok(Alive(out))
+    }
+
+    /// Takes the addresses of [lo, hi) out.
+    pub fn subtract(&mut self, (lo, hi): (i64, i64)) {
         let mut out = Vec::with_capacity(self.0.len() + 1);
         for &(a, b) in &self.0 {
             if b <= lo || a >= hi {
@@ -166,6 +187,12 @@ mod tests {
             Alive::of(master(2), []).to_sql(),
             format!("{{[{},)}}", master(2))
         );
+        assert_eq!(Alive::parse(&alive.to_sql()).unwrap(), alive);
+        assert_eq!(
+            Alive::parse(&Alive::of(master(2), []).to_sql()).unwrap(),
+            Alive(vec![(master(2), OPEN)])
+        );
+        assert_eq!(Alive::parse("{}").unwrap(), Alive(vec![]));
         // Born and deleted on one branch.
         let born = Alive::of(b_lo + 1, [b_lo + 4]);
         assert_eq!(born, Alive(vec![(b_lo + 1, b_lo + 4)]));

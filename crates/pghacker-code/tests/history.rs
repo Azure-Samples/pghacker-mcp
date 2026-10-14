@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use pghacker_code::history::sync::{SyncOptions, sync};
 use pghacker_code::history::{self, BuildOptions, VerifyOptions, addr};
 use pghacker_core::testing::TestDb;
 use tokio_postgres::Client;
@@ -159,8 +160,10 @@ async fn build(db: &TestDb, git_dir: &Path, paths: Vec<String>) -> history::Buil
         &BuildOptions {
             git_dir: git_dir.to_owned(),
             master: "master".into(),
+            url: None,
             schema: SCHEMA.into(),
             paths,
+            install: false,
         },
     )
     .await
@@ -336,8 +339,10 @@ async fn refuses_to_drop_a_schema_it_did_not_make() {
         &BuildOptions {
             git_dir: repo.path(),
             master: "master".into(),
+            url: None,
             schema: SCHEMA.into(),
             paths: Vec::new(),
+            install: false,
         },
     )
     .await
@@ -345,4 +350,244 @@ async fn refuses_to_drop_a_schema_it_did_not_make() {
     assert!(error.to_string().contains("refusing"), "{error:#}");
     assert!(history::store::schema_name("public").is_err());
     assert!(history::store::schema_name("pghacker").is_err());
+}
+
+#[tokio::test]
+async fn an_installed_build_replaces_the_tables_in_pghacker() {
+    let repo = fixture();
+    let db = TestDb::create().await.unwrap();
+    // The second build swaps out the first.
+    for _ in 0..2 {
+        history::build(
+            &db.admin_url,
+            &BuildOptions {
+                git_dir: repo.path(),
+                master: "master".into(),
+                url: None,
+                schema: "pghacker_history_build".into(),
+                paths: Vec::new(),
+                install: true,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let verified = history::verify_build(
+        &db.admin_url,
+        &VerifyOptions {
+            git_dir: repo.path(),
+            schema: "pghacker".into(),
+            revs: repo.commits.clone(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.mismatches, Vec::<String>::new());
+    assert_eq!(verified.commits, 9);
+
+    let admin = db.admin().await.unwrap();
+    let strings =
+        |rows: Vec<tokio_postgres::Row>| -> Vec<String> { rows.iter().map(|r| r.get(0)).collect() };
+    let owners = strings(
+        admin
+            .query(
+                "SELECT DISTINCT tableowner::text FROM pg_tables \
+                 WHERE schemaname = 'pghacker' AND tablename = ANY($1)",
+                &[&history::store::TABLES.to_vec()],
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(owners, vec!["pgh_indexer"]);
+    let indexes = strings(
+        admin
+            .query(
+                "SELECT indexname::text FROM pg_indexes WHERE schemaname = 'pghacker' \
+                 AND tablename = 'code_line_instances' ORDER BY 1",
+                &[],
+            )
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        indexes,
+        vec![
+            "code_line_instances_pkey",
+            "code_line_instances_scope",
+            "code_line_instances_trgm",
+            "code_line_instances_weave"
+        ]
+    );
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM pg_namespace WHERE nspname = 'pghacker_history_build'"
+        )
+        .await,
+        0
+    );
+    // The reader reads the installed tables through its search_path.
+    let reader = db.reader().await.unwrap();
+    let lines: i64 = reader
+        .query_one("SELECT count(*) FROM code_line_instances", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(lines > 0);
+    assert_eq!(
+        lines,
+        count(&admin, "SELECT count(*) FROM pghacker.code_line_instances").await
+    );
+}
+
+/// Every table's rows in a form independent of ids and weave keys: equal
+/// for two histories with the same commits.
+async fn dump(client: &Client, s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for sql in [
+        format!(
+            "SELECT name || ' ' || coalesce(fork_addr::text, '-') || ' ' || lo || ' ' || hi || ' ' || head_addr FROM {s}.code_lanes ORDER BY name"
+        ),
+        format!(
+            "SELECT c.addr || ' ' || c.sha || ' ' || l.name || ' ' || c.subject FROM {s}.code_commits c JOIN {s}.code_lanes l ON l.id = c.lane ORDER BY c.addr"
+        ),
+        format!("SELECT kind || ' ' || name || ' ' || addr FROM {s}.code_refs ORDER BY kind, name"),
+        format!("SELECT first_path || ' ' || born FROM {s}.code_lineages ORDER BY 1"),
+        format!(
+            "SELECT l.first_path || '@' || l.born || ' ' || v.path || ' ' || v.blob_sha || ' ' || v.lo || ' ' || v.hi || ' ' || coalesce(v.alive::text, '-') || ' ' || v.line_count || v.is_binary || v.final_newline || v.bom FROM {s}.code_file_versions v JOIN {s}.code_lineages l ON l.id = v.lineage ORDER BY l.first_path, l.born, v.lo, v.path"
+        ),
+        format!(
+            "SELECT l.first_path || '@' || l.born || ' ' || i.lo || ' ' || i.hi || ' ' || coalesce(i.alive::text, '-') || ' ' || i.bytes || ' ' || i.line FROM {s}.code_line_instances i JOIN {s}.code_lineages l ON l.id = i.lineage ORDER BY l.first_path, l.born, i.weave"
+        ),
+    ] {
+        for row in client.query(sql.as_str(), &[]).await.unwrap() {
+            out.push(row.get(0));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_build_then_syncs_equals_one_build() {
+    let mut repo = fixture();
+    let db = TestDb::create().await.unwrap();
+    let build_into = |schema: &'static str, git_dir: PathBuf| {
+        let url = db.admin_url.clone();
+        async move {
+            history::build(
+                &url,
+                &BuildOptions {
+                    git_dir,
+                    master: "master".into(),
+                    url: None,
+                    schema: schema.into(),
+                    paths: Vec::new(),
+                    install: false,
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    build_into("pghacker_history", repo.path()).await;
+    let first_commits = repo.commits.len();
+
+    // More history: master and an old branch move on, a branch is created,
+    // files are renamed, deleted, re-added and turned binary, and a line is
+    // inserted where a branch already inserted one.
+    let a = std::fs::read_to_string(repo.dir.path().join("src/a.c")).unwrap();
+    repo.write(
+        "src/a.c",
+        a.replace(
+            "a.c line 2\n",
+            "a.c line 2\ninserted on master 1\ninserted on master 2\ninserted on master 3\n",
+        )
+        .replace(
+            "a.c line 12\na.c line 13\n",
+            "replaced 12\nreplaced 13\nreplaced 13b\n",
+        )
+        .as_bytes(),
+    );
+    repo.commit("c6: insert after line 2");
+    repo.git(&["checkout", "-q", "REL_1_STABLE"]);
+    let a1 = std::fs::read_to_string(repo.dir.path().join("a.c")).unwrap();
+    repo.write(
+        "a.c",
+        a1.replace(
+            "a.c line 2\n",
+            "a.c line 2\ninserted on the branch 1\ninserted on the branch 2\n",
+        )
+        .as_bytes(),
+    );
+    repo.commit("c1b3: insert after line 2 on the branch");
+    repo.git(&["checkout", "-q", "master"]);
+    repo.git(&["checkout", "-q", "-b", "REL_4_STABLE"]);
+    repo.write("rel4.txt", b"new branch\nsecond line\nthird line\n");
+    let tip = repo.commit("c6b1: a new branch");
+    repo.git(&["tag", "REL_4_0", &tip]);
+    repo.git(&["checkout", "-q", "master"]);
+    repo.git(&["mv", "src/a.c", "src/b.c"]);
+    repo.remove("crlf.txt");
+    repo.write("bom.txt", b"\x00now binary");
+    repo.commit("c7: rename, delete, binary");
+    repo.write("crlf.txt", b"back\r\nagain\r\n");
+    let s = std::fs::read_to_string(repo.dir.path().join("src/b.c")).unwrap();
+    repo.write(
+        "src/b.c",
+        format!("/* top 1 */\n/* top 2 */\n{s}/* end 1 */\n/* end 2 */\n").as_bytes(),
+    );
+    repo.commit("c8: re-add, lines at both ends");
+
+    let stats = sync(
+        db.admin().await.unwrap(),
+        SyncOptions {
+            git_dir: repo.path(),
+            schema: "pghacker_history".into(),
+            batch: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.commits as usize, repo.commits.len() - first_commits);
+    assert_eq!(stats.new_lanes, vec!["REL_4_STABLE"]);
+    // Nothing new: nothing to do.
+    let again = sync(
+        db.admin().await.unwrap(),
+        SyncOptions {
+            git_dir: repo.path(),
+            schema: "pghacker_history".into(),
+            batch: 2,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.commits, 0);
+
+    build_into("pghacker_history_full", repo.path()).await;
+    let admin = db.admin().await.unwrap();
+    let synced = dump(&admin, "pghacker_history").await;
+    let built = dump(&admin, "pghacker_history_full").await;
+    let differing: Vec<(&String, &String)> = synced
+        .iter()
+        .zip(&built)
+        .filter(|(a, b)| a != b)
+        .take(5)
+        .collect();
+    assert_eq!(differing, Vec::<(&String, &String)>::new());
+    assert_eq!(synced.len(), built.len());
+
+    let verified = history::verify_build(
+        &db.admin_url,
+        &VerifyOptions {
+            git_dir: repo.path(),
+            schema: "pghacker_history".into(),
+            revs: repo.commits.clone(),
+            heads: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.mismatches, Vec::<String>::new());
 }

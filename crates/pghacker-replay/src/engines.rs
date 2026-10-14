@@ -199,8 +199,10 @@ pub async fn prepare(ctx: &Ctx, git_dir: &Path) -> Result<()> {
             &BuildOptions {
                 git_dir: git_dir.to_owned(),
                 master: "master".into(),
+                url: None,
                 schema: SCHEMA.into(),
                 paths: Vec::new(),
+                install: false,
             },
         )
         .await?;
@@ -579,8 +581,10 @@ pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
     let mut summaries = Vec::new();
     for pass in 0..opts.passes.max(1) {
         let started = Instant::now();
-        let pairs: Vec<(usize, usize)> = (0..works.len())
-            .flat_map(|w| (0..heads.len()).map(move |h| (w, h)))
+        // Head by head, as production mostly reads one version at a time:
+        // each engine caches a version's file table.
+        let pairs: Vec<(usize, usize)> = (0..heads.len())
+            .flat_map(|h| (0..works.len()).map(move |w| (w, h)))
             .collect();
         let records: Vec<Record> =
             stream::iter(pairs.into_iter().enumerate().map(|(i, (w, h))| {
@@ -627,6 +631,7 @@ pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
             log.push_str(&serde_json::to_string(r)?);
             log.push('\n');
         }
+        std::fs::write(&log_path, &log)?;
         let mut summary = summarize(&records);
         summary["pass"] = json!(pass);
         summary["seconds"] = json!(started.elapsed().as_secs());
@@ -639,12 +644,11 @@ pub async fn run(ctx: &Ctx, opts: &RunOptions) -> Result<()> {
         );
         println!("{}", serde_json::to_string_pretty(&summary)?);
         summaries.push(summary);
+        std::fs::write(
+            ctx.runtime.join("engines-summary.json"),
+            serde_json::to_string_pretty(&summaries)?,
+        )?;
     }
-    std::fs::write(&log_path, log)?;
-    std::fs::write(
-        ctx.runtime.join("engines-summary.json"),
-        serde_json::to_string_pretty(&summaries)?,
-    )?;
     println!("records: {}", log_path.display());
     Ok(())
 }

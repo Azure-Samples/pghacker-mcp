@@ -1109,3 +1109,79 @@ async fn one_indexer_runs_the_jobs_at_a_time() {
         .unwrap();
     assert!(none.is_none());
 }
+
+#[tokio::test]
+async fn the_history_sync_fetches_and_applies_new_commits() {
+    let src = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(src.path())
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.org")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.org")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", src.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "master"]);
+    std::fs::write(src.path().join("a.c"), "int a;\nint b;\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "c0"]);
+
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let skipped = pghacker_indexer::history::sync(&indexer).await.unwrap();
+    assert_eq!(skipped["skipped"], "no history is installed");
+
+    pghacker_code::history::build(
+        &db.admin_url,
+        &pghacker_code::history::BuildOptions {
+            git_dir: src.path().to_owned(),
+            master: "master".into(),
+            url: Some(src.path().display().to_string()),
+            schema: "pghacker_history_build".into(),
+            paths: Vec::new(),
+            install: true,
+        },
+    )
+    .await
+    .unwrap();
+    std::fs::write(src.path().join("a.c"), "int a;\nint c;\nint b;\n").unwrap();
+    git(&["commit", "-q", "-am", "c1"]);
+    git(&["tag", "v1"]);
+
+    let synced = pghacker_indexer::history::sync(&indexer).await.unwrap();
+    assert_eq!(synced["commits"], 1, "{synced}");
+    assert!(
+        indexer
+            .settings
+            .git_dir
+            .join(pghacker_indexer::history::CLONE)
+            .join("HEAD")
+            .exists()
+    );
+    let client = db.indexer().await.unwrap();
+    let lines: Vec<String> = client
+        .query(
+            "SELECT l.line FROM code_line_instances l, code_commits c, code_refs r \
+             WHERE r.name = 'v1' AND c.addr = r.addr AND l.lo <= c.addr AND l.hi > c.addr \
+               AND (l.alive IS NULL OR l.alive @> c.addr) ORDER BY l.weave",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(lines, vec!["int a;", "int c;", "int b;"]);
+    let again = pghacker_indexer::history::sync(&indexer).await.unwrap();
+    assert_eq!(again["commits"], 0);
+}

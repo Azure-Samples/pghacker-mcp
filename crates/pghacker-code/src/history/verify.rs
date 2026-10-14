@@ -9,7 +9,7 @@ use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use tokio_postgres::Client;
 
-use super::store::schema_name;
+use super::store::readable_schema;
 
 /// What a check found.
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -78,7 +78,7 @@ pub async fn verify(
     commits: &[ObjectId],
     check_scans: bool,
 ) -> Result<Verified> {
-    let s = schema_name(schema)?;
+    let s = readable_schema(schema)?;
     let mut out = Verified::default();
     for &commit in commits {
         let sha = commit.to_string();

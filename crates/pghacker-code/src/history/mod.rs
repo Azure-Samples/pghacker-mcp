@@ -7,12 +7,14 @@
 //! addresses, [`graph`] for lanes, [`walk`] for the builder, [`store`] for
 //! the tables and [`verify`] for the rebuild checks.
 //!
-//! This is the Phase 0 prototype: it builds into a schema of its own so it
-//! can be measured against the snapshots before replacing them.
+//! A build writes a schema of its own and can be swapped into `pghacker`,
+//! where the `code_history_sync` job applies new commits ([`sync`]).
 
 pub mod addr;
+pub mod fetch;
 pub mod graph;
 pub mod store;
+pub mod sync;
 pub mod verify;
 pub mod walk;
 
@@ -31,9 +33,14 @@ pub struct BuildOptions {
     pub git_dir: PathBuf,
     /// The branch the others fork from.
     pub master: String,
+    /// Where syncs fetch new commits from.
+    pub url: Option<String>,
+    /// The schema the build is written in.
     pub schema: String,
     /// Path prefixes to keep; empty keeps the whole tree.
     pub paths: Vec<String>,
+    /// Swap the build into schema pghacker when it is done.
+    pub install: bool,
 }
 
 /// What a build did.
@@ -89,15 +96,12 @@ impl LineSink for ChannelSink {
 
 /// The path prefixes a build kept.
 pub async fn built_paths(client: &tokio_postgres::Client, schema: &str) -> Result<Vec<String>> {
-    let s = store::schema_name(schema)?;
+    let s = store::readable_schema(schema)?;
     let row = client
-        .query_opt(
-            &format!("SELECT paths FROM {s}.history_build WHERE finished_at IS NOT NULL"),
-            &[],
-        )
+        .query_opt(&format!("SELECT paths FROM {s}.code_history"), &[])
         .await
-        .with_context(|| format!("schema {s} has no history build"))?
-        .with_context(|| format!("the build in schema {s} didn't finish"))?;
+        .with_context(|| format!("schema {s} has no history"))?
+        .with_context(|| format!("schema {s} has no history build"))?;
     Ok(row.get(0))
 }
 
@@ -108,8 +112,8 @@ pub fn walk_only(opts: &BuildOptions) -> Result<(Graph, Arena, WalkStats)> {
     let graph = Graph::read(&repo, &opts.master)?;
     let mut walker = Walker::new(&repo, &opts.paths, |_: u32, _: &str| Ok(()))?;
     walker.walk(&graph)?;
-    let (arena, stats, _) = walker.finish();
-    Ok((graph, arena, stats))
+    let (ledger, stats) = walker.finish();
+    Ok((graph, ledger.arena, stats))
 }
 
 /// Builds the history into `opts.schema` afresh.
@@ -118,12 +122,6 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
     let texts_client = pghacker_core::db::connect(database_url, "pghacker-history-texts").await?;
     let schema = store::schema_name(&opts.schema)?.to_owned();
     store::create(&client, &schema).await?;
-    client
-        .execute(
-            &format!("INSERT INTO {schema}.history_build (master, paths) VALUES ($1, $2)"),
-            &[&opts.master, &opts.paths],
-        )
-        .await?;
 
     let started = std::time::Instant::now();
     let (tx, rx) = mpsc::channel::<Vec<(u32, String)>>(8);
@@ -147,9 +145,9 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
         };
         let mut walker = Walker::new(&repo, &walk_opts.paths, sink)?;
         walker.walk(&graph)?;
-        let (arena, stats, mut sink) = walker.finish();
-        sink.flush()?;
-        Ok((graph, arena, stats))
+        let (mut ledger, stats) = walker.finish();
+        ledger.sink.flush()?;
+        Ok((graph, ledger.arena, stats))
     })
     .await
     .context("the walk panicked")?;
@@ -179,8 +177,7 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
     drop(arena);
     drop(graph);
     let started = std::time::Instant::now();
-    store::finish(&client, &schema).await?;
-    let stats = BuildStats {
+    let mut stats = BuildStats {
         walk: walk_stats,
         stored,
         lanes,
@@ -188,16 +185,27 @@ pub async fn build(database_url: &str, opts: &BuildOptions) -> Result<BuildStats
         texts,
         walk_secs,
         write_secs,
-        finish_secs: started.elapsed().as_secs(),
+        finish_secs: 0,
     };
+    let built = store::Built {
+        master: &opts.master,
+        url: opts.url.as_deref(),
+        paths: &opts.paths,
+        head: &head,
+        stats: serde_json::to_value(&stats)?,
+    };
+    store::finish(&client, &schema, &built).await?;
+    stats.finish_secs = started.elapsed().as_secs();
     client
         .execute(
-            &format!(
-                "UPDATE {schema}.history_build SET finished_at = now(), head = $1, stats = $2"
-            ),
-            &[&head, &serde_json::to_value(&stats)?],
+            &format!("UPDATE {schema}.code_history SET stats = $1"),
+            &[&serde_json::to_value(&stats)?],
         )
         .await?;
+    if opts.install {
+        store::swap(&mut client, &schema).await?;
+        tracing::info!("installed the history in schema pghacker");
+    }
     Ok(stats)
 }
 
@@ -219,7 +227,7 @@ pub struct VerifyOptions {
 /// Rebuilds every file at the chosen commits and checks it against git.
 pub async fn verify_build(database_url: &str, opts: &VerifyOptions) -> Result<verify::Verified> {
     let client = pghacker_core::db::connect(database_url, "pghacker-history").await?;
-    let s = store::schema_name(&opts.schema)?;
+    let s = store::readable_schema(&opts.schema)?;
     let paths = built_paths(&client, s).await?;
     let repo = open(&opts.git_dir)?;
     let mut commits = Vec::new();

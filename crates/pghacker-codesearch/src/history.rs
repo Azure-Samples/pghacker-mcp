@@ -1,5 +1,5 @@
-//! Code search over the commit history, behind a flag while the prototype
-//! is measured against the snapshots.
+//! Code search over the commit history: the code tools read it when
+//! PGHACKER_CODE_HISTORY names a build's schema, the snapshots otherwise.
 //!
 //! The same tools read a commit's file versions and line instances instead
 //! of a snapshot's files and lines. A file's id is its version's id. A
@@ -26,8 +26,8 @@ pub const HISTORY_ENV: &str = "PGHACKER_CODE_HISTORY";
 pub struct History {
     pub schema: String,
     pub addr: i64,
-    /// The database and the build's finish time: cached lists are only
-    /// reused for the same build.
+    /// The database, the build and its weave numbering: cached line keys
+    /// are only reused while these stay the same.
     pub build: String,
 }
 
@@ -65,9 +65,9 @@ pub async fn attach(
     let row = client
         .query_opt(
             &format!(
-                "SELECT c.addr, current_database()::text || ':' || b.finished_at::text \
-                 FROM {s}.code_commits c, {s}.history_build b \
-                 WHERE c.sha = $1 AND b.finished_at IS NOT NULL"
+                "SELECT c.addr, \
+                        current_database()::text || ':' || h.built_at || ':' || h.weave_epoch \
+                 FROM {s}.code_commits c, {s}.code_history h WHERE c.sha = $1"
             ),
             &[&snapshot.sha],
         )
@@ -118,7 +118,7 @@ pub async fn files(
         })
         .collect();
     let paths: Vec<String> = client
-        .query_one(&format!("SELECT paths FROM {s}.history_build"), &[])
+        .query_one(&format!("SELECT paths FROM {s}.code_history"), &[])
         .await?
         .get(0);
     Ok((files, paths))

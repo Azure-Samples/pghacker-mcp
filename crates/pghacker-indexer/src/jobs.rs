@@ -21,6 +21,7 @@ pub mod kind {
     pub const GRAPH_SYNC: &str = "graph_sync";
     pub const REPAIR_STATS: &str = "repair_stats";
     pub const MAIL_REFRESH: &str = "mail_refresh";
+    pub const CODE_HISTORY_SYNC: &str = "code_history_sync";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -31,6 +32,8 @@ pub const RECURRING: &[(&str, Duration)] = &[
     (kind::REPAIR_STATS, Duration::from_secs(120)),
     // Followed lists' current months, hourly.
     (kind::MAIL_REFRESH, Duration::from_secs(3600)),
+    // New commits on every branch, hourly.
+    (kind::CODE_HISTORY_SYNC, Duration::from_secs(3600)),
 ];
 
 /// How long a graph sync job applies batches of changes before it yields.
@@ -380,6 +383,10 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
                 result: json!({ "queued": queued }),
             })
         }
+        kind::CODE_HISTORY_SYNC => Ok(Outcome::Again {
+            after: recurring_interval(kind::CODE_HISTORY_SYNC),
+            result: crate::history::sync(indexer).await?,
+        }),
         other => Err(anyhow!("unknown job kind {other}")),
     }
 }
@@ -456,6 +463,7 @@ const RECURRING_KINDS: &[&str] = &[
     kind::GRAPH_SYNC,
     kind::REPAIR_STATS,
     kind::MAIL_REFRESH,
+    kind::CODE_HISTORY_SYNC,
 ];
 
 const NOT_CODE: &[&str] = &[kind::CODE_SNAPSHOT];

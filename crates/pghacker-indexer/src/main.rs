@@ -1,7 +1,7 @@
 //! pghacker-indexer's command line: `bootstrap` (as the database's
 //! administrator), `serve` (workers and the MCP server), `status`,
-//! `graph-reconcile`, the local-only `reset`, and `history` (the
-//! commit-history prototype).
+//! `graph-reconcile`, the local-only `reset`, and `history` (building,
+//! syncing and checking the commit history).
 
 use std::path::PathBuf;
 
@@ -40,8 +40,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// The commit-history prototype: builds it into a schema of its own and
-    /// checks it against git (as the administrator).
+    /// The commit history: builds it into a schema of its own, installs and
+    /// syncs it, and checks it against git (as the administrator).
     History {
         #[command(subcommand)]
         action: History,
@@ -65,11 +65,32 @@ enum History {
         /// Walk without storing, and print the walk's numbers.
         #[arg(long)]
         dry_run: bool,
+        /// Swap the build into schema pghacker when it is done.
+        #[arg(long)]
+        install: bool,
+        /// Where syncs fetch new commits from.
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Applies the clone's new commits to the history.
+    Sync {
+        #[arg(long)]
+        git_dir: PathBuf,
+        /// The build's schema, or pghacker once installed.
+        #[arg(long, default_value = "pghacker")]
+        schema: String,
+        /// Fetch every branch and tag from the history's URL first.
+        #[arg(long)]
+        fetch: bool,
+        /// New commits per transaction.
+        #[arg(long, default_value_t = 200)]
+        batch: usize,
     },
     /// Rebuilds every file at commits and checks it against git.
     Verify {
         #[arg(long)]
         git_dir: PathBuf,
+        /// The build's schema, or pghacker once installed.
         #[arg(long, default_value = "pghacker_history")]
         schema: String,
         /// A revision to check (repeatable).
@@ -132,12 +153,16 @@ async fn history(env: &Env, action: History) -> Result<()> {
             master,
             paths,
             dry_run,
+            install,
+            url,
         } => {
             let opts = history::BuildOptions {
                 git_dir,
                 master,
+                url,
                 schema,
                 paths,
+                install,
             };
             if dry_run {
                 let started = std::time::Instant::now();
@@ -161,6 +186,36 @@ async fn history(env: &Env, action: History) -> Result<()> {
             } else {
                 serde_json::to_value(history::build(&env.admin_database_url()?, &opts).await?)?
             }
+        }
+        History::Sync {
+            git_dir,
+            schema,
+            fetch,
+            batch,
+        } => {
+            let url = env.admin_database_url()?;
+            let client = db::connect(&url, "pghacker-indexer").await?;
+            if fetch {
+                let row = client
+                    .query_one(&format!("SELECT url FROM {schema}.code_history"), &[])
+                    .await
+                    .context("the schema has no history")?;
+                let repo_url: Option<String> = row.get(0);
+                let repo_url = repo_url.context("the history has no URL to fetch from")?;
+                let dir = git_dir.clone();
+                tokio::task::spawn_blocking(move || history::fetch::update_clone(&repo_url, &dir))
+                    .await??;
+            }
+            let stats = history::sync::sync(
+                client,
+                history::sync::SyncOptions {
+                    git_dir,
+                    schema,
+                    batch,
+                },
+            )
+            .await?;
+            serde_json::to_value(stats)?
         }
         History::Verify {
             git_dir,
