@@ -23,6 +23,9 @@ pub mod kind {
     pub const CODE_HISTORY_SYNC: &str = "code_history_sync";
     pub const PATCH_LINES: &str = "patch_lines";
     pub const DUPLICATES: &str = "duplicates";
+    /// Gives mail stored before ingest kept email addresses its addresses
+    /// back: a month, or messages from thread pages ([`crate::addresses`]).
+    pub const RESTORE_ADDRESSES: &str = "restore_addresses";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -292,6 +295,35 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             .await?;
             after_ingest(indexer).await?;
             settle(job, stats)
+        }
+        kind::RESTORE_ADDRESSES => {
+            let stats = match job.payload.get("month") {
+                Some(_) => {
+                    pghacker_mail::ingest::restore_mbox_month(
+                        &indexer.pool,
+                        &indexer.archive,
+                        &text("list")?,
+                        &text("month")?,
+                    )
+                    .await?
+                }
+                None => {
+                    let ids: Vec<String> = serde_json::from_value(
+                        job.payload.get("message_ids").cloned().unwrap_or(json!([])),
+                    )?;
+                    pghacker_mail::ingest::restore_messages(&indexer.pool, &indexer.archive, &ids)
+                        .await?
+                }
+            };
+            after_ingest(indexer).await?;
+            // Restoring again changes only what's left.
+            if stats.failed > 0 && job.attempts < INGEST_ATTEMPTS {
+                return Err(anyhow!(
+                    "{} messages failed; restoring again for the rest",
+                    stats.failed
+                ));
+            }
+            Ok(Outcome::Done(serde_json::to_value(stats)?))
         }
         kind::EMBED => {
             let report = crate::embedding::backfill(indexer, 40).await?;

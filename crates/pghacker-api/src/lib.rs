@@ -1,7 +1,7 @@
 //! pghacker-mcp's mail and graph tools: threads, authors, extracts and
 //! author perspectives, searched by full text (BM25), semantic search
 //! (pgvector) or both (hybrid, the default). Read-only; results cite Message-IDs and
-//! verbatim quotes and never contain email addresses.
+//! verbatim quotes, email addresses as written.
 
 mod common;
 pub mod extracts;

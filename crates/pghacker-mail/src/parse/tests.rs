@@ -80,8 +80,8 @@ fn falls_back_to_html_text() {
     assert!(msg.body.contains("It’s “quoted”."), "{:?}", msg.body);
     assert!(msg.body.contains("Second"));
     assert!(!msg.body.contains("<p>"));
-    // No display name: the address's local part.
-    assert_eq!(msg.from_name, "bob");
+    // No display name: the address.
+    assert_eq!(msg.from_name, "bob@example.org");
     assert_eq!(msg.from_email.as_deref(), Some("bob@example.org"));
 }
 
@@ -126,7 +126,7 @@ fn message_ids_are_normalized() {
 }
 
 #[test]
-fn names_are_never_addresses() {
+fn names_keep_their_addresses() {
     let parse_from = |from: &str| {
         let raw = format!("From: {from}\nMessage-ID: <n@example.org>\n\nbody\n");
         let msg = parse(raw.as_bytes()).unwrap();
@@ -134,18 +134,30 @@ fn names_are_never_addresses() {
     };
     assert_eq!(
         parse_from("\"dave@example.org\" <dave@example.org>"),
-        ("dave".to_owned(), Some("dave@example.org".to_owned()))
+        (
+            "dave@example.org".to_owned(),
+            Some("dave@example.org".to_owned())
+        )
     );
     assert_eq!(
         parse_from("Dave Example (dave@example.org) <dave@example.org>").0,
-        "Dave Example"
+        "Dave Example (dave@example.org)"
     );
-    assert_eq!(parse_from("<dave@example.org>").0, "dave");
+    assert_eq!(parse_from("<dave@example.org>").0, "dave@example.org");
     assert_eq!(
         parse_from("'Eve Example' <EVE@Example.ORG>").1.as_deref(),
         Some("eve@example.org")
     );
     assert_eq!(display_name("", None), "unknown");
+    // The names stored before, recognized from the names stored now.
+    let before = |name: &str| {
+        let email = Some("dave@example.org");
+        display_name_without_addresses(&display_name(name, email), email)
+    };
+    assert_eq!(before("\"dave@example.org\""), "dave");
+    assert_eq!(before("Dave Example (dave@example.org)"), "Dave Example");
+    assert_eq!(before(""), "dave");
+    assert_eq!(before("Dave Example"), "Dave Example");
 }
 
 #[test]

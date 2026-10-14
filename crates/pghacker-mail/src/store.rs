@@ -21,8 +21,9 @@
 //! them, and a thread rooted at a later message of the chain takes the
 //! earlier root.
 //!
-//! Authors match by lowercased address in `author_emails`, which alone holds
-//! addresses. Bodies, chunks and patches are stored with addresses redacted.
+//! Authors match by lowercased address in `author_emails`. Text is stored as
+//! written, email addresses included; mail stored before ingest kept them
+//! has `[email]` in their place until [`restore_addresses`] gives them back.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -34,7 +35,9 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
 
 use crate::anchors::{self, AnchorRef};
-use crate::parse::{ParsedMessage, display_name, normalize_message_id, sanitize};
+use crate::parse::{
+    ParsedMessage, display_name, display_name_without_addresses, normalize_message_id, sanitize,
+};
 use crate::patch::{self, PatchFile};
 use crate::{chunk, clean, subject};
 
@@ -166,8 +169,8 @@ pub async fn refresh_threads(tx: &Transaction<'_>, thread_ids: &[i64]) -> Result
     Ok(())
 }
 
-/// What is stored for a message besides its headers: text with addresses
-/// redacted, patches, anchors and chunks.
+/// What is stored for a message besides its headers: its text as written,
+/// patches, anchors and chunks.
 struct Derived {
     subject: String,
     from_name: String,
@@ -183,32 +186,297 @@ impl Derived {
         let clean = clean::clean_body(&msg.body);
         let patches = patch::extract(msg);
         let anchors = anchors::extract_at(&msg.subject, &clean, &patches, msg.sent_at);
-        let subject = private(&msg.subject);
-        let body_clean = private(&clean);
+        let subject = sanitize(&msg.subject);
+        let body_clean = sanitize(&clean);
         let chunks = chunk::chunk(&subject, &body_clean);
         let patches = patches
             .into_iter()
             .map(|patch| PatchFile {
-                filename: private(&patch.filename),
-                content: private(&patch.content),
+                filename: sanitize(&patch.filename),
+                content: sanitize(&patch.content),
                 ..patch
             })
             .collect();
         Self {
             subject,
-            from_name: private(&display_name(&msg.from_name, msg.from_email.as_deref())),
-            body: private(&msg.body),
+            from_name: sanitize(&display_name(&msg.from_name, msg.from_email.as_deref())),
+            body: sanitize(&msg.body),
             body_clean,
             patches,
             anchors,
             chunks,
         }
     }
+
+    /// The text ingest once stored for the message, before it kept email
+    /// addresses: each replaced by `[email]`, and the sender's name without
+    /// them.
+    fn once(&self, email: Option<&str>) -> Once {
+        let redact = |text: &str| redact_emails(text).into_owned();
+        Once {
+            subject: redact(&self.subject),
+            from_name: redact(&display_name_without_addresses(&self.from_name, email)),
+            body: redact(&self.body),
+            body_clean: redact(&self.body_clean),
+            patches: self
+                .patches
+                .iter()
+                .map(|p| (redact(&p.filename), redact(&p.content)))
+                .collect(),
+        }
+    }
 }
 
-/// Text as stored: sanitized, with email addresses redacted.
-fn private(text: &str) -> String {
-    redact_emails(&sanitize(text)).into_owned()
+/// A message's text as ingest once stored it ([`Derived::once`]).
+struct Once {
+    subject: String,
+    from_name: String,
+    body: String,
+    body_clean: String,
+    /// Each patch's filename and content.
+    patches: Vec<(String, String)>,
+}
+
+impl Once {
+    /// Whether the message had addresses that ingest once left out.
+    fn differs_from(&self, now: &Derived) -> bool {
+        self.subject != now.subject
+            || self.from_name != now.from_name
+            || self.body != now.body
+            || self.body_clean != now.body_clean
+            || self
+                .patches
+                .iter()
+                .zip(&now.patches)
+                .any(|((name, content), p)| *name != p.filename || *content != p.content)
+    }
+}
+
+/// What [`restore_addresses`] did with a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restored {
+    /// Its stored text got its email addresses back. A thread's subject is
+    /// its root's: refresh the thread ([`refresh_threads`]).
+    Restored { thread_id: i64 },
+    /// It isn't stored, or it's stored as written.
+    Unchanged,
+    /// Its stored text isn't what ingest once made of the message's, as when
+    /// cleaning changed since: it's left as it is.
+    Differs,
+}
+
+/// Whether anything was given back, and whether anything differed.
+#[derive(Default)]
+struct Restoring {
+    restored: bool,
+    differs: bool,
+}
+
+impl Restoring {
+    /// What to store for a field: `now`, the text as written, if `stored` is
+    /// what ingest once made of it; else what's stored.
+    fn pick(&mut self, stored: String, now: &str, once: &str) -> String {
+        if stored == now {
+            stored
+        } else if stored == once {
+            self.restored = true;
+            now.to_owned()
+        } else {
+            self.differs = true;
+            stored
+        }
+    }
+}
+
+/// Gives a stored message the email addresses that ingest once replaced by
+/// `[email]`, and its sender's name the addresses ingest left out, from
+/// `msg`, the message as the archive has it. Its subject, sender's name,
+/// bodies and each patch are replaced only if they're stored exactly as
+/// ingest once made them of `msg`'s; then its chunks are made again, to be
+/// embedded again, and its patches are indexed again. On error, nothing of
+/// the message changes and `tx` stays usable.
+pub async fn restore_addresses(tx: &Transaction<'_>, msg: &ParsedMessage) -> Result<Restored> {
+    let now = Derived::new(msg);
+    let once = now.once(msg.from_email.as_deref());
+    if !once.differs_from(&now) {
+        return Ok(Restored::Unchanged);
+    }
+    tx.batch_execute("SAVEPOINT pghacker_restore_addresses")
+        .await?;
+    match restore(tx, msg, &now, &once).await {
+        Ok(restored) => {
+            tx.batch_execute("RELEASE SAVEPOINT pghacker_restore_addresses")
+                .await?;
+            Ok(restored)
+        }
+        Err(error) => match rollback_to(tx, "pghacker_restore_addresses").await {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(error.context(format!("and cannot roll back: {rollback}"))),
+        },
+    }
+}
+
+async fn restore(
+    tx: &Transaction<'_>,
+    msg: &ParsedMessage,
+    now: &Derived,
+    once: &Once,
+) -> Result<Restored> {
+    let message_id = normalize_message_id(&msg.message_id);
+    let Some(row) = tx
+        .query_typed_opt(
+            "SELECT id, thread_id, author_id, subject, from_name, body, body_clean
+             FROM messages WHERE message_id = $1 FOR UPDATE",
+            &[(&message_id, Type::TEXT)],
+        )
+        .await?
+    else {
+        return Ok(Restored::Unchanged);
+    };
+    let (id, thread_id, author_id): (i64, i64, Option<i64>) = (row.get(0), row.get(1), row.get(2));
+    let (stored_subject, stored_name, stored_clean): (String, String, String) =
+        (row.get(3), row.get(4), row.get(6));
+    let mut restoring = Restoring::default();
+    let subject = restoring.pick(stored_subject.clone(), &now.subject, &once.subject);
+    let from_name = restoring.pick(stored_name.clone(), &now.from_name, &once.from_name);
+    let body = restoring.pick(row.get(5), &now.body, &once.body);
+    let body_clean = restoring.pick(stored_clean.clone(), &now.body_clean, &once.body_clean);
+    if restoring.restored {
+        tx.execute_typed(
+            "UPDATE messages SET subject = $2, from_name = $3, body = $4, body_clean = $5 WHERE id = $1",
+            &[
+                (&id, Type::INT8),
+                (&subject, Type::TEXT),
+                (&from_name, Type::TEXT),
+                (&body, Type::TEXT),
+                (&body_clean, Type::TEXT),
+            ],
+        )
+        .await?;
+    }
+
+    let patches: Vec<(i64, String, String)> = tx
+        .query_typed(
+            "SELECT id, filename, content FROM patches WHERE message_id = $1",
+            &[(&id, Type::INT8)],
+        )
+        .await?
+        .into_iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    for (patch, (once_name, once_content)) in now.patches.iter().zip(&once.patches) {
+        match patches
+            .iter()
+            .find(|(_, name, _)| *name == patch.filename || name == once_name)
+        {
+            Some((_, name, content)) if *name == patch.filename && *content == patch.content => {}
+            Some((patch_id, name, content)) if name == once_name && content == once_content => {
+                // Indexed again by the patch_lines job.
+                tx.execute_typed(
+                    "UPDATE patches SET filename = $2, content = $3, text_ids = NULL WHERE id = $1",
+                    &[
+                        (patch_id, Type::INT8),
+                        (&patch.filename, Type::TEXT),
+                        (&patch.content, Type::TEXT),
+                    ],
+                )
+                .await?;
+                restoring.restored = true;
+            }
+            _ => restoring.differs = true,
+        }
+    }
+
+    // The chunks follow the subject and the cleaned body; the embed job
+    // embeds new ones.
+    if subject != stored_subject || body_clean != stored_clean {
+        let chunks = chunk::chunk(&subject, &body_clean);
+        let stored: Vec<String> = tx
+            .query_typed(
+                "SELECT content FROM message_chunks WHERE message_id = $1 ORDER BY ord",
+                &[(&id, Type::INT8)],
+            )
+            .await?
+            .into_iter()
+            .map(|r| r.get(0))
+            .collect();
+        if chunks != stored {
+            let ords: Vec<i32> = (0..chunks.len() as i32).collect();
+            tx.execute_typed(
+                "DELETE FROM message_chunks WHERE message_id = $1",
+                &[(&id, Type::INT8)],
+            )
+            .await?;
+            tx.execute_typed(
+                "INSERT INTO message_chunks (message_id, thread_id, ord, content)
+                 SELECT $1, $2, ord, content FROM unnest($3::int4[], $4::text[]) AS c (ord, content)",
+                &[
+                    (&id, Type::INT8),
+                    (&thread_id, Type::INT8),
+                    (&ords, Type::INT4_ARRAY),
+                    (&chunks, Type::TEXT_ARRAY),
+                ],
+            )
+            .await?;
+        }
+    }
+    if from_name != stored_name
+        && let Some(author_id) = author_id
+    {
+        rename_author_name(tx, author_id, &stored_name, &from_name).await?;
+    }
+    Ok(if restoring.restored {
+        Restored::Restored { thread_id }
+    } else if restoring.differs {
+        Restored::Differs
+    } else {
+        Restored::Unchanged
+    })
+}
+
+/// Counts a message of `author_id` under its sender's name `to` rather than
+/// `from`, and makes the most frequent name the display name. The names
+/// decide who committed a commit in the graph (COMMITTED), so the graph sync
+/// is told that the author changed.
+async fn rename_author_name(
+    tx: &Transaction<'_>,
+    author_id: i64,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    tx.execute_typed(
+        "UPDATE author_names SET count = count - 1 WHERE author_id = $1 AND name = $2",
+        &[(&author_id, Type::INT8), (&from, Type::TEXT)],
+    )
+    .await?;
+    tx.execute_typed(
+        "DELETE FROM author_names WHERE author_id = $1 AND name = $2 AND count <= 0",
+        &[(&author_id, Type::INT8), (&from, Type::TEXT)],
+    )
+    .await?;
+    tx.execute_typed(
+        "INSERT INTO author_names (author_id, name, count) VALUES ($1, $2, 1)
+         ON CONFLICT (author_id, name) DO UPDATE SET count = author_names.count + 1",
+        &[(&author_id, Type::INT8), (&to, Type::TEXT)],
+    )
+    .await?;
+    tx.execute_typed(
+        "UPDATE authors a
+         SET display_name = coalesce(
+                 (SELECT n.name FROM author_names n WHERE n.author_id = a.id
+                  ORDER BY n.count DESC, (n.name = a.display_name) DESC, n.name LIMIT 1),
+                 a.display_name),
+             updated_at = now()
+         WHERE a.id = $1",
+        &[(&author_id, Type::INT8)],
+    )
+    .await?;
+    tx.execute_typed(
+        "INSERT INTO graph_changes (key) VALUES ('author:' || $1::text)",
+        &[(&author_id, Type::INT8)],
+    )
+    .await?;
+    Ok(())
 }
 
 async fn rollback_to(tx: &Transaction<'_>, savepoint: &str) -> Result<()> {

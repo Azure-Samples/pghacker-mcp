@@ -283,6 +283,28 @@ impl ArchiveClient {
         }
     }
 
+    /// The mbox of `list` for `month` whether or not it changed since it was
+    /// ingested: the cached file, which holds every message ingested from the
+    /// month, else retrieved again, leaving the cache as it is.
+    pub async fn mbox_month_again(&self, list: &str, month: &str) -> Result<Vec<u8>> {
+        validate_list(list)?;
+        let (year, month_no) = parse_month(month)?;
+        let path = self.mbox_path(list, month);
+        if tokio::fs::metadata(&path).await.is_ok() {
+            return read_file(&path).await;
+        }
+        let url = format!(
+            "{}/list/{list}/mbox/{list}.{year:04}{month_no:02}",
+            self.inner.config.base_url
+        );
+        let bytes = self.fetch_body(&url).await?;
+        ensure!(
+            bytes.is_empty() || bytes.starts_with(b"From "),
+            "{url} did not return an mbox"
+        );
+        Ok(bytes)
+    }
+
     /// Records that every message of `list`'s mbox for `month`, as last
     /// retrieved, is stored, so that a month that doesn't change isn't
     /// retrieved again when the cache doesn't keep mbox files.

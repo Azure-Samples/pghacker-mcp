@@ -8,6 +8,9 @@ use pghacker_mail::ingest::{self, IngestStats};
 use pghacker_mail::{ArchiveClient, ArchiveConfig};
 use tempfile::TempDir;
 
+mod common;
+use common::{store_as_once, stored_text};
+
 fn scratch() -> TempDir {
     TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
 }
@@ -325,4 +328,149 @@ async fn concurrent_ingestions_agree() {
         .unwrap()
         .get(0);
     assert_eq!(counted, 120);
+}
+
+const JUNE: &str = r#"From list-owner+archive@lists.example.org Mon Jun 01 10:00:00 2026
+From: "erin@example.org" <erin@example.org>
+Subject: Ping frank@example.org
+Message-ID: <j1@example.org>
+Date: Mon, 1 Jun 2026 10:00:00 +0000
+
+Ask carol@example.org, please.
+
+From list-owner+archive@lists.example.org Tue Jun 02 10:00:00 2026
+From: Bob Example <bob@example.org>
+Subject: Re: Ping frank@example.org
+Message-ID: <j2@example.org>
+In-Reply-To: <j1@example.org>
+References: <j1@example.org>
+Date: Tue, 2 Jun 2026 10:00:00 +0000
+
+On Mon, Erin <erin@example.org> wrote:
+> Ask carol@example.org, please.
+
+Done.
+
+From list-owner+archive@lists.example.org Wed Jun 03 10:00:00 2026
+From: Carol Example <carol@example.org>
+Subject: Nothing to restore
+Message-ID: <j3@example.org>
+Date: Wed, 3 Jun 2026 10:00:00 +0000
+
+Hello.
+"#;
+
+/// A message from a thread page, as the archive serves it raw.
+const RAW: &str = "From dave@example.org Thu Jun  4 10:00:00 2026
+From: <dave@example.org>
+Subject: Seed thread, by dave@example.org
+Message-ID: <t1@example.org>
+Date: Thu, 4 Jun 2026 10:00:00 +0000
+
+Write to dave@example.org.
+";
+
+#[tokio::test]
+async fn restores_the_addresses_ingest_once_replaced() {
+    let db = TestDb::create().await.unwrap();
+    let pool = db.indexer_pool(2).unwrap();
+    let cache = scratch();
+    let client = offline_client(cache.path());
+    write(&client.mbox_path("pgsql-hackers", "2026-06"), JUNE);
+    write(&client.raw_message_path("t1@example.org"), RAW);
+    ingest::ingest_mbox_month(&pool, &client, "pgsql-hackers", "2026-06", None, false)
+        .await
+        .unwrap();
+    let mut indexer = db.indexer().await.unwrap();
+    let raw = pghacker_mail::parse::parse(RAW.as_bytes()).unwrap();
+    {
+        let tx = indexer.transaction().await.unwrap();
+        let ctx = pghacker_mail::store::StoreContext {
+            list: "pgsql-hackers".into(),
+            source_id: None,
+            archive_month: None,
+        };
+        let stored = pghacker_mail::store::upsert_message(&tx, &ctx, &raw)
+            .await
+            .unwrap();
+        pghacker_mail::store::refresh_threads(&tx, &[stored.thread_id])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let ids = [
+        "j1@example.org",
+        "j2@example.org",
+        "j3@example.org",
+        "t1@example.org",
+    ];
+    let emails = [
+        Some("erin@example.org"),
+        Some("bob@example.org"),
+        Some("carol@example.org"),
+        Some("dave@example.org"),
+    ];
+    let mut written = Vec::new();
+    for (id, email) in ids.iter().zip(emails) {
+        written.push(stored_text(&indexer, id).await);
+        store_as_once(&indexer, id, email).await;
+    }
+    assert!(
+        stored_text(&indexer, "j1@example.org")
+            .await
+            .contains(&"erin".to_owned())
+    );
+    assert!(
+        stored_text(&indexer, "t1@example.org")
+            .await
+            .contains(&"dave".to_owned())
+    );
+
+    let month = ingest::restore_mbox_month(&pool, &client, "pgsql-hackers", "2026-06")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            month.fetched,
+            month.stored,
+            month.restored,
+            month.differs,
+            month.failed
+        ),
+        (3, 3, 2, 0, 0)
+    );
+    // Only stored messages are retrieved again.
+    let pages = ingest::restore_messages(
+        &pool,
+        &client,
+        &[
+            "t1@example.org".to_owned(),
+            "unknown@example.org".to_owned(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (pages.fetched, pages.stored, pages.restored, pages.failed),
+        (1, 1, 1, 0)
+    );
+    for (id, written) in ids.iter().zip(&written) {
+        assert_eq!(&stored_text(&indexer, id).await, written, "{id}");
+    }
+    // The thread's subject is its root's again, address included.
+    let subject: String = indexer
+        .query_one(
+            "SELECT t.subject FROM threads t JOIN messages m ON m.thread_id = t.id
+             WHERE m.message_id = 'j2@example.org'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(subject, "Ping frank@example.org");
+    // Again, nothing left to restore.
+    let again = ingest::restore_mbox_month(&pool, &client, "pgsql-hackers", "2026-06")
+        .await
+        .unwrap();
+    assert_eq!((again.stored, again.restored, again.differs), (3, 0, 0));
 }

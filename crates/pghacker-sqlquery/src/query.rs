@@ -7,10 +7,9 @@
 //!   an AGE `cypher()` call with its column definition list, is checked by
 //!   its tokens: one statement that starts with one of those words; input it
 //!   can't tokenize, such as an unterminated string, is refused.
-//! - No ConnectRPC errors, callers, roles or events: [`QueryTool::run`]
-//!   returns an [`Output`], `Failed` for refused statements, PostgreSQL's
-//!   errors and timeouts alike. The SQL is logged at debug level only,
-//!   without emails.
+//! - [`QueryTool::run`] returns an [`Output`], `Failed` for refused
+//!   statements, PostgreSQL's errors and timeouts alike. The SQL is logged at
+//!   debug level only.
 //! - `max_rows` is 100 by default and at most 1,000.
 //! - The statement timeout is 5 seconds, and the call as a whole has a
 //!   deadline of its own, [`CALL_TIMEOUT`].
@@ -25,7 +24,7 @@ use std::time::{Duration, Instant};
 use deadpool_postgres::{Object, RecyclingMethod};
 use pghacker_core::db::{self, Pool};
 use pghacker_core::mcp::Output;
-use pghacker_core::text::{redact_emails, truncate_chars};
+use pghacker_core::text::truncate_chars;
 use sqlparser::ast::{Set, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::keywords::Keyword;
@@ -244,7 +243,7 @@ impl QueryTool {
             Some(rows) => usize::try_from(rows).map_or(MAX_ROWS, |rows| rows.min(MAX_ROWS)),
         };
         let sql = args.sql;
-        tracing::debug!(sql = %truncate_chars(&redact_emails(&sql), 1000), "a query");
+        tracing::debug!(sql = %truncate_chars(&sql, 1000), "a query");
         if let Err(reason) = check(&sql) {
             tracing::info!(outcome = "refused", reason = %reason, "refused a query");
             return Output::Failed(reason);

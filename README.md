@@ -98,7 +98,9 @@ not make the full graph sync incremental or establish its total runtime.
 | Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
 | Repair | `find_duplicates` (pairs the indexer finds as extracts arrive; skips pairs already judged different), `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
 
-Results cite Message-IDs, verbatim quotes and file paths. Email addresses are used only to match authors: they live in a table the reader can't access, and bodies are stored with addresses redacted.
+Results cite Message-IDs, verbatim quotes and file paths. Text keeps the email addresses written in it: subjects, bodies, patches and senders' names, a sender without a name showing as their address. The table that matches senders' addresses to authors, `author_emails`, isn't readable by pghacker-mcp, and the graph doesn't read it.
+
+Mail stored before ingest kept addresses has `[email]` in their place, and senders' names without them. With the indexer running, `cargo run --release -p pghacker-indexer -- restore-addresses`, or `SELECT * FROM pghacker.restore_addresses()` as `pgh_indexer`, queues jobs that read every stored month again (from the cache when it kept the mbox), and fetch the messages from thread pages one by one. They restore only text stored exactly as ingest once made it from the archive's; chunks they change are embedded again, and patches indexed again. `ingest_status` shows the jobs.
 
 ### Code-search budgets and large archives
 

@@ -1,5 +1,6 @@
 //! Text helpers: truncation on character boundaries, whitespace-insensitive
-//! quote checks for citations, and email redaction.
+//! quote checks for citations, and recognizing the email redaction that
+//! ingest once applied.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -92,8 +93,10 @@ static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+=-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}").unwrap()
 });
 
-/// `text` with email addresses replaced by `[email]`. Message-IDs in URLs
-/// (`/message-id/<id>`, `postgr.es/m/<id>`), which look like addresses, stay.
+/// `text` as ingest once stored it: email addresses replaced by `[email]`,
+/// Message-IDs in URLs (`/message-id/<id>`, `postgr.es/m/<id>`), which look
+/// like addresses, kept. Text is now stored as written; this recognizes the
+/// text stored before, to give it its addresses back.
 pub fn redact_emails(text: &str) -> Cow<'_, str> {
     EMAIL.replace_all(text, |caps: &regex::Captures<'_>| {
         let m = caps.get(0).unwrap();

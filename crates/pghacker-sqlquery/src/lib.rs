@@ -27,8 +27,8 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     database and returns CSV: a header row, up to max_rows rows, and the row count, with a banner \
     above when rows are cut. Tables, in schema pghacker: threads, messages, authors, author_names, \
     patches, patch_texts, anchors, message_chunks, features, decisions, positions, citations, \
-    feature_threads, feature_files, sources, and the commit history's below. Emails are not \
-    available. \
+    feature_threads, feature_files, sources, and the commit history's below. Text keeps the email \
+    addresses written in it; senders' addresses (author_emails) are not readable. \
     Query the AGE graph pghacker_graph with SELECT * FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
@@ -89,7 +89,7 @@ mod tests {
             "one SELECT",
             "5-second",
             "banner",
-            "Emails are not available",
+            "Text keeps the email addresses written in it",
             "NULL reads as None",
         ] {
             assert!(DESCRIPTION.contains(needed), "{needed}");

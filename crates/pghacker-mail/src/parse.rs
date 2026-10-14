@@ -212,7 +212,7 @@ pub fn extract_ids(value: &str) -> Vec<String> {
     ids
 }
 
-/// The sender's display name (never an address) and lowercased address.
+/// The sender's display name, addresses kept, and lowercased address.
 fn sender(message: &Message<'_>) -> (String, Option<String>) {
     let addr = message.from().and_then(first_address);
     let (name, email) = match addr {
@@ -237,28 +237,46 @@ fn first_address(address: &Address<'_>) -> Option<(String, Option<String>)> {
     ))
 }
 
-/// A display name without addresses, quotes or stray whitespace; the
-/// address's local part if nothing is left.
+/// A display name as written, addresses kept, without quotes or stray
+/// whitespace; the address if nothing is left.
 pub fn display_name(name: &str, email: Option<&str>) -> String {
-    let name = decode_encoded_words(name);
-    let name = ADDRESS.replace_all(&name, "");
-    let mut name: String = clean_header(&name);
-    loop {
-        let trimmed = EMPTY_BRACKETS.replace_all(&name, "");
-        let trimmed = trimmed
-            .trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ','));
-        let trimmed = clean_header(trimmed);
-        if trimmed == name {
-            break;
-        }
-        name = trimmed;
+    let name = trim_name(clean_header(&decode_encoded_words(name)));
+    if name.chars().any(char::is_alphanumeric) {
+        return name;
     }
+    match email.filter(|e| !e.is_empty()) {
+        Some(email) => email.to_owned(),
+        None => "unknown".to_owned(),
+    }
+}
+
+/// The name ingest once stored for a sender: the display name without its
+/// addresses, else the address's local part. Names are now stored as
+/// written; this recognizes the names stored before, to give them their
+/// addresses back.
+pub fn display_name_without_addresses(name: &str, email: Option<&str>) -> String {
+    let name = decode_encoded_words(name);
+    let name = trim_name(clean_header(&ADDRESS.replace_all(&name, "")));
     if name.chars().any(char::is_alphanumeric) {
         return name;
     }
     match email.and_then(|e| e.split('@').next()) {
         Some(local) if !local.is_empty() => local.to_owned(),
         _ => "unknown".to_owned(),
+    }
+}
+
+/// A name without empty brackets, or quotes and commas around it.
+fn trim_name(mut name: String) -> String {
+    loop {
+        let trimmed = EMPTY_BRACKETS.replace_all(&name, "");
+        let trimmed = trimmed
+            .trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ','));
+        let trimmed = clean_header(trimmed);
+        if trimmed == name {
+            return name;
+        }
+        name = trimmed;
     }
 }
 

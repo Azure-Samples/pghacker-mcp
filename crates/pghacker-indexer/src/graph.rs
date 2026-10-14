@@ -2,9 +2,8 @@
 //! into AGE's label tables, which is much faster than Cypher MERGE, and
 //! `graph_nodes` and `graph_edges` record which vertex and edge each key
 //! became. The graph never reads `author_emails`. Text is as its table
-//! stores it: mail ingest redacts addresses in messages' subjects and
-//! senders' names, so Message, Thread and Author properties show them as
-//! `[email]`; Commit subjects are the history's, addresses included.
+//! stores it, email addresses included; mail stored before ingest kept them
+//! shows `[email]` until `pghacker-indexer restore-addresses` restores it.
 //!
 //! Triggers on the tables record in `graph_changes` the keys of the vertices
 //! and edges that each change may affect (migration 0010). The commit
@@ -719,8 +718,9 @@ JOIN commits c ON c.name = x.name"
 /// compares them all, a few hundred index lookups for PostgreSQL's 61
 /// names. A batch runs whenever a change is captured, and every writer of
 /// author_names also changes a captured column of authors
-/// (count_author_message, merge_authors, undo_merge), so a name whose author
-/// changes is compared by the batch that applies that change.
+/// (count_author_message, merge_authors, undo_merge) or records the author's
+/// key itself (restore_addresses), so a name whose author changes is
+/// compared by the batch that applies that change.
 const COMMITTER_CHANGES: &str = "WITH RECURSIVE names (name) AS (
     (SELECT lower(author_name) FROM code_commits ORDER BY 1 LIMIT 1)
     UNION ALL

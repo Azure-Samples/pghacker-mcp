@@ -1710,23 +1710,29 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
                 &[&from_id, &into_id, &hashes],
             )
             .await?;
-            if let Some(names) = moved["names"].as_array() {
-                for entry in names {
-                    let (Some(name), Some(count)) =
-                        (entry["name"].as_str(), entry["count"].as_i64())
-                    else {
-                        continue;
-                    };
-                    let count = count as i32;
+            if moved["names"].is_array() {
+                // The names count each message under its sender's name as
+                // stored. That is the logged names' unless restore_addresses
+                // gave the moved messages' names their addresses back since.
+                let names: Vec<(String, i32)> = tx
+                    .query(
+                        "SELECT from_name, count(*)::int FROM messages WHERE id = ANY ($1) GROUP BY from_name",
+                        &[&list("messages")],
+                    )
+                    .await?
+                    .iter()
+                    .map(|row| (row.get(0), row.get(1)))
+                    .collect();
+                for (name, count) in &names {
                     tx.execute(
                         "INSERT INTO author_names (author_id, name, count) VALUES ($1, $2, $3)
                          ON CONFLICT (author_id, name) DO UPDATE SET count = EXCLUDED.count",
-                        &[&from_id, &name, &count],
+                        &[&from_id, name, count],
                     )
                     .await?;
                     tx.execute(
                         "UPDATE author_names SET count = count - $3 WHERE author_id = $1 AND name = $2",
-                        &[&into_id, &name, &count],
+                        &[&into_id, name, count],
                     )
                     .await?;
                 }

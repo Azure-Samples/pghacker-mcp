@@ -1,12 +1,15 @@
-//! Threading, authors, redaction and thread statistics on a fresh database.
+//! Threading, authors, addresses and thread statistics on a fresh database.
 
 use std::sync::LazyLock;
 
 use pghacker_core::testing::TestDb;
 use pghacker_mail::parse::{self, ParsedMessage};
-use pghacker_mail::store::{self, StoreContext, Stored};
+use pghacker_mail::store::{self, Restored, StoreContext, Stored};
 use regex::Regex;
 use tokio_postgres::Client;
+
+mod common;
+use common::{store_as_once, stored_text};
 
 const MULTIPART: &[u8] = include_bytes!("fixtures/multipart_patch.eml");
 
@@ -769,10 +772,8 @@ fn addresses(text: &str) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
-async fn stored_text_has_no_addresses() {
-    let db = TestDb::create().await.unwrap();
-    let mut client = db.indexer().await.unwrap();
+/// A message with addresses in its subject, sender's name, body and patch.
+fn addressed_message() -> ParsedMessage {
     let body = "Ask carol@example.org, or see\nhttps://www.postgresql.org/message-id/CAB+x=y@mail.example.org\nand https://postgr.es/m/abc@example.org for details.\n\nOn Mon, Dave <dave@example.org> wrote:\n> quoted\n";
     let mut msg = raw_message(
         "redact@example.org",
@@ -782,7 +783,14 @@ async fn stored_text_has_no_addresses() {
         body,
     );
     msg.attachments = parse::parse(MULTIPART).unwrap().attachments;
-    store_each(&mut client, &[&msg]).await;
+    msg
+}
+
+#[tokio::test]
+async fn stored_text_keeps_addresses() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    store_each(&mut client, &[&addressed_message()]).await;
     let row = client
         .query_one(
             "SELECT body, body_clean, subject, from_name FROM messages",
@@ -792,35 +800,33 @@ async fn stored_text_has_no_addresses() {
         .unwrap();
     let (body, clean, subject, from_name): (String, String, String, String) =
         (row.get(0), row.get(1), row.get(2), row.get(3));
-    assert!(body.contains("Ask [email], or see"), "{body}");
+    assert!(body.contains("Ask carol@example.org, or see"), "{body}");
+    assert!(body.contains("On Mon, Dave <dave@example.org> wrote:"));
     assert!(body.contains("https://www.postgresql.org/message-id/CAB+x=y@mail.example.org"));
-    assert!(clean.contains("https://postgr.es/m/abc@example.org"));
-    assert_eq!(subject, "Ping [email]");
-    assert_eq!(from_name, "erin");
-    let mut texts = vec![body, clean, subject, from_name];
-    for row in client
+    assert!(clean.contains("carol@example.org"), "{clean}");
+    assert_eq!(subject, "Ping frank@example.org");
+    assert_eq!(from_name, "erin@example.org");
+    let chunks: Vec<String> = client
         .query("SELECT content FROM message_chunks", &[])
         .await
         .unwrap()
-    {
-        texts.push(row.get(0));
-    }
-    for row in client
-        .query("SELECT content, filename FROM patches", &[])
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(chunks.iter().any(|c| c.contains("frank@example.org")));
+    let patches: Vec<String> = client
+        .query("SELECT content FROM patches", &[])
         .await
         .unwrap()
-    {
-        texts.push(row.get(0));
-        texts.push(row.get(1));
-    }
-    assert!(texts.len() > 6);
-    for text in &texts {
-        assert!(
-            addresses(text).is_empty(),
-            "{:?} in {text}",
-            addresses(text)
-        );
-    }
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert!(
+        patches
+            .iter()
+            .any(|p| addresses(p).contains(&"<alice@example.org>".to_owned())),
+        "{patches:?}"
+    );
     let emails: Vec<String> = client
         .query("SELECT email FROM author_emails", &[])
         .await
@@ -829,6 +835,125 @@ async fn stored_text_has_no_addresses() {
         .map(|r| r.get(0))
         .collect();
     assert_eq!(emails, ["erin@example.org"]);
+}
+
+/// Restores a message in a transaction of its own, as a restore's batch
+/// does.
+async fn restore(client: &mut Client, msg: &ParsedMessage) -> Restored {
+    let tx = client.transaction().await.unwrap();
+    let restored = store::restore_addresses(&tx, msg).await.unwrap();
+    if let Restored::Restored { thread_id } = restored {
+        store::refresh_threads(&tx, &[thread_id]).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    restored
+}
+
+#[tokio::test]
+async fn restoring_gives_stored_text_its_addresses_back() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let msg = addressed_message();
+    store_each(&mut client, &[&msg]).await;
+    let written = stored_text(&client, "redact@example.org").await;
+    store_as_once(&client, "redact@example.org", msg.from_email.as_deref()).await;
+    let once = stored_text(&client, "redact@example.org").await;
+    assert!(once.contains(&"Ping [email]".to_owned()), "{once:#?}");
+    assert!(once.contains(&"erin".to_owned()), "{once:#?}");
+    client
+        .batch_execute("DELETE FROM graph_changes")
+        .await
+        .unwrap();
+
+    let restored = restore(&mut client, &msg).await;
+    assert!(
+        matches!(restored, Restored::Restored { .. }),
+        "{restored:?}"
+    );
+    assert_eq!(stored_text(&client, "redact@example.org").await, written);
+    // Its chunks are embedded again and its patches indexed again; the
+    // author's names, which decide who committed commits, go to the graph.
+    let (embedded, indexed): (i64, i64) = client
+        .query_one(
+            "SELECT (SELECT count(*) FROM message_chunks WHERE embedding IS NOT NULL),
+                    (SELECT count(*) FROM patches WHERE text_ids IS NOT NULL)",
+            &[],
+        )
+        .await
+        .map(|r| (r.get(0), r.get(1)))
+        .unwrap();
+    assert_eq!((embedded, indexed), (0, 0));
+    let author_changed: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT FROM graph_changes c JOIN messages m ON c.key = 'author:' || m.author_id)",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(author_changed);
+    // Again, nothing to do.
+    assert_eq!(restore(&mut client, &msg).await, Restored::Unchanged);
+    assert_eq!(stored_text(&client, "redact@example.org").await, written);
+}
+
+#[tokio::test]
+async fn restoring_leaves_text_that_differs() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let in_subject = raw_message(
+        "subject@example.org",
+        ALICE,
+        "Ping carol@example.org",
+        "Date: 1 Jun 2026 10:00:00 +0000\n",
+        "Plain text.\n",
+    );
+    let in_body = raw_message(
+        "body@example.org",
+        ALICE,
+        "Plain subject",
+        "Date: 1 Jun 2026 11:00:00 +0000\n",
+        "Ask carol@example.org.\n",
+    );
+    let plain = message("plain@example.org", BOB, "2 Jun 2026", "Plain", &[]);
+    let missing = message("missing@example.org", BOB, "3 Jun 2026", "Gone", &[]);
+    store_each(&mut client, &[&in_subject, &in_body, &plain]).await;
+    for msg in [&in_subject, &in_body] {
+        store_as_once(&client, &msg.message_id, msg.from_email.as_deref()).await;
+    }
+    // As if parsing or cleaning had changed since ingest: these fields
+    // aren't what ingest once made of the archive's.
+    client
+        .batch_execute(
+            "UPDATE messages SET subject = subject || ' (edited)' WHERE message_id = 'subject@example.org';
+             UPDATE messages SET body = body || 'Edited.' WHERE message_id = 'body@example.org';",
+        )
+        .await
+        .unwrap();
+    let before = stored_text(&client, "subject@example.org").await;
+    assert_eq!(restore(&mut client, &in_subject).await, Restored::Differs);
+    assert_eq!(stored_text(&client, "subject@example.org").await, before);
+    // Each field on its own: the cleaned body gets its address back, the
+    // edited body stays.
+    assert!(matches!(
+        restore(&mut client, &in_body).await,
+        Restored::Restored { .. }
+    ));
+    let (body, clean): (String, String) = client
+        .query_one(
+            "SELECT body, body_clean FROM messages WHERE message_id = 'body@example.org'",
+            &[],
+        )
+        .await
+        .map(|r| (r.get(0), r.get(1)))
+        .unwrap();
+    assert!(
+        body.starts_with("Ask [email].") && body.ends_with("Edited."),
+        "{body:?}"
+    );
+    assert_eq!(clean, "Ask carol@example.org.");
+    assert_eq!(restore(&mut client, &plain).await, Restored::Unchanged);
+    assert_eq!(restore(&mut client, &missing).await, Restored::Unchanged);
 }
 
 type ThreadStats = (i32, i32, String, String, i32, String, String);

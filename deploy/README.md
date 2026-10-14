@@ -161,6 +161,18 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
 Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap briefly: the new indexer serves its tools at once, but runs jobs only once the old one has stopped.
 
+### Email addresses
+
+An image with migration `0015_restore_addresses` stores mail's email addresses as written: subjects, bodies, patches and senders' names. Mail stored before it has `[email]` in their place, and senders' names without them, until restored. After deploying it, as `pgh_indexer` from the operator environment (Graph index preparation):
+
+```sql
+SELECT * FROM pghacker.restore_addresses();
+```
+
+- It queues a `restore_addresses` job per stored month, which downloads the month again, and one per 200 messages from thread pages, which are fetched one by one at the archive's rate (2 requests a second). `ingest_status` shows the jobs.
+- They change only text stored exactly as ingest once made it of the archive's, and count the rest as `differs`. Changed chunks are embedded again through Foundry, changed patches are indexed again by the `patch_lines` job, and the graph follows.
+- Running it again restores whatever is left; a job that's queued or running is left as it is.
+
 ### Graph index preparation
 
 The graph-index upgrade requires preparation **before deploying the new service
