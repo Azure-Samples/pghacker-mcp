@@ -48,6 +48,7 @@ struct NewLine {
     lineage: u32,
     born: i64,
     after: u32,
+    replaces: u32,
     text: String,
 }
 
@@ -72,7 +73,14 @@ impl Ledger for MemLedger {
         Ok(id)
     }
 
-    fn new_instance(&mut self, lineage: u32, born: i64, after: u32, text: &str) -> Result<u32> {
+    fn new_instance(
+        &mut self,
+        lineage: u32,
+        born: i64,
+        after: u32,
+        replaces: u32,
+        text: &str,
+    ) -> Result<u32> {
         let id = self.next_instance;
         if id >= i32::MAX as u32 {
             bail!("too many line instances");
@@ -83,6 +91,7 @@ impl Ledger for MemLedger {
             lineage,
             born,
             after,
+            replaces,
             text: text.to_owned(),
         });
         Ok(id)
@@ -562,14 +571,19 @@ fn flush(handle: &Handle, tx: &Transaction<'_>, s: &str, ledger: &mut MemLedger)
         let lo: Vec<i64> = lines.iter().map(|l| l.born).collect();
         let hi: Vec<i64> = lines.iter().map(|l| addr::descendants(l.born).1).collect();
         let bytes: Vec<i32> = lines.iter().map(|l| l.text.len() as i32).collect();
+        let replaces: Vec<Option<i32>> = lines
+            .iter()
+            .map(|l| (l.replaces != NONE).then_some(l.replaces as i32))
+            .collect();
         let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         handle.block_on(tx.execute(
             &format!(
-                "INSERT INTO {s}.code_line_instances (weave, lo, hi, id, lineage, bytes, line) \
+                "INSERT INTO {s}.code_line_instances \
+                     (weave, lo, hi, id, lineage, bytes, replaces, line) \
                  SELECT * FROM unnest($1::int8[], $2::int8[], $3::int8[], $4::int4[], $5::int4[], \
-                                      $6::int4[], $7::text[])"
+                                      $6::int4[], $7::int4[], $8::text[])"
             ),
-            &[&keys, &lo, &hi, &ids, &lineage, &bytes, &text],
+            &[&keys, &lo, &hi, &ids, &lineage, &bytes, &replaces, &text],
         ))?;
     }
     let kills = std::mem::take(&mut ledger.kills);

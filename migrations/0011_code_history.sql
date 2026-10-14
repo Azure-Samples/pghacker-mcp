@@ -100,6 +100,9 @@ CREATE TABLE code_line_instances (
     -- octet_length(line), for byte offsets.
     bytes    int4 NOT NULL,
     alive    int8multirange,
+    -- The line this one replaced one-for-one (in a hunk of as many lines
+    -- added as removed), which blame follows through ignored revisions.
+    replaces int4,
     -- Without the line terminator; a CR before LF stays, as in code_lines.
     line     text NOT NULL
 );

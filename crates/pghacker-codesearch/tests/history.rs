@@ -302,6 +302,7 @@ async fn history_and_snapshots_answer_alike() {
             let q = LineQuery {
                 snapshot_id: hist.id,
                 history: hist.history.as_ref(),
+                mounted: false,
                 file_ids: None,
                 require: vec![&compiled.filter],
                 reject: vec![],

@@ -570,6 +570,7 @@ async fn selection(
     let q = LineQuery {
         snapshot_id: snapshot.id,
         history: snapshot.history.as_ref(),
+        mounted: files.iter().any(|&k| k >= table.own),
         file_ids: Some(&ids),
         require,
         reject: if invert_lines {

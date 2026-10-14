@@ -155,6 +155,49 @@ pub async fn files(
     Ok((files, paths))
 }
 
+/// The lineages a commit has, each with its version there.
+pub type LineageMap = Arc<HashMap<i32, i32>>;
+
+type LineageCache = Mutex<Vec<((String, i64), LineageMap)>>;
+
+static LINEAGES: LazyLock<LineageCache> = LazyLock::new(Default::default);
+
+/// Each lineage alive at the history's commit, with its version there:
+/// cached for the 16 commits read last.
+pub async fn lineage_map(client: &impl GenericClient, h: &History) -> Result<LineageMap> {
+    let key = (h.build.clone(), h.addr);
+    if let Some(map) = LINEAGES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, m)| m.clone())
+    {
+        return Ok(map);
+    }
+    let s = checked(&h.schema)?;
+    let map: HashMap<i32, i32> = client
+        .query(
+            &format!(
+                "SELECT v.lineage, v.id FROM {s}.code_file_versions v WHERE {}",
+                alive_at("v", "$1")
+            ),
+            &[&h.addr],
+        )
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let map = Arc::new(map);
+    let mut cache = LINEAGES.lock().unwrap();
+    cache.retain(|(k, _)| *k != key);
+    cache.push((key, map.clone()));
+    if cache.len() > 16 {
+        cache.remove(0);
+    }
+    Ok(map)
+}
+
 /// A version's lines: their weave keys, in order.
 pub type Keys = Arc<Vec<i64>>;
 
@@ -302,9 +345,9 @@ pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> 
         None => vec![Box::new(h.addr)],
     };
     let versions = versions_sql(s, q.file_ids.is_some());
-    let mut filters = String::new();
-    crate::engine::push_filters(&mut filters, &mut params, q);
     let sql = if q.scope_first {
+        let mut filters = String::new();
+        crate::engine::push_filters(&mut filters, &mut params, q);
         format!(
             "SELECT l.vid, l.weave, l.line FROM \
              (SELECT v.id AS vid, i.weave, i.line FROM {versions} v \
@@ -313,13 +356,39 @@ pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> 
              WHERE true{filters} LIMIT {}",
             q.cap + 1
         )
-    } else {
+    } else if q.mounted {
+        // Files of several commits: each line checked at its version's birth.
+        let mut filters = String::new();
+        crate::engine::push_filters(&mut filters, &mut params, q);
         format!(
             "SELECT v.id, l.weave, l.line FROM \
              (SELECT l.lineage, l.weave, l.line, l.lo, l.hi, l.alive \
-              FROM {s}.code_line_instances l WHERE true{filters} OFFSET 0) AS l \
+              FROM {s}.code_line_instances l \
+              WHERE l.lineage = ANY(ARRAY(SELECT lineage FROM {versions} x)){filters} OFFSET 0) AS l \
              JOIN {versions} v ON v.lineage = l.lineage AND {} LIMIT {}",
             alive_at("l", "v.lo"),
+            q.cap + 1
+        )
+    } else {
+        // One commit: the scope's lineages and the commit's address narrow
+        // the trigram scan, which PostgreSQL can AND with the scope index.
+        // Rows come back by lineage; candidates() maps each to its version.
+        let (at, scope) = match q.file_ids {
+            Some(_) => {
+                params.push(Box::new(h.addr));
+                (
+                    format!("${}", params.len()),
+                    format!("l.lineage = ANY(ARRAY(SELECT lineage FROM {versions} x)) AND "),
+                )
+            }
+            None => ("$1".to_owned(), String::new()),
+        };
+        let mut filters = String::new();
+        crate::engine::push_filters(&mut filters, &mut params, q);
+        format!(
+            "SELECT l.lineage, l.weave, l.line FROM {s}.code_line_instances l \
+             WHERE {scope}{}{filters} LIMIT {}",
+            alive_at("l", &at),
             q.cap + 1
         )
     };
@@ -336,14 +405,26 @@ pub async fn candidates(
     let (sql, params) = line_sql(q, h)?;
     let mut out = Candidates::default();
     let started = std::time::Instant::now();
-    let found = crate::engine::stream_rows(client, &sql, &params, q.cap, budget, &mut out, |row| {
-        (
-            row.get::<_, i32>(0),
-            row.get::<_, i64>(1),
-            row.get::<_, String>(2),
-        )
-    })
-    .await?;
+    let mut found =
+        crate::engine::stream_rows(client, &sql, &params, q.cap, budget, &mut out, |row| {
+            (
+                row.get::<_, i32>(0),
+                row.get::<_, i64>(1),
+                row.get::<_, String>(2),
+            )
+        })
+        .await?;
+    if !q.scope_first && !q.mounted {
+        // The rows name lineages: each is its version at the commit.
+        let map = lineage_map(client, h).await?;
+        found.retain_mut(|row| match map.get(&row.0) {
+            Some(&version) => {
+                row.0 = version;
+                true
+            }
+            None => false,
+        });
+    }
     let mut versions: Vec<i32> = found.iter().map(|r| r.0).collect();
     versions.sort_unstable();
     versions.dedup();

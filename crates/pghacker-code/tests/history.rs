@@ -458,7 +458,7 @@ async fn dump(client: &Client, s: &str) -> Vec<String> {
             "SELECT l.first_path || '@' || l.born || ' ' || v.path || ' ' || v.blob_sha || ' ' || v.lo || ' ' || v.hi || ' ' || coalesce(v.alive::text, '-') || ' ' || v.line_count || v.is_binary || v.final_newline || v.bom FROM {s}.code_file_versions v JOIN {s}.code_lineages l ON l.id = v.lineage ORDER BY l.first_path, l.born, v.lo, v.path"
         ),
         format!(
-            "SELECT l.first_path || '@' || l.born || ' ' || i.lo || ' ' || i.hi || ' ' || coalesce(i.alive::text, '-') || ' ' || i.bytes || ' ' || i.line FROM {s}.code_line_instances i JOIN {s}.code_lineages l ON l.id = i.lineage ORDER BY l.first_path, l.born, i.weave"
+            "SELECT l.first_path || '@' || l.born || ' ' || i.lo || ' ' || i.hi || ' ' || coalesce(i.alive::text, '-') || ' ' || i.bytes || ' ' || i.line || coalesce(' replaces ' || r.lo || ' ' || r.line, '') FROM {s}.code_line_instances i JOIN {s}.code_lineages l ON l.id = i.lineage LEFT JOIN {s}.code_line_instances r ON r.id = i.replaces ORDER BY l.first_path, l.born, i.weave"
         ),
     ] {
         for row in client.query(sql.as_str(), &[]).await.unwrap() {

@@ -1,6 +1,7 @@
 //! Times one code-tool call through the snapshot and history engines in
 //! pghacker_bench (see `pghacker-replay bench-prepare`): a grep command line
-//! or, with --search, a search for the text. Runs each three times; set
+//! or, with --search, a search for the text (or JSON search arguments).
+//! Runs each three times; set
 //! RUST_LOG=pghacker_codesearch=debug for the history engine's phases.
 
 use std::time::Instant;

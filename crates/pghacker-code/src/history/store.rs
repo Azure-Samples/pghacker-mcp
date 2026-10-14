@@ -18,6 +18,11 @@ use super::addr::Alive;
 use super::graph::Graph;
 use super::walk::Arena;
 
+/// An instance link as stored: NULL for none.
+fn replaces(id: u32) -> Option<i32> {
+    (id != super::walk::NONE).then_some(id as i32)
+}
+
 /// The gap between consecutive weave keys, so syncs can insert lines.
 pub const WEAVE_STEP: i64 = 1 << 32;
 
@@ -111,7 +116,7 @@ pub async fn create(client: &Client, schema: &str) -> Result<()> {
              final_newline bool, bom bool, subsystem text
          );
          CREATE UNLOGGED TABLE {s}.stage_meta (
-             id int4, lineage int4, weave int8, lo int8, hi int8, alive text
+             id int4, lineage int4, weave int8, lo int8, hi int8, alive text, replaces int4
          );"
     ));
     client
@@ -303,7 +308,8 @@ pub async fn write(
     {
         let sink = client
             .copy_in(&format!(
-                "COPY {s}.stage_meta (id, lineage, weave, lo, hi, alive) FROM STDIN BINARY"
+                "COPY {s}.stage_meta (id, lineage, weave, lo, hi, alive, replaces) \
+                 FROM STDIN BINARY"
             ))
             .await?;
         let writer = BinaryCopyInWriter::new(
@@ -315,6 +321,7 @@ pub async fn write(
                 Type::INT8,
                 Type::INT8,
                 Type::TEXT,
+                Type::INT4,
             ],
         );
         let mut writer = std::pin::pin!(writer);
@@ -329,7 +336,15 @@ pub async fn write(
                 let weave = (rank as i64 + 1) * WEAVE_STEP;
                 writer
                     .as_mut()
-                    .write(&[&(id as i32), &(lineage as i32), &weave, &lo, &hi, &holes])
+                    .write(&[
+                        &(id as i32),
+                        &(lineage as i32),
+                        &weave,
+                        &lo,
+                        &hi,
+                        &holes,
+                        &replaces(arena.replaces[id as usize]),
+                    ])
                     .await?;
             }
         }
@@ -364,9 +379,10 @@ pub async fn finish(client: &Client, schema: &str, built: &Built<'_>) -> Result<
             format!(
                 "SET maintenance_work_mem = '1GB';
                  SET work_mem = '256MB';
-                 INSERT INTO {s}.code_line_instances (weave, lo, hi, id, lineage, bytes, alive, line)
+                 INSERT INTO {s}.code_line_instances
+                     (weave, lo, hi, id, lineage, bytes, alive, replaces, line)
                  SELECT m.weave, m.lo, m.hi, m.id, m.lineage, octet_length(t.text),
-                        m.alive::int8multirange, t.text
+                        m.alive::int8multirange, m.replaces, t.text
                  FROM {s}.stage_meta m JOIN {s}.stage_text t USING (id)
                  ORDER BY m.lineage, m.hi, m.weave;
                  DROP TABLE {s}.stage_meta, {s}.stage_text;"

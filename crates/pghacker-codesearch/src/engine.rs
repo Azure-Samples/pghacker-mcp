@@ -96,6 +96,8 @@ pub struct LineQuery<'a> {
     pub snapshot_id: i32,
     /// Read the commit history instead of the snapshot's lines.
     pub history: Option<&'a crate::history::History>,
+    /// Some files are mounted from other commits than the history's.
+    pub mounted: bool,
     pub file_ids: Option<&'a [i32]>,
     pub require: Vec<&'a Filter>,
     pub reject: Vec<&'a Filter>,
@@ -372,6 +374,7 @@ mod tests {
         let q = LineQuery {
             snapshot_id: 7,
             history: None,
+            mounted: false,
             file_ids: Some(&ids),
             require: vec![&positive],
             reject: vec![&negative, &inexact],
@@ -413,6 +416,7 @@ mod tests {
         let mut q = LineQuery {
             snapshot_id: 7,
             history: None,
+            mounted: false,
             file_ids: None,
             require: vec![&weak],
             reject: vec![],

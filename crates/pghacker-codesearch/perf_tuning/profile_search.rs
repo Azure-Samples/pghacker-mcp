@@ -52,6 +52,7 @@ async fn main() -> Result<()> {
     let q = pghacker_codesearch::engine::LineQuery {
         snapshot_id: snapshot.id,
         history: None,
+        mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
         reject: vec![],

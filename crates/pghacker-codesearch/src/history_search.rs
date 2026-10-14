@@ -125,6 +125,7 @@ pub(crate) async fn matching(
     let q = LineQuery {
         snapshot_id: 0,
         history: Some(h),
+        mounted: false,
         file_ids: None,
         require,
         reject,

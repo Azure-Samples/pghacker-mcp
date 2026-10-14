@@ -55,6 +55,8 @@ pub struct Arena {
     pub lineage: Vec<u32>,
     pub born: Vec<i64>,
     pub next: Vec<u32>,
+    /// The instance each replaced one-for-one, or [`NONE`].
+    pub replaces: Vec<u32>,
     death: Vec<i64>,
     more_deaths: HashMap<u32, Vec<i64>>,
     /// Per lineage: its first instance in the weave.
@@ -108,13 +110,20 @@ impl Arena {
     }
 
     /// A new instance in `lineage`'s weave, right after `after` (or first).
-    pub(crate) fn new_instance(&mut self, lineage: u32, born: i64, after: u32) -> Result<u32> {
+    pub(crate) fn new_instance(
+        &mut self,
+        lineage: u32,
+        born: i64,
+        after: u32,
+        replaces: u32,
+    ) -> Result<u32> {
         let id = u32::try_from(self.lineage.len())
             .ok()
             .filter(|&id| id != NONE)
             .context("too many line instances")?;
         self.lineage.push(lineage);
         self.born.push(born);
+        self.replaces.push(replaces);
         self.death.push(NO_DEATH);
         if after == NONE {
             let head = &mut self.heads[lineage as usize];
@@ -212,8 +221,16 @@ impl<F: FnMut(u32, &str) -> Result<()>> LineSink for F {
 pub trait Ledger {
     fn new_lineage(&mut self, path: &str, born: i64) -> Result<u32>;
     /// A new line instance right after `after` in its lineage's weave, or
-    /// first when `after` is [`NONE`].
-    fn new_instance(&mut self, lineage: u32, born: i64, after: u32, text: &str) -> Result<u32>;
+    /// first when `after` is [`NONE`], replacing `replaces` one-for-one
+    /// (or [`NONE`]).
+    fn new_instance(
+        &mut self,
+        lineage: u32,
+        born: i64,
+        after: u32,
+        replaces: u32,
+        text: &str,
+    ) -> Result<u32>;
     fn kill(&mut self, id: u32, at: i64);
     fn new_version(&mut self, version: Version) -> Result<u32>;
     fn kill_version(&mut self, id: u32, at: i64);
@@ -230,8 +247,15 @@ impl<S: LineSink> Ledger for ArenaLedger<S> {
         Ok(self.arena.new_lineage(path, born))
     }
 
-    fn new_instance(&mut self, lineage: u32, born: i64, after: u32, text: &str) -> Result<u32> {
-        let id = self.arena.new_instance(lineage, born, after)?;
+    fn new_instance(
+        &mut self,
+        lineage: u32,
+        born: i64,
+        after: u32,
+        replaces: u32,
+        text: &str,
+    ) -> Result<u32> {
+        let id = self.arena.new_instance(lineage, born, after, replaces)?;
         self.sink.line(id, text)?;
         Ok(id)
     }
@@ -584,14 +608,23 @@ impl<'r, L: Ledger> Walker<'r, L> {
             return Ok(out);
         }
         for token in byte_lines(blob.body()) {
-            after = self.born(lineage, after, at, line_text(token))?;
+            after = self.born(lineage, after, NONE, at, line_text(token))?;
             out.push(after);
         }
         Ok(out)
     }
 
-    fn born(&mut self, lineage: u32, after: u32, at: i64, text: &str) -> Result<u32> {
-        let id = self.ledger.new_instance(lineage, at, after, text)?;
+    fn born(
+        &mut self,
+        lineage: u32,
+        after: u32,
+        replaces: u32,
+        at: i64,
+        text: &str,
+    ) -> Result<u32> {
+        let id = self
+            .ledger
+            .new_instance(lineage, at, after, replaces, text)?;
         self.stats.lines_added += 1;
         self.stats.line_bytes += text.len() as u64;
         Ok(id)
@@ -639,9 +672,12 @@ impl<'r, L: Ledger> Walker<'r, L> {
             } else {
                 NONE
             };
-            for j in hunk.after.clone() {
+            // As many lines added as removed: each replaces its counterpart.
+            let one_for_one = hunk.after.len() == b1 - b0;
+            for (i, j) in hunk.after.clone().enumerate() {
                 let token = input.interner[input.after[j as usize]];
-                after = self.born(file.lineage, after, at, line_text(token))?;
+                let replaces = if one_for_one { old_ids[b0 + i] } else { NONE };
+                after = self.born(file.lineage, after, replaces, at, line_text(token))?;
                 out.push(after);
             }
             pos = b1;
