@@ -3,6 +3,23 @@
 //! the default.
 
 use std::cmp::Ordering;
+use std::sync::LazyLock;
+
+/// Names the schema of a history build to read code from instead of the
+/// snapshots, such as `pghacker_history`, or `pghacker` once installed.
+pub const HISTORY_ENV: &str = "PGHACKER_CODE_HISTORY";
+
+/// The history schema the flag names, if any: the code tools then read the
+/// commit history, and anchors resolve to its virtual paths.
+pub fn history_schema() -> Option<&'static str> {
+    static SCHEMA: LazyLock<Option<String>> = LazyLock::new(|| {
+        std::env::var(HISTORY_ENV)
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+    });
+    SCHEMA.as_deref()
+}
 
 /// `ORDER BY` for snapshots, latest first: the newest commit, so a release
 /// branch's head comes before its releases, and a later release before an

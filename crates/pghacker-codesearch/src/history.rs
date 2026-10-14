@@ -17,9 +17,7 @@ use tokio_postgres::types::ToSql;
 use crate::engine::{Budget, Candidates, LineQuery, Row, is_timeout};
 use crate::snapshot::{FileEntry, Snapshot};
 
-/// Names the schema of a history build to read code from instead of the
-/// snapshots, such as `pghacker_history`.
-pub const HISTORY_ENV: &str = "PGHACKER_CODE_HISTORY";
+pub use pghacker_core::code::HISTORY_ENV;
 
 /// Where a snapshot's commit is in a history build.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +31,7 @@ pub struct History {
 
 /// The history schema the flag names, if any.
 pub fn schema_from_env() -> Option<&'static str> {
-    static SCHEMA: LazyLock<Option<String>> = LazyLock::new(|| {
-        std::env::var(HISTORY_ENV)
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-    });
-    SCHEMA.as_deref()
+    pghacker_core::code::history_schema()
 }
 
 pub(crate) fn checked(schema: &str) -> Result<&str> {
