@@ -414,7 +414,12 @@ pub async fn candidates(
             )
         })
         .await?;
-    if !q.scope_first && !q.mounted {
+    let mut by_version = q.scope_first || q.mounted;
+    if out.capped && !out.timed_out {
+        found = in_tree_order(client, q, h, budget, &mut out).await?;
+        by_version = true;
+    }
+    if !by_version {
         // The rows name lineages: each is its version at the commit.
         let map = lineage_map(client, h).await?;
         found.retain_mut(|row| match map.get(&row.0) {
@@ -469,6 +474,89 @@ pub async fn candidates(
     Ok(out)
 }
 
+/// No cap: the most rows an SQL LIMIT takes.
+const UNCAPPED: usize = i64::MAX as usize - 1;
+
+/// The first `q.cap` candidates by file in tree order, then by line: what
+/// the snapshots' capped query gives, for when the history's unordered
+/// query hit the cap and so returned an arbitrary part of the matches. Reads
+/// the scope's files in growing chunks, in order, until the cap.
+async fn in_tree_order(
+    client: &impl GenericClient,
+    q: &LineQuery<'_>,
+    h: &History,
+    budget: &Budget,
+    out: &mut Candidates,
+) -> Result<Vec<(i32, i64, String)>> {
+    let s = checked(&h.schema)?;
+    let ordered: Vec<i32> = match q.file_ids {
+        // Callers list a scope's files in tree order.
+        Some(ids) => ids.to_vec(),
+        None => {
+            let mut all: Vec<(i32, String)> = client
+                .query(
+                    &format!(
+                        "SELECT v.id, v.path FROM {s}.code_file_versions v WHERE {}",
+                        alive_at("v", "$1")
+                    ),
+                    &[&h.addr],
+                )
+                .await?
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            all.sort_by(|a, b| crate::snapshot::tree_cmp(&a.1, &b.1));
+            all.into_iter().map(|(id, _)| id).collect()
+        }
+    };
+    let rank: HashMap<i32, usize> = ordered.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let mut found: Vec<(i32, i64, String)> = Vec::new();
+    let mut start = 0;
+    let mut chunk = 32;
+    while start < ordered.len() && found.len() <= q.cap {
+        let end = (start + chunk).min(ordered.len());
+        let sub = LineQuery {
+            snapshot_id: q.snapshot_id,
+            history: q.history,
+            mounted: q.mounted,
+            file_ids: Some(&ordered[start..end]),
+            require: q.require.clone(),
+            reject: q.reject.clone(),
+            cap: UNCAPPED,
+            scope_first: true,
+        };
+        let (sql, params) = line_sql(&sub, h)?;
+        let mut sub_out = Candidates::default();
+        let mut rows = crate::engine::stream_rows(
+            client,
+            &sql,
+            &params,
+            UNCAPPED,
+            budget,
+            &mut sub_out,
+            |row| {
+                (
+                    row.get::<_, i32>(0),
+                    row.get::<_, i64>(1),
+                    row.get::<_, String>(2),
+                )
+            },
+        )
+        .await?;
+        if sub_out.timed_out {
+            out.timed_out = true;
+            break;
+        }
+        rows.sort_by_key(|r| (rank[&r.0], r.1));
+        found.extend(rows);
+        start = end;
+        chunk = (chunk * 2).min(1024);
+    }
+    out.capped = found.len() > q.cap;
+    found.truncate(q.cap);
+    Ok(found)
+}
+
 /// Lines `lo..=hi` of versions, as (version id, line number) → text.
 pub async fn line_ranges(
     client: &impl GenericClient,
@@ -521,9 +609,9 @@ pub async fn line_ranges(
 }
 
 /// The lines that match `cond` (on `l.line`), as FROM items giving `l.id`
-/// and `l.line`: the commit's (`$1`), or the versions `$3`'s, which may be
-/// mounted from other commits. The trigram scan runs once, fenced, before
-/// the versions are joined.
+/// and `l.line`: the commit's (`$1`), or with `whole` false those of the
+/// versions `$1`, which may be mounted from other commits. The trigram scan
+/// runs once, fenced, before the versions are joined.
 pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
     let s = checked(&h.schema)?;
     Ok(if whole {
@@ -537,7 +625,7 @@ pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
             "(SELECT l.id, l.lineage, l.line, l.lo, l.hi, l.alive \
               FROM {s}.code_line_instances l WHERE {cond} OFFSET 0) l \
              JOIN (SELECT lineage, lo FROM {s}.code_file_versions \
-                   WHERE id = ANY($3::int4[]) OFFSET 0) v \
+                   WHERE id = ANY($1::int4[]) OFFSET 0) v \
              ON v.lineage = l.lineage AND {}",
             alive_at("l", "v.lo")
         )

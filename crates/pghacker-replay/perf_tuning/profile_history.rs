@@ -1,6 +1,7 @@
 //! Times one code-tool call through the snapshot and history engines in
 //! pghacker_bench (see `pghacker-replay bench-prepare`): a grep command line
-//! or, with --search, a search for the text (or JSON search arguments).
+//! or, with --search, a search for the text, or with --json, a search with
+//! those JSON arguments, whose answers go to /tmp/profile-<engine>.json.
 //! Runs each three times; set
 //! RUST_LOG=pghacker_codesearch=debug for the history engine's phases.
 
@@ -16,10 +17,11 @@ use pghacker_core::db;
 async fn main() -> Result<()> {
     pghacker_core::telemetry::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (version, text, as_search) = match args.as_slice() {
-        [v, t] => (v.clone(), t.clone(), false),
-        [v, flag, t] if flag == "--search" => (v.clone(), t.clone(), true),
-        _ => anyhow::bail!("usage: profile_history VERSION [--search] 'grep ...'|TEXT"),
+    let (version, text, mode) = match args.as_slice() {
+        [v, t] => (v.clone(), t.clone(), "grep"),
+        [v, flag, t] if flag == "--search" => (v.clone(), t.clone(), "search"),
+        [v, flag, t] if flag == "--json" => (v.clone(), t.clone(), "json"),
+        _ => anyhow::bail!("usage: profile_history VERSION [--search|--json] 'grep ...'|TEXT|JSON"),
     };
     let env = Env::local()?;
     let url = with_database(&env.reader_database_url()?, "pghacker_bench")?;
@@ -35,13 +37,19 @@ async fn main() -> Result<()> {
     ] {
         for round in 0..3 {
             let t = Instant::now();
-            let summary = if as_search {
-                let r = search(
-                    &client,
-                    s,
-                    &SearchArgs::new(pghacker_codesearch::search::Strings::from(text.as_str())),
-                )
-                .await?;
+            let summary = if mode != "grep" {
+                let search_args = if mode == "json" {
+                    serde_json::from_str(&text).context("bad search arguments")?
+                } else {
+                    SearchArgs::new(pghacker_codesearch::search::Strings::from(text.as_str()))
+                };
+                let r = search(&client, s, &search_args).await?;
+                if round == 0 {
+                    std::fs::write(
+                        format!("/tmp/profile-{name}.json"),
+                        serde_json::to_string_pretty(&r)?,
+                    )?;
+                }
                 format!("{} lines, complete {}", r.total_lines, r.complete)
             } else {
                 let o = run(&client, s, &text, Limits::default())

@@ -240,6 +240,9 @@ async fn history_and_snapshots_answer_alike() {
         json!({"query": "return", "also": "json", "not": "cstring"}),
         json!({"query": "n", "paths": "src/backend/parser", "group_by": "match", "output": "counts"}),
         json!({"query": "PG_", "include": "*.c", "limit": 2, "offset": 1}),
+        // No match in the files named: alternative spellings and names.
+        json!({"query": "jsn_out", "paths": "src/backend"}),
+        json!({"query": "no_such_name", "paths": ["src/include", "contrib"]}),
     ];
     for (version, _, _) in &commits {
         let snap = resolve_snapshot(&reader, "postgres", Some(version))
@@ -321,6 +324,41 @@ async fn history_and_snapshots_answer_alike() {
             found.push(rows);
         }
         assert_eq!(found[0], found[1], "{version}");
+
+        // Capped, both engines give the first lines in tree order.
+        for (scope_first, whole) in [(true, true), (false, true), (true, false), (false, false)] {
+            let mut capped = Vec::new();
+            for s in [&snap, &hist] {
+                let table = pghacker_codesearch::snapshot::FileTable::load(&reader, s)
+                    .await
+                    .unwrap();
+                let ids: Vec<i32> = table.files[..table.own].iter().map(|f| f.id).collect();
+                let path_of: std::collections::HashMap<i32, String> =
+                    table.files.iter().map(|f| (f.id, f.path.clone())).collect();
+                let q = LineQuery {
+                    snapshot_id: s.id,
+                    history: s.history.as_ref(),
+                    mounted: false,
+                    file_ids: (!whole).then_some(ids.as_slice()),
+                    require: vec![&compiled.filter],
+                    reject: vec![],
+                    cap: 7,
+                    scope_first,
+                };
+                let c = candidates(&reader, &q, &Budget::new(None)).await.unwrap();
+                assert!(c.capped);
+                let rows: Vec<(String, i32)> = c
+                    .rows
+                    .iter()
+                    .map(|r| (path_of[&r.file_id].clone(), r.line_no))
+                    .collect();
+                capped.push(rows);
+            }
+            assert_eq!(
+                capped[0], capped[1],
+                "{version} scope_first {scope_first} whole {whole}"
+            );
+        }
     }
 }
 
