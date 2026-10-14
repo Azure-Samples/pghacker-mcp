@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::GenericClient;
 
-use crate::snapshot::{FileTable, Snapshot};
+use crate::snapshot::{FileTable, Snapshot, shown};
 
 /// The most lines and bytes read_file returns.
 pub const MAX_READ_LINES: u32 = 2_000;
@@ -88,6 +88,11 @@ pub struct Entry {
     /// Not text: no lines are indexed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
+    /// A commit's date and subject, in a listing of /commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 /// A listing.
@@ -110,12 +115,13 @@ pub struct ListFilesResult {
 /// Paths like a missing one, for the error.
 fn suggestions(table: &FileTable, wanted: &str) -> String {
     let base = wanted.rsplit('/').next().unwrap_or(wanted);
-    let mut near: Vec<&str> = table
+    let mut near: Vec<String> = table
         .files
         .iter()
         .map(|f| f.path.as_str())
         .filter(|p| !base.is_empty() && p.rsplit('/').next() == Some(base))
         .take(5)
+        .map(shown)
         .collect();
     if near.is_empty() && base.len() >= 3 {
         near = table
@@ -124,6 +130,7 @@ fn suggestions(table: &FileTable, wanted: &str) -> String {
             .map(|f| f.path.as_str())
             .filter(|p| p.contains(base))
             .take(5)
+            .map(shown)
             .collect();
     }
     if near.is_empty() {
@@ -151,7 +158,7 @@ pub async fn read_file(
     snapshot: &Snapshot,
     args: &ReadFileArgs,
 ) -> Result<ReadFileResult> {
-    let table = FileTable::load(client, snapshot).await?;
+    let table = FileTable::view(client, snapshot, std::slice::from_ref(&args.path)).await?;
     let path = table.normalize(&snapshot.repo, &args.path);
     let Some(path) = path.filter(|p| table.exists(p)) else {
         let normalized = table.normalize(&snapshot.repo, &args.path);
@@ -172,7 +179,7 @@ pub async fn read_file(
             version: snapshot.version.clone(),
             git_ref: snapshot.git_ref.clone(),
             sha: snapshot.sha.clone(),
-            path,
+            path: shown(&path),
             start_line: 1,
             end_line: 0,
             total_lines: 0,
@@ -227,7 +234,7 @@ pub async fn read_file(
         version: snapshot.version.clone(),
         git_ref: snapshot.git_ref.clone(),
         sha: snapshot.sha.clone(),
-        path,
+        path: shown(&path),
         start_line: start,
         end_line: last,
         total_lines: total,
@@ -242,8 +249,14 @@ pub async fn list_files(
     snapshot: &Snapshot,
     args: &ListFilesArgs,
 ) -> Result<ListFilesResult> {
-    let table = FileTable::load(client, snapshot).await?;
     let raw = args.path.as_deref().unwrap_or("").trim();
+    if let Some(h) = &snapshot.history
+        && crate::snapshot::bare_root(raw)
+    {
+        let root = raw.trim_matches('/');
+        return virtual_listing(client, snapshot, h, root, args).await;
+    }
+    let table = FileTable::view(client, snapshot, &[raw.to_owned()]).await?;
     let base = if raw.is_empty() || raw == "." || raw == "/" {
         String::new()
     } else {
@@ -300,11 +313,13 @@ pub async fn list_files(
         }
         for (path, files) in dirs {
             entries.push(Entry {
-                path,
+                path: shown(&path),
                 kind: "dir",
                 lines: None,
                 files: Some(files),
                 binary: false,
+                date: None,
+                subject: None,
             });
         }
         entries.sort_by(|a, b| crate::snapshot::tree_cmp(&a.path, &b.path));
@@ -318,7 +333,7 @@ pub async fn list_files(
         git_ref: snapshot.git_ref.clone(),
         sha: snapshot.sha.clone(),
         loaded_paths: table.loaded_paths.clone(),
-        path: base,
+        path: shown(&base),
         total,
         cut,
         entries,
@@ -327,10 +342,94 @@ pub async fn list_files(
 
 fn file_entry(f: &crate::snapshot::FileEntry) -> Entry {
     Entry {
-        path: f.path.clone(),
+        path: shown(&f.path),
         kind: "file",
         lines: Some(f.line_count.max(0) as u32),
         files: None,
         binary: f.is_binary,
+        date: None,
+        subject: None,
     }
+}
+
+/// /branch and /tag (filtered by the glob), or /commit, newest first: what
+/// can be mounted.
+async fn virtual_listing(
+    client: &impl GenericClient,
+    snapshot: &Snapshot,
+    h: &crate::history::History,
+    root: &str,
+    args: &ListFilesArgs,
+) -> Result<ListFilesResult> {
+    let s = crate::history::checked(&h.schema)?;
+    let limit = args
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT) as usize;
+    let glob = match args
+        .glob
+        .as_deref()
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        Some(g) => Some(crate::glob::RgGlob::new(g).map_err(|e| anyhow!(e))?),
+        None => None,
+    };
+    let (rows, total) = if root == "commit" {
+        let total: i64 = client
+            .query_one(&format!("SELECT count(*) FROM {s}.code_commits"), &[])
+            .await?
+            .get(0);
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT left(sha, 12), to_char(committed_at, 'YYYY-MM-DD'), subject \
+                     FROM {s}.code_commits ORDER BY committed_at DESC, addr DESC LIMIT $1"
+                ),
+                &[&(limit as i64)],
+            )
+            .await?;
+        (rows, total as u64)
+    } else {
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT r.name, to_char(c.committed_at, 'YYYY-MM-DD'), c.subject \
+                     FROM {s}.code_refs r JOIN {s}.code_commits c ON c.addr = r.addr \
+                     WHERE r.kind = $1 ORDER BY r.name COLLATE \"C\""
+                ),
+                &[&root],
+            )
+            .await?;
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| glob.as_ref().is_none_or(|g| g.is_match(r.get(0), false)))
+            .collect();
+        let total = rows.len() as u64;
+        (rows, total)
+    };
+    let entries: Vec<Entry> = rows
+        .iter()
+        .take(limit)
+        .map(|r| Entry {
+            path: format!("/{root}/{}", r.get::<_, String>(0)),
+            kind: "dir",
+            lines: None,
+            files: None,
+            binary: false,
+            date: Some(r.get(1)),
+            subject: Some(r.get(2)),
+        })
+        .collect();
+    Ok(ListFilesResult {
+        repo: snapshot.repo.clone(),
+        version: snapshot.version.clone(),
+        git_ref: snapshot.git_ref.clone(),
+        sha: snapshot.sha.clone(),
+        loaded_paths: Vec::new(),
+        path: format!("/{root}"),
+        cut: total > entries.len() as u64,
+        total,
+        entries,
+    })
 }

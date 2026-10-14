@@ -240,16 +240,17 @@ pub async fn keys(
 
 type Param = Box<dyn ToSql + Sync + Send>;
 
-/// The versions to read, fenced so the planner reads them once: the ids in
-/// `$2`, or every version alive at `$1`.
+/// The versions to read, with their births, fenced so the planner reads
+/// them once: the ids in `$1`, or every version alive at the commit `$1`.
 fn versions_sql(s: &str, ids: bool) -> String {
     if ids {
         format!(
-            "(SELECT id, lineage FROM {s}.code_file_versions WHERE id = ANY($2::int4[]) OFFSET 0)"
+            "(SELECT id, lineage, lo FROM {s}.code_file_versions \
+             WHERE id = ANY($1::int4[]) OFFSET 0)"
         )
     } else {
         format!(
-            "(SELECT v.id, v.lineage FROM {s}.code_file_versions v WHERE {} OFFSET 0)",
+            "(SELECT v.id, v.lineage, v.lo FROM {s}.code_file_versions v WHERE {} OFFSET 0)",
             alive_at("v", "$1")
         )
     }
@@ -257,16 +258,18 @@ fn versions_sql(s: &str, ids: bool) -> String {
 
 /// The candidate query: rows of (version id, weave key, line).
 ///
-/// Scope first reads the versions' lines, then applies the text filters;
-/// otherwise the trigram index finds the lines alive at the commit, once,
-/// before they meet the versions. Fences keep the planner from repeating
-/// the trigram scan for each version.
+/// A version's lines are its lineage's instances alive at its birth, so one
+/// query reads versions of any commits: a call may mount several. Scope
+/// first reads the versions' lines, then applies the text filters;
+/// otherwise the trigram index finds the matching lines, once, before they
+/// meet the versions. Fences keep the planner from repeating the trigram
+/// scan for each version.
 pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> {
     let s = checked(&h.schema)?;
-    let mut params: Vec<Param> = vec![Box::new(h.addr)];
-    if let Some(ids) = q.file_ids {
-        params.push(Box::new(ids.to_vec()));
-    }
+    let mut params: Vec<Param> = match q.file_ids {
+        Some(ids) => vec![Box::new(ids.to_vec())],
+        None => vec![Box::new(h.addr)],
+    };
     let versions = versions_sql(s, q.file_ids.is_some());
     let mut filters = String::new();
     crate::engine::push_filters(&mut filters, &mut params, q);
@@ -274,18 +277,18 @@ pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> 
         format!(
             "SELECT l.vid, l.weave, l.line FROM \
              (SELECT v.id AS vid, i.weave, i.line FROM {versions} v \
-              JOIN {s}.code_line_instances i ON i.lineage = v.lineage AND i.hi > $1 \
-              WHERE i.lo <= $1 AND (i.alive IS NULL OR i.alive @> $1) OFFSET 0) AS l \
+              JOIN {s}.code_line_instances i ON i.lineage = v.lineage AND i.hi > v.lo \
+              WHERE i.lo <= v.lo AND (i.alive IS NULL OR i.alive @> v.lo) OFFSET 0) AS l \
              WHERE true{filters} LIMIT {}",
             q.cap + 1
         )
     } else {
         format!(
             "SELECT v.id, l.weave, l.line FROM \
-             (SELECT l.lineage, l.weave, l.line FROM {s}.code_line_instances l \
-              WHERE {}{filters} OFFSET 0) AS l \
-             JOIN {versions} v ON v.lineage = l.lineage LIMIT {}",
-            alive_at("l", "$1"),
+             (SELECT l.lineage, l.weave, l.line, l.lo, l.hi, l.alive \
+              FROM {s}.code_line_instances l WHERE true{filters} OFFSET 0) AS l \
+             JOIN {versions} v ON v.lineage = l.lineage AND {} LIMIT {}",
+            alive_at("l", "v.lo"),
             q.cap + 1
         )
     };
@@ -405,22 +408,26 @@ pub async fn line_ranges(
     Ok(out)
 }
 
-/// The commit's lines that match `cond` (on `l.line`), as FROM items
-/// giving `l.id` and `l.line`: in the versions `$3`, or all of them. The
-/// trigram scan runs once, fenced, before the versions are joined.
+/// The lines that match `cond` (on `l.line`), as FROM items giving `l.id`
+/// and `l.line`: the commit's (`$1`), or the versions `$3`'s, which may be
+/// mounted from other commits. The trigram scan runs once, fenced, before
+/// the versions are joined.
 pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
     let s = checked(&h.schema)?;
-    let lines = format!(
-        "(SELECT l.id, l.lineage, l.line FROM {s}.code_line_instances l \
-         WHERE {} AND {cond} OFFSET 0) l",
-        alive_at("l", "$1")
-    );
     Ok(if whole {
-        lines
+        format!(
+            "(SELECT l.id, l.lineage, l.line FROM {s}.code_line_instances l \
+             WHERE {} AND {cond} OFFSET 0) l",
+            alive_at("l", "$1")
+        )
     } else {
         format!(
-            "{lines} JOIN (SELECT lineage FROM {s}.code_file_versions \
-             WHERE id = ANY($3::int4[]) OFFSET 0) v ON v.lineage = l.lineage"
+            "(SELECT l.id, l.lineage, l.line, l.lo, l.hi, l.alive \
+              FROM {s}.code_line_instances l WHERE {cond} OFFSET 0) l \
+             JOIN (SELECT lineage, lo FROM {s}.code_file_versions \
+                   WHERE id = ANY($3::int4[]) OFFSET 0) v \
+             ON v.lineage = l.lineage AND {}",
+            alive_at("l", "v.lo")
         )
     })
 }

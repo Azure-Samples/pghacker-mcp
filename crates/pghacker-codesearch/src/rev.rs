@@ -298,6 +298,46 @@ pub async fn resolve(
         addr =
             parent(addr).ok_or_else(|| anyhow!("{} goes back past the first commit", spec.name))?;
     }
+    // A ref names the commit as given; a SHA, a date or steps name its lane.
+    let named = (spec.date.is_none() && spec.back == 0 && git_ref.len() != 40).then_some(git_ref);
+    snapshot_at(client, s, repo, addr, named).await
+}
+
+/// The commit a virtual root names: `/commit/<rev>` any revision,
+/// `/branch/<name>` a branch and `/tag/<name>` a tag.
+pub async fn resolve_mount(
+    client: &impl GenericClient,
+    schema: &str,
+    repo: &str,
+    root: &str,
+    name: &str,
+) -> Result<Snapshot> {
+    let s = crate::history::checked(schema)?;
+    match root {
+        "commit" => resolve(client, s, repo, Some(name)).await,
+        "branch" | "tag" => {
+            let addr: i64 = client
+                .query_opt(
+                    &format!("SELECT addr FROM {s}.code_refs WHERE kind = $1 AND name = $2"),
+                    &[&root, &name],
+                )
+                .await?
+                .with_context(|| format!("no {root} {name}"))?
+                .get(0);
+            snapshot_at(client, s, repo, addr, Some(name.to_owned())).await
+        }
+        other => bail!("/{other} is not a virtual root"),
+    }
+}
+
+/// The commit at `addr`, named by `named` or else by its lane.
+async fn snapshot_at(
+    client: &impl GenericClient,
+    s: &str,
+    repo: &str,
+    addr: i64,
+    named: Option<String>,
+) -> Result<Snapshot> {
     let row = client
         .query_one(
             &format!(
@@ -308,20 +348,13 @@ pub async fn resolve(
             &[&addr],
         )
         .await?;
-    let sha: String = row.get(0);
-    let lane: String = row.get(1);
-    // A ref names the commit as given; a SHA, a date or steps name its lane.
-    let git_ref = if spec.date.is_none() && spec.back == 0 && git_ref != sha {
-        git_ref
-    } else {
-        lane
-    };
+    let git_ref = named.unwrap_or_else(|| row.get(1));
     Ok(Snapshot {
         id: 0,
         repo: repo.to_owned(),
         version: version_of(&git_ref),
         git_ref,
-        sha,
+        sha: row.get(0),
         history: Some(crate::history::History {
             schema: s.to_owned(),
             addr,

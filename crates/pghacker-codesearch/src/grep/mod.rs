@@ -117,8 +117,8 @@ pub async fn select(
     let budget = Budget::new(Some(budget_ms));
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
     let result = async {
-        let table = FileTable::load(client, snapshot).await?;
         let script = shell::parse(command).map_err(|e| anyhow!(e))?;
+        let table = FileTable::view(client, snapshot, &mount_words(&script)).await?;
         let cwd = cwd_of(&script, &table, &snapshot.repo)?;
         let words = expand(&script.stages[0].words, &table, &snapshot.repo, &cwd);
         check_program(&words)?;
@@ -141,7 +141,7 @@ pub async fn select(
             .iter()
             .map(|item| Searched {
                 display: item.display.clone(),
-                path: table.files[item.file].path.clone(),
+                path: crate::snapshot::shown(&table.files[item.file].path),
                 lines: selection.selected(item.file),
             })
             .collect();
@@ -169,6 +169,19 @@ fn check_program(words: &[String]) -> Result<()> {
 }
 
 /// The folder a leading `cd` moves to.
+/// The words that may mount trees: the grep stage's and the folder's.
+fn mount_words(script: &shell::Script) -> Vec<String> {
+    let mut out: Vec<String> = script
+        .stages
+        .first()
+        .map(|stage| stage.words.iter().map(Word::text).collect())
+        .unwrap_or_default();
+    if let Some(cd) = &script.cd {
+        out.push(cd.text());
+    }
+    out
+}
+
 fn cwd_of(script: &shell::Script, table: &FileTable, repo: &str) -> Result<String> {
     let Some(cd) = &script.cd else {
         return Ok(String::new());
@@ -374,6 +387,16 @@ fn prepare(opts: &Options, table: &FileTable, repo: &str, cwd: &str) -> Result<P
             );
             continue;
         }
+        if crate::snapshot::bare_root(op) {
+            message(
+                &mut p,
+                format!(
+                    "grep: {op}: name a commit, branch or tag in it: /commit/<sha>/, \
+                     /branch/<name>/ or /tag/<name>/"
+                ),
+            );
+            continue;
+        }
         let path = if op.starts_with(['/', '~']) {
             table.normalize(repo, op)
         } else {
@@ -515,8 +538,13 @@ async fn selection(
     let mut files: Vec<usize> = prepared.items.iter().map(|i| i.file).collect();
     files.sort_unstable();
     files.dedup();
-    let ids: Vec<i32> = files.iter().map(|&k| table.files[k].id).collect();
-    let by_id: HashMap<i32, usize> = files.iter().map(|&k| (table.files[k].id, k)).collect();
+    // Mounted trees share versions: one row can be a line of several files.
+    let mut by_id: HashMap<i32, Vec<usize>> = HashMap::new();
+    for &k in &files {
+        by_id.entry(table.files[k].id).or_default().push(k);
+    }
+    let mut ids: Vec<i32> = by_id.keys().copied().collect();
+    ids.sort_unstable();
     let mut sel = Selection {
         lines: HashMap::new(),
         matched: HashMap::new(),
@@ -558,22 +586,24 @@ async fn selection(
             sel.incomplete = true;
             break;
         }
-        let Some(&k) = by_id.get(&row.file_id) else {
+        let Some(ks) = by_id.get(&row.file_id) else {
             continue;
         };
         let is_match = compiled.matcher.is_match(&row.line);
-        if opts.invert && !need_lines {
-            if is_match {
-                *sel.matched.entry(k).or_default() += 1;
-                if need == Need::Numbers {
-                    sel.matched_lines.entry(k).or_default().push(row.line_no);
+        for &k in ks {
+            if opts.invert && !need_lines {
+                if is_match {
+                    *sel.matched.entry(k).or_default() += 1;
+                    if need == Need::Numbers {
+                        sel.matched_lines.entry(k).or_default().push(row.line_no);
+                    }
                 }
+            } else if is_match != opts.invert {
+                sel.lines
+                    .entry(k)
+                    .or_default()
+                    .push((row.line_no, row.line.clone()));
             }
-        } else if is_match != opts.invert {
-            sel.lines
-                .entry(k)
-                .or_default()
-                .push((row.line_no, row.line));
         }
     }
     for lines in sel.lines.values_mut() {
@@ -617,8 +647,8 @@ async fn run_inner(
     limits: Limits,
     budget: &Budget,
 ) -> Result<Output> {
-    let table = FileTable::load(client, snapshot).await?;
     let script = shell::parse(command).map_err(|e| anyhow!(e))?;
+    let table = FileTable::view(client, snapshot, &mount_words(&script)).await?;
     let cwd = cwd_of(&script, &table, &snapshot.repo)?;
     let first = &script.stages[0];
     let words = expand(&first.words, &table, &snapshot.repo, &cwd);
@@ -681,8 +711,10 @@ async fn run_inner(
                 ranges.push((table.files[k].id, lo, hi));
             }
         }
-        let id_to_file: HashMap<i32, usize> =
-            sel.lines.keys().map(|&k| (table.files[k].id, k)).collect();
+        let mut id_to_file: HashMap<i32, Vec<usize>> = HashMap::new();
+        for &k in sel.lines.keys() {
+            id_to_file.entry(table.files[k].id).or_default().push(k);
+        }
         for ((id, n), text) in engine::line_ranges(
             client,
             snapshot.history.as_ref(),
@@ -691,7 +723,9 @@ async fn run_inner(
         )
         .await?
         {
-            extra.insert((id_to_file[&id], n), text);
+            for &k in &id_to_file[&id] {
+                extra.insert((k, n), text.clone());
+            }
         }
     }
 

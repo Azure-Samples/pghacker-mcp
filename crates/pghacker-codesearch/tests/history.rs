@@ -67,6 +67,7 @@ fn repository(dir: &Path) -> Vec<(&'static str, &'static str, String)> {
     git(dir, 1, &["add", "-A"]);
     git(dir, 1, &["commit", "-q", "-m", "c0"]);
     let c0 = git(dir, 1, &["rev-parse", "HEAD"]);
+    git(dir, 1, &["tag", "REL_17_0", &c0]);
 
     let gram = common::GRAM.replace(
         "stmt: SelectStmt\n",
@@ -146,8 +147,8 @@ async fn same_grep(client: &Client, snap: &Snapshot, hist: &Snapshot, command: &
         (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{command}"),
         (a, b) => panic!(
             "{command}: snapshots {:?}, history {:?}",
-            a.is_ok(),
-            b.is_ok()
+            a.map(|o| o.status),
+            b.map(|o| o.status)
         ),
     }
 }
@@ -407,4 +408,204 @@ async fn revisions_resolve_in_the_history() {
             .unwrap();
         assert_eq!(a.stdout, b.stdout, "{command}");
     }
+}
+
+#[tokio::test]
+async fn virtual_folders_mount_other_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let commits = repository(dir.path());
+    let db = TestDb::create().await.unwrap();
+    let paths = vec!["src".to_owned(), "contrib".to_owned()];
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: dir.path().to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: paths.clone(),
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let mut indexer = db.indexer().await.unwrap();
+    for (version, git_ref, sha) in &commits {
+        load_snapshot(
+            &mut indexer,
+            &SnapshotSpec {
+                repo: "postgres".into(),
+                git_ref: (*git_ref).into(),
+                sha: sha.clone(),
+                version: Some((*version).into()),
+                paths: paths.clone(),
+                source: RepoSource::Local {
+                    path: dir.path().to_owned(),
+                },
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let reader = db.reader().await.unwrap();
+    let snap = |v: &'static str| {
+        let reader = &reader;
+        async move { resolve_snapshot(reader, "postgres", Some(v)).await.unwrap() }
+    };
+    let (s19, s18, s17) = (snap("19").await, snap("18").await, snap("17").await);
+    let hist = attach(&reader, s19.clone(), SCHEMA).await.unwrap();
+    let out = |s: &Snapshot, command: &str| {
+        let (reader, s, command) = (&reader, s.clone(), command.to_owned());
+        async move {
+            let o = run(reader, &s, &command, Limits::default()).await.unwrap();
+            (String::from_utf8(o.stdout).unwrap(), o.stderr, o.status)
+        }
+    };
+    let prefixed = |text: &str, from: &str, to: &str| -> String {
+        text.lines()
+            .map(|l| match l.strip_prefix(from) {
+                Some(rest) => format!("{to}{rest}\n"),
+                None => format!("{l}\n"),
+            })
+            .collect()
+    };
+
+    // A mounted branch reads as that branch's snapshot does.
+    let (o18, _, _) = out(&s18, "grep -rn json src").await;
+    let (o, e, rc) = out(&hist, "grep -rn json /branch/REL_18_STABLE/src").await;
+    assert_eq!(
+        (o.as_str(), rc),
+        (
+            prefixed(&o18, "src/", "/branch/REL_18_STABLE/src/").as_str(),
+            0
+        ),
+        "{e:?}"
+    );
+    let (o, _, _) = out(&hist, "cd /branch/REL_18_STABLE && grep -rn json src").await;
+    assert_eq!(o, o18);
+    let (o17, _, _) = out(&s17, "grep -rn json src").await;
+    let (o, _, _) = out(&hist, "grep -rn json /tag/REL_17_0/src").await;
+    assert_eq!(o, prefixed(&o17, "src/", "/tag/REL_17_0/src/"));
+    let sha = &s17.sha[..10];
+    let (o, _, _) = out(&hist, &format!("grep -rn json /commit/{sha}/src")).await;
+    assert_eq!(o, prefixed(&o17, "src/", &format!("/commit/{sha}/src/")));
+
+    // Two versions in one command; the root stays the commit's own tree.
+    let (o19, _, _) = out(&s19, "grep -rn json_from_cstring src").await;
+    let (o, _, _) = out(
+        &hist,
+        "grep -rn json_from_cstring src /branch/REL_18_STABLE/src",
+    )
+    .await;
+    let (b18, _, _) = out(&s18, "grep -rn json_from_cstring src").await;
+    assert_eq!(
+        o,
+        format!(
+            "{o19}{}",
+            prefixed(&b18, "src/", "/branch/REL_18_STABLE/src/")
+        )
+    );
+    let (o, _, _) = out(&hist, "grep -rln json . /tag/REL_17_0/contrib").await;
+    assert!(
+        !o.contains("~v") && o.contains("./src/") && o.contains("/tag/REL_17_0/contrib/"),
+        "{o}"
+    );
+
+    // A virtual root needs a commit; one that names none doesn't exist.
+    let (o, e, rc) = out(&hist, "grep -r json /commit").await;
+    assert_eq!((o.as_str(), rc), ("", 2));
+    assert!(e[0].contains("/commit/<sha>/"), "{e:?}");
+    let (_, e, rc) = out(&hist, "grep -r json /branch/REL_99_STABLE/src").await;
+    assert_eq!(rc, 2);
+    assert_eq!(
+        e,
+        vec!["grep: /branch/REL_99_STABLE/src: No such file or directory"]
+    );
+
+    // read_file, search and list_files.
+    let read = |s: &Snapshot, path: &str| {
+        let (reader, s, path) = (&reader, s.clone(), path.to_owned());
+        async move {
+            read_file(
+                reader,
+                &s,
+                &ReadFileArgs {
+                    path,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let a = read(&s17, "src/backend/parser/gram.y").await;
+    let b = read(&hist, "/tag/REL_17_0/src/backend/parser/gram.y").await;
+    assert_eq!(
+        (b.content, b.path.as_str()),
+        (a.content, "/tag/REL_17_0/src/backend/parser/gram.y")
+    );
+    let args: SearchArgs =
+        serde_json::from_value(json!({"query": "json", "paths": "src/backend"})).unwrap();
+    let a = search(&reader, &s18, &args).await.unwrap();
+    let args: SearchArgs = serde_json::from_value(
+        json!({"query": "json", "paths": "/branch/REL_18_STABLE/src/backend"}),
+    )
+    .unwrap();
+    let b = search(&reader, &hist, &args).await.unwrap();
+    assert_eq!(a.total_lines, b.total_lines);
+    let shown: Vec<String> = a
+        .lines
+        .iter()
+        .map(|h| format!("/branch/REL_18_STABLE/{}:{}", h.path, h.line))
+        .collect();
+    let got: Vec<String> = b
+        .lines
+        .iter()
+        .map(|h| format!("{}:{}", h.path, h.line))
+        .collect();
+    assert_eq!(got, shown);
+    let list = |path: &str, glob: Option<&str>| {
+        let reader = &reader;
+        let hist = hist.clone();
+        let args = ListFilesArgs {
+            path: Some(path.to_owned()),
+            glob: glob.map(str::to_owned),
+            ..Default::default()
+        };
+        async move {
+            list_files(reader, &hist, &args)
+                .await
+                .unwrap()
+                .entries
+                .into_iter()
+                .map(|e| e.path)
+                .collect::<Vec<String>>()
+        }
+    };
+    assert_eq!(
+        list("/branch", None).await,
+        vec!["/branch/REL_18_STABLE", "/branch/master"]
+    );
+    assert_eq!(list("/tag", Some("REL_17*")).await, vec!["/tag/REL_17_0"]);
+    let newest: Vec<String> = commits
+        .iter()
+        .map(|c| format!("/commit/{}", &c.2[..12]))
+        .collect();
+    let listed = list("/commit", None).await;
+    assert_eq!(listed.len(), 4);
+    assert_eq!(listed[0], newest[0]);
+    assert_eq!(
+        list("/branch/REL_18_STABLE/src/backend", None).await,
+        vec![
+            "/branch/REL_18_STABLE/src/backend/parser",
+            "/branch/REL_18_STABLE/src/backend/utils"
+        ]
+    );
+    assert!(
+        !list("/", None)
+            .await
+            .iter()
+            .any(|p| p.contains("~v") || p.starts_with("/branch"))
+    );
 }

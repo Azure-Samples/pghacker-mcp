@@ -302,8 +302,13 @@ pub(crate) async fn find_lines(
             timed_out: false,
         });
     }
-    let ids: Vec<i32> = files.iter().map(|&k| table.files[k].id).collect();
-    let by_id: HashMap<i32, usize> = files.iter().map(|&k| (table.files[k].id, k)).collect();
+    // Mounted trees share versions: one row can be a line of several files.
+    let mut by_id: HashMap<i32, Vec<usize>> = HashMap::new();
+    for &k in files {
+        by_id.entry(table.files[k].id).or_default().push(k);
+    }
+    let mut ids: Vec<i32> = by_id.keys().copied().collect();
+    ids.sort_unstable();
     let mut require = vec![&patterns.query.filter];
     require.extend(patterns.also.iter().map(|c| &c.filter));
     let scope_lines = files
@@ -328,10 +333,12 @@ pub(crate) async fn find_lines(
             timed_out = true;
             break;
         }
-        if let Some(&k) = by_id.get(&row.file_id)
+        if let Some(ks) = by_id.get(&row.file_id)
             && patterns.is_match(&row.line)
         {
-            hits.push((k, row.line_no, row.line));
+            for &k in ks {
+                hits.push((k, row.line_no, row.line.clone()));
+            }
         }
     }
     hits.sort_unstable_by_key(|h| (h.0, h.1));
@@ -467,7 +474,7 @@ pub(crate) fn search_scope(
     let filter = RgFilter::new(include, exclude).map_err(|e| anyhow!(e))?;
     let paths: Vec<&String> = paths.iter().filter(|p| !p.trim().is_empty()).collect();
     if paths.is_empty() {
-        let files: Vec<usize> = (0..table.files.len())
+        let files: Vec<usize> = (0..table.own)
             .filter(|&k| !table.files[k].is_binary && filter.allows("", &table.files[k].path))
             .collect();
         return Ok((files, filter.is_empty()));
@@ -476,7 +483,14 @@ pub(crate) fn search_scope(
     for raw in paths {
         if raw.contains(['*', '?', '[', '{']) {
             let glob = path_glob(table, repo, raw)?;
-            for (k, f) in table.files.iter().enumerate() {
+            // A glob reaches into a mounted tree only when it names one.
+            let range = if crate::snapshot::mount_of(raw).is_some() {
+                table.own..table.files.len()
+            } else {
+                0..table.own
+            };
+            for k in range {
+                let f = &table.files[k];
                 if glob_covers(&glob, &f.path) && filter.allows("", &f.path) {
                     chosen[k] = true;
                 }
@@ -633,7 +647,7 @@ async fn search_inner(
         bail!("context is at most {MAX_CONTEXT} lines");
     }
     let plan = plan(args)?;
-    let table = FileTable::load(client, snapshot).await?;
+    let table = FileTable::view(client, snapshot, &args.paths.to_vec()).await?;
     let (files, whole) = search_scope(
         &table,
         &snapshot.repo,
@@ -757,7 +771,7 @@ async fn search_inner(
                     Vec::new()
                 };
                 result.lines.push(LineHit {
-                    path: table.files[*f].path.clone(),
+                    path: crate::snapshot::shown(&table.files[*f].path),
                     line: *n as u32,
                     text: cut_text(text, &mut notes),
                     before,
@@ -784,7 +798,7 @@ async fn search_inner(
             result.cut = offset + limit < parts.len();
             for (f, n, text) in parts.into_iter().skip(offset).take(limit) {
                 result.lines.push(LineHit {
-                    path: table.files[f].path.clone(),
+                    path: crate::snapshot::shown(&table.files[f].path),
                     line: n as u32,
                     text: cut_text(&text, &mut notes),
                     before: Vec::new(),
@@ -796,7 +810,7 @@ async fn search_inner(
             result.cut = offset + limit < per_file.len();
             for (f, n) in per_file.iter().skip(offset).take(limit) {
                 result.files.push(FileHit {
-                    path: table.files[*f].path.clone(),
+                    path: crate::snapshot::shown(&table.files[*f].path),
                     lines: *n,
                     terms: terms_of(f),
                 });
@@ -985,7 +999,7 @@ async fn complement(
                     .map(|t| cut_text(t, &mut BTreeMap::new()))
             };
             result.lines.push(LineHit {
-                path: table.files[k].path.clone(),
+                path: crate::snapshot::shown(&table.files[k].path),
                 line: n as u32,
                 text: cut_text(text.get(&(id, n)).map_or("", String::as_str), &mut notes),
                 before: ((n - context).max(1)..n).filter_map(get).collect(),
@@ -996,7 +1010,7 @@ async fn complement(
         result.cut = offset + limit < per_file.len();
         for (k, n) in per_file.iter().skip(offset).take(limit) {
             result.files.push(FileHit {
-                path: table.files[*k].path.clone(),
+                path: crate::snapshot::shown(&table.files[*k].path),
                 lines: *n,
                 terms: None,
             });

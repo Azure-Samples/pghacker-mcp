@@ -166,17 +166,98 @@ pub struct FileEntry {
     pub size: i32,
 }
 
+/// Where mounted trees live in a table: a first component that sorts after
+/// every real one. Tools name them by their virtual roots, as
+/// `/branch/REL_17_STABLE/src`, which tables hold as `~v/branch/...`.
+pub const MOUNTS: &str = "~v";
+
+/// The virtual roots that mount another commit's tree.
+pub const ROOTS: [&str; 3] = ["commit", "branch", "tag"];
+
+/// The tree a tool path mounts: ("branch", "REL_17_STABLE") for
+/// `/branch/REL_17_STABLE/src`.
+pub fn mount_of(raw: &str) -> Option<(String, String)> {
+    let rest = raw.trim().strip_prefix('/')?;
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let root = parts.next()?;
+    if !ROOTS.contains(&root) {
+        return None;
+    }
+    Some((root.to_owned(), parts.next()?.to_owned()))
+}
+
+/// Whether a tool path is a virtual root without a commit: `/commit`.
+pub fn bare_root(raw: &str) -> bool {
+    let trimmed = raw.trim().trim_end_matches('/');
+    trimmed
+        .strip_prefix('/')
+        .is_some_and(|root| ROOTS.contains(&root))
+}
+
+/// A table path as tools show it: mounted trees under their virtual roots.
+pub fn shown(path: &str) -> String {
+    match path.strip_prefix("~v/") {
+        Some(rest) => format!("/{rest}"),
+        None => path.to_owned(),
+    }
+}
+
 /// A snapshot's files in tree order (paths compared component by
 /// component, the order of a sorted directory walk), with its folders.
+/// Mounted trees follow the commit's own files.
 #[derive(Debug)]
 pub struct FileTable {
     pub files: Vec<FileEntry>,
+    /// The commit's own files: `files[..own]`.
+    pub own: usize,
     by_path: HashMap<String, usize>,
     dirs: HashSet<String>,
     /// First path components: what an absolute path must contain.
     top: HashSet<String>,
     /// The path prefixes the snapshot loaded; empty means the whole tree.
     pub loaded_paths: Vec<String>,
+}
+
+impl FileTable {
+    /// The table a call reads: the snapshot's files, and in the history,
+    /// the trees that the call's paths mount (`/commit/<rev>`,
+    /// `/branch/<name>`, `/tag/<name>`). A mount that names no commit is
+    /// left out, so its paths don't exist.
+    pub async fn view(
+        client: &impl GenericClient,
+        snapshot: &Snapshot,
+        paths: &[String],
+    ) -> Result<Arc<FileTable>> {
+        let base = FileTable::load(client, snapshot).await?;
+        let Some(h) = &snapshot.history else {
+            return Ok(base);
+        };
+        let mut mounts: Vec<(String, String)> = paths.iter().filter_map(|p| mount_of(p)).collect();
+        mounts.sort();
+        mounts.dedup();
+        if mounts.is_empty() {
+            return Ok(base);
+        }
+        let mut files = base.files.clone();
+        for (root, name) in mounts {
+            let mounted =
+                match crate::rev::resolve_mount(client, &h.schema, &snapshot.repo, &root, &name)
+                    .await
+                {
+                    Ok(mounted) => mounted,
+                    Err(error) => {
+                        tracing::debug!(%root, %name, %error, "a mount names no commit");
+                        continue;
+                    }
+                };
+            let table = FileTable::load(client, &mounted).await?;
+            files.extend(table.files.iter().map(|f| FileEntry {
+                path: format!("{MOUNTS}/{root}/{name}/{}", f.path),
+                ..f.clone()
+            }));
+        }
+        Ok(Arc::new(FileTable::new(files, base.loaded_paths.clone())))
+    }
 }
 
 fn cached(key: &CacheKey) -> Option<Arc<FileTable>> {
@@ -263,6 +344,7 @@ impl FileTable {
 
     pub fn new(mut files: Vec<FileEntry>, loaded_paths: Vec<String>) -> Self {
         files.sort_by(|a, b| tree_cmp(&a.path, &b.path));
+        let own = files.partition_point(|f| !f.path.starts_with("~v/"));
         let by_path = files
             .iter()
             .enumerate()
@@ -281,6 +363,7 @@ impl FileTable {
         }
         Self {
             files,
+            own,
             by_path,
             dirs,
             top,
@@ -301,7 +384,7 @@ impl FileTable {
     /// The files below folder `dir`, as a range of indices.
     pub fn under(&self, dir: &str) -> std::ops::Range<usize> {
         if dir.is_empty() {
-            return 0..self.files.len();
+            return 0..self.own;
         }
         let start = self
             .files
@@ -325,6 +408,9 @@ impl FileTable {
     /// the path cannot be placed in the snapshot.
     pub fn normalize(&self, repo: &str, raw: &str) -> Option<String> {
         let raw = raw.trim();
+        if mount_of(raw).is_some() || bare_root(raw) {
+            return lexical_components(raw).map(|c| format!("{MOUNTS}/{}", c.join("/")));
+        }
         let absolute = raw.starts_with('/') || raw.starts_with('~') || raw.starts_with('$');
         let comps = lexical_components(raw)?;
         if !absolute {
@@ -449,6 +535,41 @@ mod tests {
         assert_eq!(n(".").as_deref(), Some(""));
         assert_eq!(n("/home/me/other"), None);
         assert!(t.is_dir("src/backend") && !t.is_dir("src/back"));
+    }
+
+    #[test]
+    fn mounted_trees_follow_the_commits_own() {
+        let mut files: Vec<FileEntry> = table().files.clone();
+        files.push(FileEntry {
+            id: 1,
+            path: "~v/branch/REL_17_STABLE/src/backend/parser/gram.y".into(),
+            is_binary: false,
+            line_count: 1,
+            size: 1,
+        });
+        let t = FileTable::new(files, vec![]);
+        assert_eq!(t.own, 6);
+        assert_eq!(t.under("").len(), 6);
+        let n = |p: &str| t.normalize("postgres", p);
+        assert_eq!(
+            n("/branch/REL_17_STABLE/src/").as_deref(),
+            Some("~v/branch/REL_17_STABLE/src")
+        );
+        assert!(t.exists("~v/branch/REL_17_STABLE/src/backend"));
+        assert_eq!(n("/commit").as_deref(), Some("~v/commit"));
+        assert!(!t.exists("~v/commit"));
+        assert_eq!(
+            mount_of("/tag/REL_16_0/x"),
+            Some(("tag".into(), "REL_16_0".into()))
+        );
+        assert_eq!(mount_of("/branch"), None);
+        assert_eq!(mount_of("/src/branch/x"), None);
+        assert!(bare_root("/commit/") && !bare_root("/commit/abc"));
+        assert_eq!(
+            shown("~v/branch/REL_17_STABLE/src/x.c"),
+            "/branch/REL_17_STABLE/src/x.c"
+        );
+        assert_eq!(shown("src/x.c"), "src/x.c");
     }
 
     #[test]
