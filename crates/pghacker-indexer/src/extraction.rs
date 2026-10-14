@@ -102,13 +102,21 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureStatus {
+    /// A patch or idea posted.
     Proposed,
+    /// Revised versions under review.
     InProgress,
+    /// A committer says it was pushed or committed, even if follow-up fixes continue.
     Committed,
+    /// Committed, then reverted.
     Reverted,
+    /// Consensus against it.
     Rejected,
+    /// Returned with feedback in a CommitFest.
     Returned,
+    /// The author withdrew it.
     Withdrawn,
+    /// The thread doesn't show it.
     Unknown,
 }
 
@@ -172,6 +180,8 @@ pub struct FeatureIn {
     pub slug: Option<String>,
     pub name: String,
     pub description: String,
+    /// What the thread shows by its last messages (see status_signals). A
+    /// reused feature keeps the most advanced status any of its threads showed.
     pub status: FeatureStatus,
     /// The major version it targeted or shipped in, such as "19".
     #[serde(default)]

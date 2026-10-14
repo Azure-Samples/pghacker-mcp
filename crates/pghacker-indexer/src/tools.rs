@@ -102,11 +102,11 @@ pub static TOOLS: &[ToolSpec] = &[
         name: "submit_extracts",
         description: "Saves one leased thread's extracts, all or nothing: features (new with a slug, or reuse an \
             existing id; status, release, files from the thread's patches), decisions (outcome, alternatives, \
-            rationale, the feature decided), and positions (an author's stance on a feature or decision, citing \
-            the author's own messages). Every extract cites messages of the thread with verbatim quotes. A new \
-            extract that resembles an existing one needs distinct_because, which is recorded so that \
-            find_duplicates doesn't offer the pair. Send skip_reason instead for a thread without technical \
-            discussion. On errors nothing is saved: fix all and resubmit.",
+            rationale, and the slug of the feature each decides), and positions (an author's stance on a \
+            feature or decision, citing the author's own messages). Every extract cites messages of the thread \
+            with verbatim quotes. A new extract that resembles an existing one needs distinct_because, which is \
+            recorded so that find_duplicates doesn't offer the pair. Send skip_reason instead for a thread \
+            without technical discussion. On errors nothing is saved: fix all and resubmit.",
         effect: CREATE,
         schema: schema::<SubmitArgs>,
     },
@@ -218,6 +218,38 @@ impl Tools for Indexer {
                 format!("unknown tool {other}"),
                 None,
             )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each feature status is explained to extractors in submit_extracts'
+    /// schema, and named to readers in search_extracts' description.
+    #[test]
+    fn feature_statuses_are_described() {
+        let submit = TOOLS.iter().find(|t| t.name == "submit_extracts").unwrap();
+        let schema = (submit.schema)();
+        let statuses = schema["$defs"]["FeatureStatus"]["oneOf"]
+            .as_array()
+            .expect("each status with its description");
+        assert_eq!(statuses.len(), 8);
+        for status in statuses {
+            let name = status["const"]
+                .as_str()
+                .unwrap_or_else(|| panic!("statuses without a description: {status}"));
+            assert!(
+                status["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{name}"
+            );
+            assert!(
+                pghacker_api::descriptions::SEARCH_EXTRACTS.contains(name),
+                "{name}"
+            );
         }
     }
 }

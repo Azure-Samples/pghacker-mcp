@@ -443,5 +443,26 @@ async fn describes_the_ontology() {
         "judged pairs are bookkeeping"
     );
     assert_eq!(out["graph"]["vertices"].as_array().unwrap().len(), 11);
+    let feature = out["graph"]["vertices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["label"] == "Feature")
+        .unwrap();
+    for status in [
+        "proposed",
+        "in_progress",
+        "committed",
+        "reverted",
+        "rejected",
+        "returned",
+        "withdrawn",
+        "unknown",
+    ] {
+        assert!(
+            feature["properties"].as_str().unwrap().contains(status),
+            "{status}"
+        );
+    }
     assert_eq!(out["loaded"]["mail"]["messages"], 4);
 }

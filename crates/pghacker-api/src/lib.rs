@@ -20,10 +20,14 @@ pub mod descriptions {
         participants, extracts (features, decisions, positions) and its messages in order with author, date, \
         Message-ID, reply parent, text without quoted replies, patches (files changed) and mentions of files, \
         commits, CommitFest entries and releases. Pages with offset/limit.";
-    pub const SEARCH_EXTRACTS: &str = "Searches the extracted features (proposal to commit, revert or rejection; \
-        release), decisions (outcome, alternatives, rationale) and positions (an author's stance), by full text, \
-        semantic search or both (mode hybrid, the default). Optional kind and author filters. Each result cites messages with \
-        verbatim quotes.";
+    pub const SEARCH_EXTRACTS: &str = "Searches the extracts: features (capabilities or changes to PostgreSQL \
+        that threads propose, review, commit, revert or reject, each with what it does, its status, the release it \
+        targets or shipped in, its threads and the files that implement it), decisions (resolutions a thread \
+        reached: outcome, alternatives, rationale and the feature each decides) and positions (an author's stance \
+        on a feature or decision), by full text, semantic search or both (mode hybrid, the default). A feature's \
+        status is the most advanced any of its threads showed: proposed, in_progress, committed, reverted, \
+        rejected, returned (with feedback, in a CommitFest), withdrawn or unknown. Optional kind and author \
+        filters. Each result cites messages with verbatim quotes.";
     pub const AUTHOR_PERSPECTIVE: &str = "Summarizes an author's perspective on a topic: their extracted positions \
         (stance and summary on features and decisions) that match the topic through their own text or the feature or \
         decision they are about, best first, in mode fulltext, semantic or hybrid (default; semantic and hybrid keep \

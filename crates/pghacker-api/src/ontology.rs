@@ -21,7 +21,12 @@ const VERTEX_PROPERTIES: &[(&str, &str)] = &[
         "Message",
         "key, id, message_id, subject, sent_at, has_patch, thread_id, author_id",
     ),
-    ("Feature", "key, id, slug, name, status, release"),
+    (
+        "Feature",
+        "key, id, slug, name, status (the most advanced any of its threads showed: proposed, \
+         in_progress, committed, reverted, rejected, returned, withdrawn or unknown; returned is \
+         returned with feedback in a CommitFest), release (the major version it targets or shipped in)",
+    ),
     ("Decision", "key, id, title, outcome, decided_at, thread_id"),
     ("Position", "key, id, stance, summary, author_id, thread_id"),
     ("Release", "key, version"),
