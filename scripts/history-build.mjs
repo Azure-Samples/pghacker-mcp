@@ -14,6 +14,11 @@ import { run } from "./lib/psql.mjs";
 // Arguments: --sample N (random commits to check, default 40).
 const REPO = "https://git.postgresql.org/git/postgresql.git";
 const INDEXER = "/usr/local/bin/pghacker-indexer";
+// The probe job's replica timeout (deploy/terraform/containerapps.tf). The
+// check gets what the build leaves of it, less a margin for the container's
+// start, the cleanup and the report.
+const JOB_MS = 3600_000;
+const MARGIN_MS = 5 * 60_000;
 const started = Date.now();
 const report = { ok: false };
 
@@ -21,7 +26,12 @@ const at = process.argv.indexOf("--sample");
 const sample = at > 0 ? Number(process.argv[at + 1]) : 40;
 
 async function indexer(args, env, timeoutMs) {
+  const t = Date.now();
   const result = await run(INDEXER, args, { env, timeoutMs });
+  if (result.signal) {
+    const limit = Date.now() - t >= timeoutMs ? ` at its limit of ${Math.round(timeoutMs / 1000)} s` : "";
+    throw new Error(`${args.slice(0, 2).join(" ")}: killed by ${result.signal}${limit}`);
+  }
   if (result.code !== 0) {
     throw new Error(`${args.slice(0, 2).join(" ")}: ${result.stderr.trim().split("\n").slice(-8).join(" | ")}`);
   }
@@ -52,10 +62,12 @@ try {
     finish_secs: built.finish_secs,
   };
   step = Date.now();
+  const left = JOB_MS - (step - started) - MARGIN_MS;
+  if (left < 60_000) throw new Error(`the build left ${Math.round(left / 1000)} s of the job to verify the history`);
   const verified = await indexer(
     ["history", "verify", "--git-dir", git, "--schema", "pghacker", "--heads", "--sample", String(sample)],
     env,
-    15 * 60_000,
+    left,
   );
   report.verify = { ms: Date.now() - step, ...verified };
   report.ok = verified.mismatch_count === 0 && verified.scan_disagreements === 0;
