@@ -1184,4 +1184,17 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     assert_eq!(lines, vec!["int a;", "int c;", "int b;"]);
     let again = pghacker_indexer::history::sync(&indexer).await.unwrap();
     assert_eq!(again["commits"], 0);
+
+    let status = pghacker_indexer::status::ingest_status(&indexer)
+        .await
+        .unwrap();
+    let history = &status["code"]["history"];
+    assert_eq!(history["commits"], 2, "{history}");
+    assert_eq!(
+        (history["branches"].clone(), history["tags"].clone()),
+        (json!(1), json!(1))
+    );
+    assert!(history["synced_at"].is_string());
+    let listed = sources::list_sources(&indexer).await.unwrap();
+    assert_eq!(listed["history"], *history);
 }

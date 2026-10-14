@@ -201,7 +201,7 @@ pub async fn ingest_status(indexer: &Indexer) -> Result<Value> {
             "positions": counts.get::<_, i64>(13),
             "citations": counts.get::<_, i64>(14),
         },
-        "code": { "snapshots": snapshots },
+        "code": { "snapshots": snapshots, "history": crate::history::summary(&**client).await? },
         "graph": graph,
     }))
 }

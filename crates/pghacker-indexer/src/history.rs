@@ -10,6 +10,25 @@ use crate::Indexer;
 /// The clone's folder below the git directory.
 pub const CLONE: &str = "postgres-history.git";
 
+/// The installed history in brief, for status and list_sources: None until
+/// one is installed. Cheap: one row and three counts.
+pub async fn summary(client: &impl tokio_postgres::GenericClient) -> Result<Option<Value>> {
+    let row = client
+        .query_opt(
+            "SELECT jsonb_build_object(
+                 'master', h.master, 'url', h.url, 'paths', h.paths, 'head', h.head,
+                 'built_at', h.built_at, 'synced_at', h.synced_at,
+                 'commits', (SELECT count(*) FROM code_commits),
+                 'branches', (SELECT count(*) FROM code_refs WHERE kind = 'branch'),
+                 'tags', (SELECT count(*) FROM code_refs WHERE kind = 'tag'))
+             FROM code_history h",
+            &[],
+        )
+        .await
+        .context("cannot read code_history")?;
+    Ok(row.map(|r| r.get(0)))
+}
+
 /// Syncs the installed history; does nothing until one is installed.
 pub async fn sync(indexer: &Indexer) -> Result<Value> {
     let client = indexer.pool.get().await?;

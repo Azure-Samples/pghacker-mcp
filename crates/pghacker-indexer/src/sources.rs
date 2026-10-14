@@ -734,7 +734,8 @@ pub async fn list_sources(indexer: &Indexer) -> Result<Value> {
                 at a branch or tag's current commit or a given sha; the whole tree, or chosen paths.",
         }),
     };
-    Ok(json!({ "sources": sources, "available": available }))
+    let history = crate::history::summary(&**client).await?;
+    Ok(json!({ "sources": sources, "history": history, "available": available }))
 }
 
 #[cfg(test)]
