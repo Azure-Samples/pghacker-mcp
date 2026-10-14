@@ -334,6 +334,58 @@ async fn history_and_snapshots_answer_alike() {
         }
         assert_eq!(found[0], found[1], "{version}");
 
+        // So do trigram reads of a scope: one commit's files, or files that
+        // mount another commit's.
+        let own = |s: Snapshot| {
+            let reader = &reader;
+            async move {
+                let table = pghacker_codesearch::snapshot::FileTable::load(reader, &s)
+                    .await
+                    .unwrap();
+                // Callers leave binary files out of the scopes they read.
+                let ids: Vec<i32> = table.files[..table.own]
+                    .iter()
+                    .filter(|f| !f.is_binary)
+                    .map(|f| f.id)
+                    .collect();
+                ids
+            }
+        };
+        let half: Vec<i32> = own(hist.clone()).await.into_iter().step_by(2).collect();
+        let old = resolve_snapshot(&reader, "postgres", Some("17"))
+            .await
+            .unwrap();
+        let mut mixed = own(attach(&reader, old, SCHEMA).await.unwrap()).await;
+        mixed.extend(&half);
+        mixed.sort_unstable();
+        mixed.dedup();
+        for (ids, mounted) in [(&half, false), (&mixed, true)] {
+            let mut found = Vec::new();
+            for scope_first in [true, false] {
+                let q = LineQuery {
+                    snapshot_id: hist.id,
+                    history: hist.history.as_ref(),
+                    mounted,
+                    file_ids: Some(ids.as_slice()),
+                    require: vec![&compiled.filter],
+                    reject: vec![],
+                    cap: MAX_CANDIDATES,
+                    scope_first,
+                };
+                let c = candidates(&reader, &q, &Budget::new(None)).await.unwrap();
+                assert!(!c.capped && !c.timed_out);
+                let mut rows: Vec<(i32, i32, String)> = c
+                    .rows
+                    .into_iter()
+                    .map(|r| (r.file_id, r.line_no, r.line))
+                    .collect();
+                rows.sort();
+                assert!(!rows.is_empty(), "{version} mounted {mounted}");
+                found.push(rows);
+            }
+            assert_eq!(found[0], found[1], "{version} mounted {mounted}");
+        }
+
         // Raw candidates of the whole commit: none from binary files.
         let make_node =
             pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
@@ -1378,6 +1430,16 @@ async fn search_commits_agrees_with_git_log() {
             vec!["--all", "--pickaxe-regex", "-Sfoo\\([23]"],
         ),
         (json!({"occurrences": "bee"}), vec!["--all", "-Sbee"]),
+        // Diff filters in paths (a.c's rename into src is left out: the
+        // history follows a file's lineage, git log the paths named).
+        (
+            json!({"occurrences": "bee", "paths": ["doc"]}),
+            vec!["--all", "-Sbee", "--", "doc"],
+        ),
+        (
+            json!({"changed_lines": "bee", "paths": ["*.c"]}),
+            vec!["--all", "-Gbee", "--", "*.c"],
+        ),
         (
             json!({"author": "ann lee"}),
             vec!["--all", "-i", "--author=ann lee"],

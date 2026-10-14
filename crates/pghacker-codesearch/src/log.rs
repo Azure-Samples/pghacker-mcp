@@ -232,11 +232,30 @@ pub async fn search_commits(
                 format!("l.line {op} {p}")
             }
         };
-        let scope = match path_sql(&args.paths, "v.path", &mut params) {
-            Some(paths) => format!(
-                " AND l.lineage = ANY(ARRAY(SELECT DISTINCT v.lineage FROM {s}.code_file_versions v \
-                 WHERE {paths}))"
-            ),
+        // The paths' lineages, bound as an array (see history::lineages_of).
+        let mut path_params = Params::default();
+        let scope = match path_sql(&args.paths, "v.path", &mut path_params) {
+            Some(paths) => {
+                if !budget.apply(client).await? {
+                    bail!("the time budget ran out");
+                }
+                let sql = format!(
+                    "SELECT DISTINCT v.lineage FROM {s}.code_file_versions v WHERE {paths}"
+                );
+                let lineages: Vec<i32> = match client.query(sql.as_str(), &path_params.refs()).await
+                {
+                    Ok(rows) => rows.iter().map(|r| r.get(0)).collect(),
+                    Err(error) if is_timeout(&error) => {
+                        result.incomplete = true;
+                        result
+                            .notes
+                            .push("the time budget ran out reading the paths' files".into());
+                        return Ok(result);
+                    }
+                    Err(error) => return Err(error).context("cannot read the paths' files"),
+                };
+                format!(" AND l.lineage = ANY({}::int4[])", params.add(lineages))
+            }
             None => String::new(),
         };
         let sql = format!(

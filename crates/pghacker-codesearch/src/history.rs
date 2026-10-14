@@ -7,7 +7,7 @@
 //! in weave order; their weave keys are cached per version, which gives line
 //! numbers, and every commit where the version is alive shares the list.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result, bail};
@@ -327,23 +327,91 @@ fn versions_sql(s: &str, ids: bool) -> String {
     }
 }
 
+/// The lineages of versions `ids`. Trigram scans take a scope's lineages as
+/// a bound array, never an `ARRAY(SELECT ...)`: PostgreSQL hashes a bound
+/// array's members, but compares each row it rechecks with every member of
+/// a subquery's array, and a whole tree has thousands, which took common
+/// terms past 10 seconds.
+pub(crate) async fn lineages_of(
+    client: &impl GenericClient,
+    h: &History,
+    ids: &[i32],
+) -> Result<Vec<i32>> {
+    let s = checked(&h.schema)?;
+    let rows = client
+        .query(
+            &format!(
+                "SELECT DISTINCT lineage FROM {s}.code_file_versions \
+                 WHERE id = ANY($1::int4[]) ORDER BY 1"
+            ),
+            &[&ids],
+        )
+        .await
+        .context("cannot read the scope's lineages")?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// The lineages of a trigram scan's scope (see `lineages_of`): from the
+/// commit's cached map unless the scope mounts other commits. A lineage
+/// whose version at the commit is binary is left out: its lines would be
+/// dropped anyway.
+async fn scope_lineages(
+    client: &impl GenericClient,
+    q: &LineQuery<'_>,
+    h: &History,
+) -> Result<Vec<i32>> {
+    if let (true, Some(ids)) = (q.mounted, q.file_ids) {
+        return lineages_of(client, h, ids).await;
+    }
+    let map = lineage_map(client, h).await?;
+    let mut lineages: Vec<i32> = match q.file_ids {
+        Some(ids) => {
+            let ids: HashSet<i32> = ids.iter().copied().collect();
+            map.iter()
+                .filter(|(_, v)| ids.contains(v))
+                .map(|(&l, _)| l)
+                .collect()
+        }
+        None => map.keys().copied().collect(),
+    };
+    lineages.sort_unstable();
+    Ok(lineages)
+}
+
 /// The candidate query: rows of (version id, weave key, line).
 ///
 /// A version's lines are its lineage's instances alive at its birth, so one
 /// query reads versions of any commits: a call may mount several. Scope
 /// first reads the versions' lines, then applies the text filters;
 /// otherwise the trigram index finds the matching lines, once, before they
-/// meet the versions. Fences keep the planner from repeating the trigram
+/// meet the versions, narrowed by `lineages`, the scope's (see
+/// `scope_lineages`). Fences keep the planner from repeating the trigram
 /// scan for each version.
-pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> {
+pub fn line_sql(q: &LineQuery<'_>, h: &History, lineages: &[i32]) -> Result<(String, Vec<Param>)> {
     let s = checked(&h.schema)?;
-    let mut params: Vec<Param> = match q.file_ids {
-        Some(ids) => vec![Box::new(ids.to_vec())],
-        None => vec![Box::new(h.addr)],
-    };
+    let mut params: Vec<Param> = Vec::new();
+    let mut filters = String::new();
+    if !q.scope_first && !q.mounted {
+        // One commit: the scope's lineages and the commit's address narrow
+        // the trigram scan, which PostgreSQL can AND with the scope index.
+        // Rows come back by lineage; candidates() maps each to its version.
+        params.push(Box::new(h.addr));
+        params.push(Box::new(lineages.to_vec()));
+        crate::engine::push_filters(&mut filters, &mut params, q);
+        let sql = format!(
+            "SELECT l.lineage, l.weave, l.line FROM {s}.code_line_instances l \
+             WHERE l.lineage = ANY($2::int4[]) AND {}{filters} LIMIT {}",
+            alive_at("l", "$1"),
+            q.cap + 1
+        );
+        return Ok((sql, params));
+    }
     let versions = versions_sql(s, q.file_ids.is_some());
+    params.push(match q.file_ids {
+        Some(ids) => Box::new(ids.to_vec()),
+        None => Box::new(h.addr),
+    });
     let sql = if q.scope_first {
-        let mut filters = String::new();
         crate::engine::push_filters(&mut filters, &mut params, q);
         format!(
             "SELECT l.vid, l.weave, l.line FROM \
@@ -353,39 +421,17 @@ pub fn line_sql(q: &LineQuery<'_>, h: &History) -> Result<(String, Vec<Param>)> 
              WHERE true{filters} LIMIT {}",
             q.cap + 1
         )
-    } else if q.mounted {
+    } else {
         // Files of several commits: each line checked at its version's birth.
-        let mut filters = String::new();
+        params.push(Box::new(lineages.to_vec()));
         crate::engine::push_filters(&mut filters, &mut params, q);
         format!(
             "SELECT v.id, l.weave, l.line FROM \
              (SELECT l.lineage, l.weave, l.line, l.lo, l.hi, l.alive \
               FROM {s}.code_line_instances l \
-              WHERE l.lineage = ANY(ARRAY(SELECT lineage FROM {versions} x)){filters} OFFSET 0) AS l \
+              WHERE l.lineage = ANY($2::int4[]){filters} OFFSET 0) AS l \
              JOIN {versions} v ON v.lineage = l.lineage AND {} LIMIT {}",
             alive_at("l", "v.lo"),
-            q.cap + 1
-        )
-    } else {
-        // One commit: the scope's lineages and the commit's address narrow
-        // the trigram scan, which PostgreSQL can AND with the scope index.
-        // Rows come back by lineage; candidates() maps each to its version.
-        let (at, scope) = match q.file_ids {
-            Some(_) => {
-                params.push(Box::new(h.addr));
-                (
-                    format!("${}", params.len()),
-                    format!("l.lineage = ANY(ARRAY(SELECT lineage FROM {versions} x)) AND "),
-                )
-            }
-            None => ("$1".to_owned(), String::new()),
-        };
-        let mut filters = String::new();
-        crate::engine::push_filters(&mut filters, &mut params, q);
-        format!(
-            "SELECT l.lineage, l.weave, l.line FROM {s}.code_line_instances l \
-             WHERE {scope}{}{filters} LIMIT {}",
-            alive_at("l", &at),
             q.cap + 1
         )
     };
@@ -399,7 +445,12 @@ pub async fn candidates(
     h: &History,
     budget: &Budget,
 ) -> Result<Candidates> {
-    let (sql, params) = line_sql(q, h)?;
+    let lineages = if q.scope_first {
+        Vec::new()
+    } else {
+        scope_lineages(client, q, h).await?
+    };
+    let (sql, params) = line_sql(q, h, &lineages)?;
     let mut out = Candidates::default();
     let started = std::time::Instant::now();
     let mut found =
@@ -523,7 +574,7 @@ async fn in_tree_order(
             cap: UNCAPPED,
             scope_first: true,
         };
-        let (sql, params) = line_sql(&sub, h)?;
+        let (sql, params) = line_sql(&sub, h, &[])?;
         let mut sub_out = Candidates::default();
         let mut rows = crate::engine::stream_rows(
             client,
@@ -608,8 +659,9 @@ pub async fn line_ranges(
 
 /// The lines that match `cond` (on `l.line`), as FROM items giving `l.id`
 /// and `l.line`: the commit's (`$1`), or with `whole` false those of the
-/// versions `$1`, which may be mounted from other commits. The trigram scan
-/// runs once, fenced, before the versions are joined.
+/// versions `$1`, which may be mounted from other commits, whose lineages
+/// are `$3` (see `lineages_of`). The trigram scan runs once, fenced, before
+/// the versions are joined.
 pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
     let s = checked(&h.schema)?;
     Ok(if whole {
@@ -627,9 +679,7 @@ pub fn lines_matching(h: &History, cond: &str, whole: bool) -> Result<String> {
         format!(
             "(SELECT l.id, l.lineage, l.line, l.lo, l.hi, l.alive \
               FROM {s}.code_line_instances l \
-              WHERE l.lineage = ANY(ARRAY(SELECT lineage FROM {s}.code_file_versions \
-                                          WHERE id = ANY($1::int4[]))) \
-                AND {cond} OFFSET 0) l \
+              WHERE l.lineage = ANY($3::int4[]) AND {cond} OFFSET 0) l \
              JOIN (SELECT lineage, lo FROM {s}.code_file_versions \
                    WHERE id = ANY($1::int4[]) OFFSET 0) v \
              ON v.lineage = l.lineage AND {}",
@@ -665,5 +715,48 @@ mod tests {
         assert_eq!(spans, Spans(vec![(1, 5), (9, i64::MAX)]));
         assert!(spans.contains(4) && !spans.contains(5) && spans.contains(1 << 40));
         assert!(checked("x; DROP TABLE y").is_err());
+    }
+
+    #[test]
+    fn trigram_scans_bind_the_scopes_lineages() {
+        let h = History {
+            schema: "pghacker_history".into(),
+            addr: 42,
+            build: "build".into(),
+        };
+        let ids = [7, 8, 9];
+        for (mounted, file_ids, scope_first) in [
+            (false, None, false),
+            (false, Some(&ids[..]), false),
+            (true, Some(&ids[..]), false),
+            (false, Some(&ids[..]), true),
+            (true, Some(&ids[..]), true),
+        ] {
+            let q = LineQuery {
+                snapshot_id: 1,
+                history: Some(&h),
+                mounted,
+                file_ids,
+                require: vec![],
+                reject: vec![],
+                cap: 10,
+                scope_first,
+            };
+            let (sql, params) = line_sql(&q, &h, &[3, 4]).unwrap();
+            // A subquery's array is compared member by member on every row.
+            assert!(!sql.contains("ARRAY(SELECT"), "{sql}");
+            assert_eq!(
+                sql.contains("l.lineage = ANY($2::int4[])"),
+                !scope_first,
+                "{sql}"
+            );
+            let max = (1..=9).rev().find(|n| sql.contains(&format!("${n}")));
+            assert_eq!(max, Some(params.len()), "{sql}");
+        }
+        for whole in [true, false] {
+            let sql = lines_matching(&h, "l.line ~* $2", whole).unwrap();
+            assert!(!sql.contains("ARRAY(SELECT"), "{sql}");
+            assert_eq!(sql.contains("ANY($3::int4[])"), !whole, "{sql}");
+        }
     }
 }

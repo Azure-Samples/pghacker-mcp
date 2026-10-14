@@ -1095,8 +1095,13 @@ async fn similar_names(
     } else {
         "l.file_id = ANY($1::int4[])"
     };
-    // In the history, $1 is the commit (or the files) and $2 the pattern.
+    // In the history, $1 is the commit (or the files) and $2 the pattern;
+    // $3 is the files' lineages.
     let history = snapshot.history.as_ref();
+    let lineages = match (history, whole) {
+        (Some(h), false) => crate::history::lineages_of(client, h, &ids).await?,
+        _ => Vec::new(),
+    };
     let mut similar = Similar::default();
     let mut timed_out = false;
     for name in &names {
@@ -1121,7 +1126,11 @@ async fn similar_names(
         }
         let rows = match (history, whole) {
             (Some(h), true) => client.query(spell_sql.as_str(), &[&h.addr, &id]).await,
-            (Some(_), false) => client.query(spell_sql.as_str(), &[&ids, &id]).await,
+            (Some(_), false) => {
+                client
+                    .query(spell_sql.as_str(), &[&ids, &id, &lineages])
+                    .await
+            }
             (None, true) => client.query(spell_sql.as_str(), &[&snapshot.id, &id]).await,
             (None, false) => client.query(spell_sql.as_str(), &[&ids, &id]).await,
         };
@@ -1160,7 +1169,11 @@ async fn similar_names(
         }
         let rows = match (history, whole) {
             (Some(h), true) => client.query(sim_sql.as_str(), &[&h.addr, &word]).await,
-            (Some(_), false) => client.query(sim_sql.as_str(), &[&ids, &word]).await,
+            (Some(_), false) => {
+                client
+                    .query(sim_sql.as_str(), &[&ids, &word, &lineages])
+                    .await
+            }
             (None, true) => client.query(sim_sql.as_str(), &[&snapshot.id, &word]).await,
             (None, false) => client.query(sim_sql.as_str(), &[&ids, &word]).await,
         };
