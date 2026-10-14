@@ -535,7 +535,10 @@ impl<'r, L: Ledger> Walker<'r, L> {
                 rewrites: Some(gix::diff::Rewrites {
                     copies: None,
                     percentage: Some(0.5),
-                    limit: 1000,
+                    // git's -M50% with its default diff.renameLimit of 1000,
+                    // which bounds sources x destinations by 1000 squared;
+                    // gix bounds the product by `limit` itself.
+                    limit: 1_000_000,
                     track_empty: false,
                 }),
             },

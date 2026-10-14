@@ -835,3 +835,33 @@ async fn commit_files_and_metadata_match_git() {
     assert!(fix_row.get::<_, String>(6).starts_with("2025-01-01"));
     assert!(fix_row.get::<_, String>(7).starts_with("2026-01-01"));
 }
+
+#[tokio::test]
+async fn renames_in_large_moves_are_followed() {
+    // 60 files moved with an edit each: 3,600 candidate pairs, more than
+    // gix's default limit lets it compare, though git compares them.
+    let mut r = Repo::new();
+    for i in 0..60 {
+        r.write(
+            &format!("old/f{i}.c"),
+            numbered(&format!("f{i}"), 20).as_bytes(),
+        );
+    }
+    r.commit("add");
+    for i in 0..60 {
+        r.remove(&format!("old/f{i}.c"));
+        let text = numbered(&format!("f{i}"), 20).replace(&format!("f{i} line 1\n"), "moved\n");
+        r.write(&format!("new/f{i}.c"), text.as_bytes());
+    }
+    let moved = r.commit("move");
+    let renames = r
+        .git(&["show", "--format=", "-M50%", "--name-status", &moved])
+        .lines()
+        .filter(|l| l.starts_with('R'))
+        .count();
+    assert_eq!(renames, 60);
+    let db = TestDb::create().await.unwrap();
+    let stats = build(&db, &r.path(), Vec::new()).await;
+    assert_eq!(stats.walk.renames, 60);
+    assert_eq!(stats.stored.lineages, 60);
+}

@@ -297,12 +297,16 @@ async fn main() -> Result<()> {
                 .map(|l| &l[..12])
                 .collect();
             let mut mismatched = 0;
+            let verbose = std::env::var_os("PARITY_VERBOSE").is_some();
             for (l, t) in ours.lines.iter().zip(&theirs) {
                 lines[mode] += 1;
                 if l.commit == *t {
                     agree[mode] += 1;
                 } else {
                     mismatched += 1;
+                    if verbose && mismatched <= 5 {
+                        println!("  {head} {path}:{} ours {} git {t}", l.line, l.commit);
+                    }
                 }
             }
             if ours.lines.len() != theirs.len() {
