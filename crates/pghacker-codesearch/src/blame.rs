@@ -36,6 +36,9 @@ pub struct BlameArgs {
     /// For each line, the commit that removed it after this version, on this branch (git blame --reverse); none while the branch's head still has it.
     #[serde(default)]
     pub reverse: bool,
+    /// For each line, the earliest patch posted to the lists that added it to this file (under any of its names): where the line was first proposed.
+    #[serde(default)]
+    pub proposals: bool,
     /// PostgreSQL version: a major version such as 19, a release such as 18.3, a branch or tag, a commit SHA, or <ref>@<date>. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
@@ -49,6 +52,107 @@ pub struct BlameLine {
     /// while the line remains.
     pub commit: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<Proposal>,
+}
+
+/// The earliest posted patch that added a line to its file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Proposal {
+    pub thread_id: i64,
+    pub message_id: String,
+    pub date: String,
+    pub author: String,
+}
+
+/// A line shorter than this, trimmed, is too common to trace.
+const MIN_TRACED: usize = 8;
+/// The most candidate patches read when tracing proposals.
+const MAX_PROPOSAL_PATCHES: i64 = 200;
+
+/// The earliest posted patch that added each line's text to the file, which
+/// was at `paths` over its history. Mail tables or the patch index may be
+/// missing: then none.
+async fn proposals(
+    client: &impl GenericClient,
+    texts: &[&str],
+    paths: &[String],
+) -> Result<HashMap<String, Proposal>> {
+    let mut out = HashMap::new();
+    let traced: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|t| t.trim().len() >= MIN_TRACED && t.chars().any(char::is_alphanumeric))
+        .collect();
+    if traced.is_empty() {
+        return Ok(out);
+    }
+    let Ok(rows) = client
+        .query(
+            "SELECT t.id, t.line FROM unnest($1::text[]) w(line) \
+             JOIN patch_texts t ON t.kind = '+' AND md5(t.line) = md5(w.line) AND t.line = w.line",
+            &[&traced],
+        )
+        .await
+    else {
+        return Ok(out);
+    };
+    let text_of: HashMap<i32, String> = rows.iter().map(|r| (r.get(0), r.get(1))).collect();
+    let ids: Vec<i32> = text_of.keys().copied().collect();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let candidates = client
+        .query(
+            &format!(
+                "SELECT p.id, m.thread_id, m.message_id, \
+                        to_char(m.sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), m.from_name, p.content, \
+                        ARRAY(SELECT u.n FROM unnest(p.text_ids) WITH ORDINALITY u(id, n) \
+                              WHERE u.id = ANY($1) ORDER BY u.n), \
+                        ARRAY(SELECT u.id FROM unnest(p.text_ids) WITH ORDINALITY u(id, n) \
+                              WHERE u.id = ANY($1) ORDER BY u.n) \
+                 FROM patches p JOIN messages m ON m.id = p.message_id \
+                 WHERE p.text_ids && $1 AND p.paths && $2 \
+                 ORDER BY m.sent_at NULLS LAST, p.id LIMIT {MAX_PROPOSAL_PATCHES}"
+            ),
+            &[&ids, &paths],
+        )
+        .await?;
+    for r in candidates {
+        if out.len() == text_of.len() {
+            break;
+        }
+        let at: Vec<i64> = r.get(6);
+        let found: Vec<i32> = r.get(7);
+        if found.iter().all(|id| out.contains_key(&text_of[id])) {
+            continue;
+        }
+        // Only lines the patch adds to this file count.
+        let (stats, lines) = pghacker_mail::patch::parse_diff(r.get(5));
+        for (n, id) in at.into_iter().zip(found) {
+            let text = &text_of[&id];
+            if out.contains_key(text) {
+                continue;
+            }
+            let in_file = lines
+                .get((n - 1) as usize)
+                .and_then(|l| l.file)
+                .and_then(|k| stats.paths.get(k))
+                .is_some_and(|p| paths.contains(p));
+            if in_file {
+                out.insert(
+                    text.clone(),
+                    Proposal {
+                        thread_id: r.get(1),
+                        message_id: r.get(2),
+                        date: r.get::<_, Option<String>>(3).unwrap_or_default(),
+                        author: r.get(4),
+                    },
+                );
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A commit, once per blame.
@@ -338,7 +442,27 @@ pub async fn blame(
             line: start + n as u32,
             commit,
             text: known[id].line.clone(),
+            proposed: None,
         });
+    }
+    if args.proposals && !result.lines.is_empty() {
+        let paths: Vec<String> = client
+            .query(
+                &format!(
+                    "SELECT DISTINCT v.path FROM {s}.code_file_versions v \
+                     WHERE v.lineage = (SELECT lineage FROM {s}.code_file_versions WHERE id = $1)"
+                ),
+                &[&file.id],
+            )
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let texts: Vec<&str> = result.lines.iter().map(|l| l.text.as_str()).collect();
+        let found = proposals(client, &texts, &paths).await?;
+        for line in &mut result.lines {
+            line.proposed = found.get(&line.text).cloned();
+        }
     }
     Ok(result)
 }

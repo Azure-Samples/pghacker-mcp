@@ -46,8 +46,8 @@ A trigram GIN index on `line` finds candidates; a btree on (`lineage`, `hi`, `lo
 | Tool | Like | What it adds |
 | --- | --- | --- |
 | `search`, `grep`, `read_file`, `list_files` | ripgrep, grep, cat, ls | With the history: any commit and virtual folders; search's `history` argument finds every line a range of commits had, with the commits that added and removed it |
-| `blame` | `git blame` | Passes through `.git-blame-ignore-revs` (pgindent) by one-for-one links; `reverse` names the commit that removed each line |
-| `get_commit` | `git show` | Trailers, linked threads, back-patch siblings, first releases, diffstat, diff rendered from the weave |
+| `blame` | `git blame` | Passes through `.git-blame-ignore-revs` (pgindent) by one-for-one links; `reverse` names the commit that removed each line; `proposals` names the earliest posted patch that added each line |
+| `get_commit` | `git show` | Trailers, linked threads and the posted patch the commit matches best, back-patch siblings, first releases, diffstat, diff rendered from the weave |
 | `search_commits` | `git log` | Range, message, author, paths, dates; `-G` and `-S` read from the weave |
 | `search_patches` | grep over the archive's patches | Lines by thread, first and latest version, the commit that landed them |
 

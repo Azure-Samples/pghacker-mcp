@@ -74,7 +74,8 @@ to the source root, or below /branch/<name>/, /tag/<name>/ or /commit/<rev>/), o
 and end_line (at most 2000 lines), and version. It follows renames and, by default, passes \
 through the reformatting commits (pgindent runs) in .git-blame-ignore-revs to the commit that \
 wrote the line. reverse gives the commit that removed each line after this version, on its \
-branch. Commits come once each, with date, author, branch and subject.";
+branch. Commits come once each, with date, author, branch and subject. With proposals, each \
+line also names the earliest patch posted to the lists that added it to this file.";
 
 /// The get_commit tool's description, for agents.
 pub const GET_COMMIT_DESCRIPTION: &str = "\

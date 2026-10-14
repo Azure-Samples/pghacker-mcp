@@ -69,6 +69,87 @@ pub struct ThreadLink {
     pub subject: Option<String>,
 }
 
+/// A posted patch, and how much of a commit's added lines it has.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CommittedPatch {
+    pub message_id: String,
+    pub thread_id: i64,
+    pub date: String,
+    pub author: String,
+    pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    /// The share of the commit's distinct added lines the patch adds.
+    pub share: f64,
+}
+
+/// The most added lines compared with patches.
+const MAX_COMPARED_LINES: i64 = 5_000;
+
+/// The linked threads' patch whose added lines best cover the commit's, if
+/// any covers at least a tenth. Mail tables or the patch index may be
+/// missing: then none.
+async fn committed_patch(
+    client: &impl GenericClient,
+    s: &str,
+    addr: i64,
+    threads: &[i64],
+) -> Result<Option<CommittedPatch>> {
+    if threads.is_empty() {
+        return Ok(None);
+    }
+    let Ok(rows) = client
+        .query(
+            &format!(
+                "SELECT DISTINCT t.id FROM (SELECT DISTINCT line FROM {s}.code_line_instances \
+                     WHERE lo = $1 AND btrim(line) <> '' LIMIT {MAX_COMPARED_LINES}) l \
+                 JOIN patch_texts t ON t.kind = '+' AND md5(t.line) = md5(l.line) AND t.line = l.line"
+            ),
+            &[&addr],
+        )
+        .await
+    else {
+        return Ok(None);
+    };
+    let ids: Vec<i32> = rows.iter().map(|r| r.get(0)).collect();
+    let added: i64 = client
+        .query_one(
+            &format!(
+                "SELECT count(*) FROM (SELECT DISTINCT line FROM {s}.code_line_instances \
+                 WHERE lo = $1 AND btrim(line) <> '' LIMIT {MAX_COMPARED_LINES}) l"
+            ),
+            &[&addr],
+        )
+        .await?
+        .get(0);
+    if ids.is_empty() || added == 0 {
+        return Ok(None);
+    }
+    let best = client
+        .query_opt(
+            "SELECT m.message_id, m.thread_id, to_char(m.sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), \
+                    m.from_name, p.filename, p.series_version, \
+                    (SELECT count(DISTINCT u) FROM unnest(p.text_ids) u WHERE u = ANY($2)) AS n \
+             FROM patches p JOIN messages m ON m.id = p.message_id \
+             WHERE m.thread_id = ANY($1) AND p.text_ids && $2 \
+             ORDER BY n DESC, m.sent_at DESC NULLS LAST, p.id DESC LIMIT 1",
+            &[&threads, &ids],
+        )
+        .await?;
+    Ok(best.and_then(|r| {
+        let share = r.get::<_, i64>(6) as f64 / added as f64;
+        (share >= 0.1).then(|| CommittedPatch {
+            message_id: r.get(0),
+            thread_id: r.get(1),
+            date: r.get::<_, Option<String>>(2).unwrap_or_default(),
+            author: r.get(3),
+            filename: r.get(4),
+            version: r.get(5),
+            share: (share * 1000.0).round() / 1000.0,
+        })
+    }))
+}
+
 /// A file the commit changed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ChangedFile {
@@ -84,7 +165,7 @@ pub struct ChangedFile {
 }
 
 /// get_commit's answer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CommitResult {
     pub repo: String,
     pub sha: String,
@@ -99,6 +180,10 @@ pub struct CommitResult {
     pub message: String,
     pub trailers: BTreeMap<String, Vec<String>>,
     pub threads: Vec<ThreadLink>,
+    /// The patch in a linked thread whose added lines best cover the
+    /// commit's: the version that was committed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committed_patch: Option<CommittedPatch>,
     /// The same change on other branches.
     pub backpatches: Vec<CommitRef>,
     pub releases: Vec<FirstRelease>,
@@ -338,6 +423,7 @@ pub async fn get_commit(
         subject: row.get(6),
         message: row.get(7),
         trailers,
+        committed_patch: None,
         threads,
         backpatches,
         releases,
@@ -347,6 +433,8 @@ pub async fn get_commit(
         diff: String::new(),
         cut: false,
     };
+    let linked: Vec<i64> = result.threads.iter().filter_map(|t| t.thread_id).collect();
+    result.committed_patch = committed_patch(client, s, addr, &linked).await?;
     if args.diff == Some(false) {
         return Ok(result);
     }

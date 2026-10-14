@@ -1621,4 +1621,67 @@ async fn search_patches_finds_lines_by_thread() {
         [1]
     );
     assert!(!by.incomplete);
+
+    // The commit's added lines are all in v2, posted in its linked thread.
+    let shown = pghacker_codesearch::get_commit(
+        &reader,
+        SCHEMA,
+        "postgres",
+        &pghacker_codesearch::GetCommitArgs {
+            commit: landed_sha.clone(),
+            diff: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // Where each line was first proposed.
+    let snapshot = pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", Some("master"))
+        .await
+        .unwrap();
+    let blamed = pghacker_codesearch::blame(
+        &reader,
+        &snapshot,
+        &pghacker_codesearch::BlameArgs {
+            path: "src/a.c".into(),
+            proposals: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let proposed: Vec<(String, Option<String>)> = blamed
+        .lines
+        .iter()
+        .map(|l| {
+            (
+                l.text.clone(),
+                l.proposed.as_ref().map(|p| p.message_id.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        proposed,
+        [
+            ("int".to_owned(), None),
+            ("x(void)".to_owned(), None),
+            (
+                "\tfoo_bar(1);".to_owned(),
+                Some("v1@example.org".to_owned())
+            ),
+            (
+                "\tfoo_bar(2);".to_owned(),
+                Some("v2@example.org".to_owned())
+            ),
+        ]
+    );
+    let committed = shown.committed_patch.expect("a committed patch");
+    assert_eq!(
+        (
+            committed.message_id.as_str(),
+            committed.thread_id,
+            committed.share
+        ),
+        ("v2@example.org", 1, 1.0)
+    );
 }
