@@ -24,8 +24,8 @@
   {
     "id": "q03",
     "kind": "history",
-    "question": "When was JSON_TABLE committed to PostgreSQL, by whom, and which part of the original proposal was left out?",
-    "gold_answer": "Amit Langote committed JSON_TABLE in April 2024, for PostgreSQL 17. The PLAN clause was left out, to be pursued in a new CommitFest entry. Supporting detail: he marked CommitFest entry 4377 committed on 8 April 2024.",
+    "question": "When was the JSON_TABLE that shipped in PostgreSQL 17 committed, by whom, and which part of the original proposal did not ship with it?",
+    "gold_answer": "Amit Langote committed JSON_TABLE in April 2024, for PostgreSQL 17: its basic functionality on 4 April (commit de3600452b61d1bc3967e9e37e86db8956c8f577) and NESTED paths and columns on 8 April (commit bb766cde63b4f624d029b34c9cdd3d0a94fd5b46). The PLAN clause did not ship: it was left out, to be pursued in a new CommitFest entry. Supporting detail: he marked CommitFest entry 4377 committed on 8 April 2024. An earlier JSON_TABLE, committed by Andrew Dunstan in April 2022 for PostgreSQL 15 with its PLAN clauses, was reverted in September 2022 before that release.",
     "gold_citations": [
       { "message_id": "CA+HiwqFosrEbh_9KPX5hsd+n80F1m6CSVgNLYtvhhO1fsrBk6w@mail.gmail.com", "quote": "Let's work on the remaining PLAN clause with a new entry in the next CF" },
       { "message_id": "CA+HiwqGGF2K9EDfN+Zw-=dzPFRk0PTVdMw1n4joXNhhWJVcitA@mail.gmail.com", "quote": "Pushed after fixing these and a few other issues." }
@@ -253,11 +253,12 @@
   {
     "id": "q25",
     "kind": "time-travel",
-    "question": "What was the default of password_encryption in PostgreSQL 13, what is it in PostgreSQL 14, and why did it change?",
-    "gold_answer": "md5 in PostgreSQL 13, and scram-sha-256 from PostgreSQL 14. Peter Eisentraut proposed in May 2020 changing the default to nudge people to adopt SCRAM, since passwords were still hashed with MD5 by default, and committed the change on 10 June 2020 (commit c7eab0e97e6cf1d0c136c22269c10ae11ba874c4, reviewed by Jonathan Katz), after 13 had branched, so it first shipped in 14. Supporting detail: the same commit removed the legacy values on/true/yes/1, which meant md5, leaving only scram-sha-256 and md5; Tom Lane asked whether client libraries were SCRAM-ready and Magnus Hagander replied that nearly all listed drivers were; Stephen Frost supported the change.",
+    "question": "What was the default of password_encryption in PostgreSQL 13, what is it in PostgreSQL 14, why did it change, and which commit changed it?",
+    "gold_answer": "md5 in PostgreSQL 13, and scram-sha-256 from PostgreSQL 14. Peter Eisentraut proposed in May 2020 changing the default to nudge people to adopt SCRAM, since passwords were still hashed with MD5 by default. Tom Lane argued against making the change in 13: there would be a full year when still-supported versions of PostgreSQL couldn't do SCRAM, so clients would likely fail to connect to an up-to-date server, and changing the default after beta1 would invalidate portability testing done against it. Eisentraut committed the change on 10 June 2020 (commit c7eab0e97e6cf1d0c136c22269c10ae11ba874c4, reviewed by Jonathan Katz), after 13 had branched, so it first shipped in 14. Supporting detail: the same commit removed the legacy values on/true/yes/1, which meant md5, leaving only scram-sha-256 and md5; Tom Lane asked whether client libraries were SCRAM-ready and Magnus Hagander replied that nearly all listed drivers were; Stephen Frost supported the change.",
     "gold_citations": [
       { "message_id": "d5b0ad33-7d94-bdd1-caac-43a1c782cab2@2ndquadrant.com", "quote": "perhaps we should change the default for password_encryption to nudge people to adopt SCRAM" },
-      { "message_id": "20200522144638.GK3418@tamriel.snowman.net", "quote": "I'm +1 on moving the default for password_encryption to be scram." }
+      { "message_id": "20200522144638.GK3418@tamriel.snowman.net", "quote": "I'm +1 on moving the default for password_encryption to be scram." },
+      { "message_id": "10329.1590182503@sss.pgh.pa.us", "quote": "If we do it in v13, there'll be a full year where still-supported versions of PG can't do SCRAM" }
     ],
     "gold_commits": ["c7eab0e97e6cf1d0c136c22269c10ae11ba874c4"]
   },
