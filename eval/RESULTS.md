@@ -1,4 +1,4 @@
-# Wave 1 evaluation
+# pghacker-mcp evaluation
 
 20 of 20 questions passed (judged correct, with valid verbatim citations).
 Answer model: `github-copilot:gpt-6-luna`; judge: `github-copilot:gpt-6-luna`; run 2026-10-09T10:54:49.510Z.

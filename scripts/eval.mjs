@@ -6,7 +6,7 @@ import { callTool } from "./lib/services.mjs";
 import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 import { checkCommits, citedCommits, lastJsonBlock, parseCsv, quoteIn, resultsTable } from "./lib/evalcheck.mjs";
 
-// The mail and commit-history evaluation (npm start must be running):
+// The evaluation (npm start must be running):
 //   npm run eval -- [--questions eval/questions.json] [--only q01,q02] [--concurrency 3] [--results eval/RESULTS.md]
 // To evaluate a deployment, start the app with PGHACKER_AGENT_MCP_URL set to
 // its public /mcp, so that the agents use it, and pass the same URL as

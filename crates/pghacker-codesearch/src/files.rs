@@ -8,8 +8,7 @@ use tokio_postgres::GenericClient;
 
 use crate::snapshot::{FileTable, Snapshot, shown};
 
-/// The most lines and target byte cap for read_file's formatted content;
-/// the first line is always returned whole, even if it exceeds the byte cap.
+/// The most lines and bytes read_file returns; the first line comes whole.
 pub const MAX_READ_LINES: u32 = 2_000;
 pub const MAX_READ_BYTES: usize = 200_000;
 /// Default and largest list_files pages.
@@ -25,7 +24,7 @@ pub struct ReadFileArgs {
     /// The first line to read, from 1. Default 1.
     #[serde(default)]
     pub start_line: Option<u32>,
-    /// The last line to read. Default: as many as fit (2000 lines, 200000 formatted bytes); the first line is always returned whole.
+    /// The last line to read. Default: as many as fit (2000 lines, 200 KB).
     #[serde(default)]
     pub end_line: Option<u32>,
     /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
@@ -86,7 +85,7 @@ pub struct Entry {
     /// Files below (folders).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<u32>,
-    /// Not text to the tools: read_file refuses it and commit-tree searches skip it.
+    /// Not text: read_file refuses it, and searches at a commit skip it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub binary: bool,
     /// A commit's date and subject, in a listing of /commit.

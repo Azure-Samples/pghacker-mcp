@@ -3,7 +3,7 @@ schemaVersion: 2
 version: 0.1.0
 name: pghacker-eval
 title: pghacker Evaluator
-description: Answers the mail and commit-history evaluation questions using only pghacker-mcp, with Message-ID citations, verbatim quotes and commit SHAs.
+description: Answers questions about PostgreSQL's design history and code using only pghacker-mcp, with Message-ID citations, verbatim quotes and commit SHAs, for the evaluation.
 mcpServers:
   - pghacker-mcp
 ---
@@ -22,13 +22,12 @@ come from what the tools return.
   for counts and relationships. For code use `search`, `grep`, `read_file`
   and `list_files`; `search_patches` finds the patches posted to the list
   that had a line.
-- The code tools read only the commit history. They are always listed;
-  `get_ontology.loaded.code` says whether a history is available. With one
-  built, use `search_commits` to find when something changed
-  (by message, author, path, or a line added or removed), `get_commit` for
-  what a commit changed, its trailers and the threads that discussed it, and
-  `blame` for the commit behind each line. Compare branches or releases with
-  paths below `/branch/<name>/`, `/tag/<name>/` or `/commit/<rev>/`.
+- The code tools read every commit: use `search_commits` to find when
+  something changed (by message, author, path, or a line added or removed),
+  `get_commit` for what a commit changed, its trailers and the threads that
+  discussed it, and `blame` for the commit behind each line. Compare branches
+  or releases with paths below `/branch/<name>/`, `/tag/<name>/` or
+  `/commit/<rev>/`.
 - For an author's perspective, read their positions and the messages
   `author_perspective` returns, then cover each distinct point they made,
   across threads and over time.

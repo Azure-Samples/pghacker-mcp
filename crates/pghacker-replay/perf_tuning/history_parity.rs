@@ -1,11 +1,10 @@
 //! Checks a commit history build against git, on random commits and
 //! files: get_commit's diff against git show, file by file; its changed
 //! files against git show --numstat; and blame against git blame, plain and
-//! with the head's .git-blame-ignore-revs, for random files at the
-//! representative heads of the original parity sample (those the history
-//! has; else all of its branches). Changes the history leaves out by design (symlinks,
-//! submodules, modes alone) are counted apart. Prints agreement and the
-//! first differences.
+//! with the head's .git-blame-ignore-revs, for random files at 15 branch
+//! heads (those the history has; else all of its branches). Changes the
+//! history leaves out by design (symlinks, submodules, modes alone) are
+//! counted apart. Prints agreement and the first differences.
 //!
 //! The history is read as pgh_reader in schema --schema (default pghacker,
 //! where it is installed) of database --database (default the app's, from
@@ -24,7 +23,7 @@ use pghacker_codesearch::{BlameArgs, GetCommitArgs, blame, get_commit};
 use pghacker_core::config::{Env, with_database};
 use pghacker_core::db;
 
-/// Representative branch heads from the original parity sample, not a coverage limit.
+/// The branch heads sampled, newest first.
 const HEADS: [&str; 15] = [
     "master",
     "REL_19_STABLE",

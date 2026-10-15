@@ -25,8 +25,7 @@ code with citations. Mail: pgsql-hackers threads, authors, and extracted feature
 (search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full \
 text, semantic search or both; search_patches finds lines in the patches posted, by thread, and the commits that \
 added them. Graph and SQL: get_ontology describes the AGE graph pghacker_graph and the tables; query runs \
-read-only SQL and Cypher. Code tools read only the commit history; get_ontology reports whether one is \
-installed. Over every commit of every branch and tag: search (first-class code search), \
+read-only SQL and Cypher. Code, over every commit of every branch and tag: search (first-class code search), \
 grep (grep command lines), read_file and list_files read the version named (a major version, release, branch, \
 tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) and paths below \
 /branch/<name>/, /tag/<name>/ or /commit/<rev>/; blame, get_commit and search_commits answer as git blame, \
@@ -117,7 +116,7 @@ pub static TOOLS: &[ToolSpec] = &[
         effect: READ,
         schema: schema::<code::SearchPatchesArgs>,
     },
-    // History tools are always listed; reading code requires a built history.
+    // git blame, show and log.
     ToolSpec {
         name: "blame",
         description: code::BLAME_DESCRIPTION,

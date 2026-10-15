@@ -1,7 +1,7 @@
-# The local test slices: what PGHACKER_SOURCES=test-slices retrieves when a
-# source is added. PGHACKER_SOURCES=open, used in Azure, accepts chosen months,
-# ranges or whole archives instead. PostgreSQL's code comes from the commit
-# history, which holds every branch, tag and commit.
+# The test slices: what the indexer retrieves when a list is added with
+# PGHACKER_SOURCES=test-slices, the default (Azure's open takes any months).
+# PostgreSQL's code comes from the commit history, which holds every branch,
+# tag and commit.
 
 [mail]
 list = "pgsql-hackers"

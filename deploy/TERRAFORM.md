@@ -49,7 +49,7 @@ The first apply runs with `create_app = false`: everything but the app, includin
 
 ## Key Vault secrets
 
-The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps. Foundry's key authentication is disabled: the subscription's policy refuses local authentication, so the identity is a *Cognitive Services OpenAI User* of the account, and the container's Foundry proxy requests its tokens (`AZURE_CLIENT_ID`). No Foundry access key is passed to the app.
+The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps. Foundry's key authentication is off, as the subscription's policy requires: the identity is a *Cognitive Services OpenAI User* of the account, and the container's Foundry proxy requests its tokens (`AZURE_CLIENT_ID`).
 
 | Secret | Made by | Read as | By |
 |---|---|---|---|
@@ -112,7 +112,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `github_org`, `github_team` | `"example-org"`, `"example-team"` | Placeholder access settings; replace with your organization and team (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`) |
 | `github_users` | `[]` | More GitHub logins allowed in (`PGHACKER_GITHUB_USERS`, omitted when empty) |
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
-| `app_env` | `{}` | More supervisor environment variables, such as `RUST_LOG`, `PGHACKER_CODE_HISTORY` and the extraction-order settings; can't replace the settings above or set `OAUTH2_PROXY_*`. Child processes receive only the supervisor's explicit allowlist, not every `app_env` entry. |
+| `app_env` | `{}` | More app environment variables, such as `RUST_LOG`, `PGHACKER_CRAWL`, `PGHACKER_CODE_HISTORY` and the extraction order's; can't replace the settings above or set `OAUTH2_PROXY_*`. Each process gets only those it uses |
 | `front_door_endpoint_name` | `"pghacker"` | Front Door endpoint, `<name>-<hash>.<zone>.azurefd.net`; changing it changes the public host name |
 
 ## Outputs
@@ -135,4 +135,4 @@ None is secret. `terraform output -raw <name>` prints one.
 
 ## Secrets in state
 
-State holds the generated secrets (in the `random_password` resources, the vault secrets, and HorizonDB's create and password requests). The pinned AzureRM provider does not retrieve Foundry access keys while `local_auth_enabled = false`; state retained from an earlier key-enabled configuration may still contain them. Anyone who can read the state container can read its secrets: give container access to appliers only, and keep plan files, which hold them too, out of version control.
+State holds the generated secrets (in the `random_password` resources, the vault secrets, and HorizonDB's create and password requests), but no Foundry key: with key authentication off, the provider doesn't read the keys. Anyone who can read the state container can read the secrets: give container access to appliers only, and keep plan files, which hold them too, out of version control.

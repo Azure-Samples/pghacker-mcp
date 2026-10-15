@@ -6,7 +6,7 @@ use pghacker_core::config::Env;
 use pghacker_mail::{ArchiveClient, ArchiveConfig, parse};
 use tempfile::TempDir;
 
-/// The SQL/PGQ thread, one of the wave 1 seeds.
+/// The SQL/PGQ thread, one of the test slices' seeds.
 const SEED: &str = "CAExHW5suNPNFcphpabGmJnmF6EmQ2=oJ+KLWAE+o6WWScaSuDQ@mail.gmail.com";
 
 #[tokio::test]
