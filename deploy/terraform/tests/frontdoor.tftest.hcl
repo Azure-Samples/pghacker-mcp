@@ -1,6 +1,6 @@
 # Front Door: one uncached HTTPS route for every path to the app's own host
-# name. Every provider is mocked, so runs apply to synthetic state, never to
-# Azure.
+# name, and with a custom domain, a route of its own for its public paths.
+# Every provider is mocked, so runs apply to synthetic state, never to Azure.
 
 variables {
   subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -51,10 +51,11 @@ run "front_door_before_the_app" {
   assert {
     condition = (
       length(azurerm_cdn_frontdoor_custom_domain.this) == 0
-      && length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids) == 0
+      && try(length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids), 0) == 0
+      && length(azurerm_cdn_frontdoor_route.public) == 0
       && output.front_door_custom_domain_validation == null
     )
-    error_message = "Without a custom domain, no domain resource, route association or ownership TXT record should be created."
+    error_message = "Without a custom domain, no domain resource, route for it or ownership TXT record should be created."
   }
 }
 
@@ -132,7 +133,7 @@ run "front_door_passes_everything_through" {
   }
 }
 
-run "custom_domain_shares_the_route_and_is_canonical" {
+run "custom_domain_serves_only_the_public_paths" {
   state_key = "custom"
 
   variables {
@@ -154,21 +155,37 @@ run "custom_domain_shares_the_route_and_is_canonical" {
 
   assert {
     condition = (
-      azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids == toset([azurerm_cdn_frontdoor_custom_domain.this[0].id])
+      try(length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids), 0) == 0
       && azurerm_cdn_frontdoor_route.this.link_to_default_domain
-      && azurerm_cdn_frontdoor_route.this.supported_protocols == toset(["Https"])
-      && azurerm_cdn_frontdoor_route.this.forwarding_protocol == "HttpsOnly"
-      && length(azurerm_cdn_frontdoor_route.this.cache) == 0
+      && azurerm_cdn_frontdoor_route.this.patterns_to_match == tolist(["/*"])
+    )
+    error_message = "Front Door's own host name alone must keep every path: the portal and its sign-in."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_route.public) == 1
+      && azurerm_cdn_frontdoor_route.public[0].cdn_frontdoor_custom_domain_ids == toset([azurerm_cdn_frontdoor_custom_domain.this[0].id])
+      && !azurerm_cdn_frontdoor_route.public[0].link_to_default_domain
+      && azurerm_cdn_frontdoor_route.public[0].patterns_to_match == tolist(["/", "/mcp", "/static/*", "/favicon.svg", "/robots.txt"])
+      && azurerm_cdn_frontdoor_route.public[0].cdn_frontdoor_endpoint_id == azurerm_cdn_frontdoor_route.this.cdn_frontdoor_endpoint_id
+      && azurerm_cdn_frontdoor_route.public[0].cdn_frontdoor_origin_group_id == azurerm_cdn_frontdoor_origin_group.this.id
+      && azurerm_cdn_frontdoor_route.public[0].cdn_frontdoor_origin_ids == tolist([azurerm_cdn_frontdoor_origin.this.id])
+      && azurerm_cdn_frontdoor_route.public[0].supported_protocols == toset(["Https"])
+      && azurerm_cdn_frontdoor_route.public[0].forwarding_protocol == "HttpsOnly"
+      && !azurerm_cdn_frontdoor_route.public[0].https_redirect_enabled
+      && length(azurerm_cdn_frontdoor_route.public[0].cache) == 0
       && azurerm_cdn_frontdoor_origin.this.origin_host_header == output.app_fqdn
     )
-    error_message = "Both hostnames must share the uncached HTTPS route without changing the origin's host header."
+    error_message = "The custom domain must have a route of its own to the app, uncached and HTTPS only, for the home page, its files, /mcp and /robots.txt alone."
   }
 
   assert {
     condition = (
       output.public_url == "https://mcp.example.org"
       && output.mcp_url == "https://mcp.example.org/mcp"
-      && output.oauth_callback_url == "https://mcp.example.org/oauth2/callback"
+      && output.portal_url == "https://pghacker-example.mock.azurefd.net/portal/"
+      && output.oauth_callback_url == "https://pghacker-example.mock.azurefd.net/oauth2/callback"
       && output.front_door_host_name == "pghacker-example.mock.azurefd.net"
       && output.front_door_custom_domain_validation == {
         name       = "_dnsauth.mcp.example.org"
@@ -176,15 +193,16 @@ run "custom_domain_shares_the_route_and_is_canonical" {
         expiration = "2026-12-01T00:00:00Z"
       }
     )
-    error_message = "Custom-domain URLs and the ownership TXT record must be exported while preserving the default hostname."
+    error_message = "The home page and MCP URLs must move to the custom domain, the portal and OAuth callback stay on Front Door's host name, and the ownership TXT record be exported."
   }
 
   assert {
     condition = (
       one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_URL"]) == output.public_url
+      && one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PORTAL_URL"]) == "https://pghacker-example.mock.azurefd.net"
       && one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_HOSTS"]) == "mcp.example.org,pghacker-example.mock.azurefd.net,pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io"
     )
-    error_message = "The app must use the custom canonical URL and accept the custom, default and origin hostnames."
+    error_message = "The app must use the custom canonical URL, sign users in on Front Door's host name, and accept the custom, default and origin hostnames."
   }
 }
 
@@ -198,8 +216,12 @@ run "custom_domain_replans" {
   }
 
   assert {
-    condition     = output.public_url == "https://mcp.example.org" && azurerm_cdn_frontdoor_route.this.link_to_default_domain
-    error_message = "Replanning must preserve the custom canonical URL and default-domain route."
+    condition = (
+      output.public_url == "https://mcp.example.org"
+      && azurerm_cdn_frontdoor_route.this.link_to_default_domain
+      && length(azurerm_cdn_frontdoor_route.public) == 1
+    )
+    error_message = "Replanning must preserve the custom canonical URL and both routes."
   }
 }
 
@@ -215,12 +237,14 @@ run "removing_custom_domain_restores_defaults" {
   assert {
     condition = (
       length(azurerm_cdn_frontdoor_custom_domain.this) == 0
-      && length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids) == 0
+      && length(azurerm_cdn_frontdoor_route.public) == 0
+      && try(length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids), 0) == 0
       && output.front_door_custom_domain_validation == null
       && output.public_url == "https://pghacker-example.mock.azurefd.net"
+      && output.portal_url == "https://pghacker-example.mock.azurefd.net/portal/"
       && one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_HOSTS"]) == "pghacker-example.mock.azurefd.net,pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io"
     )
-    error_message = "Removing the optional domain must restore the default URLs and hostname allowlist."
+    error_message = "Removing the optional domain must remove its route and restore the default URLs and hostname allowlist."
   }
 }
 

@@ -8,8 +8,8 @@ output "public_url" {
 }
 
 output "portal_url" {
-  description = "The PilotSwarm portal, behind GitHub sign-in."
-  value       = "${local.public_url}/portal/"
+  description = "The PilotSwarm portal, behind GitHub sign-in, on Front Door's host name (PGHACKER_PORTAL_URL), the only one that serves it: a custom domain serves only the home page and /mcp."
+  value       = "${local.portal_url}/portal/"
 }
 
 output "mcp_url" {
@@ -18,8 +18,8 @@ output "mcp_url" {
 }
 
 output "oauth_callback_url" {
-  description = "The authorization callback URL to register on the GitHub OAuth App, where oauth2-proxy completes sign-in."
-  value       = "${local.public_url}/oauth2/callback"
+  description = "The authorization callback URL to register on the GitHub OAuth App, where oauth2-proxy completes sign-in: on Front Door's host name, the portal's, with or without a custom domain."
+  value       = "${local.portal_url}/oauth2/callback"
 }
 
 output "front_door_host_name" {

@@ -49,7 +49,8 @@ const REQUIRED = [
 
 /** What serving the app needs on top of what the jobs need. */
 const REQUIRED_TO_SERVE = [
-  "PGHACKER_PUBLIC_URL", "OAUTH2_PROXY_CLIENT_ID", "OAUTH2_PROXY_CLIENT_SECRET", "OAUTH2_PROXY_COOKIE_SECRET",
+  "PGHACKER_PUBLIC_URL", "PGHACKER_PORTAL_URL",
+  "OAUTH2_PROXY_CLIENT_ID", "OAUTH2_PROXY_CLIENT_SECRET", "OAUTH2_PROXY_COOKIE_SECRET",
 ];
 
 /** Settings that pass through to every process when present. */
@@ -72,10 +73,18 @@ function list(env, name) {
   return (value(env, name) ?? "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function httpsOrigin(env, name) {
+  const url = new URL(value(env, name));
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.search) {
+    throw new Error(`${name} must be an https origin, such as https://name.azurefd.net.`);
+  }
+  return url;
+}
+
 /**
  * The deployment's settings from the container's environment. `serve`
- * requires what the app needs beyond the jobs: the public URL and
- * oauth2-proxy's secrets.
+ * requires what the app needs beyond the jobs: the public and portal URLs
+ * and oauth2-proxy's secrets.
  */
 export function readAzureConfig(env = process.env, { serve = true, root = APP_ROOT, dataDir = DATA_DIR } = {}) {
   const missing = [...REQUIRED, ...(serve ? REQUIRED_TO_SERVE : [])].filter((name) => value(env, name) === undefined);
@@ -89,11 +98,10 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     throw new Error("PGHACKER_FOUNDRY_ENDPOINT must be the account's origin, such as https://name.openai.azure.com.");
   }
   let publicUrl;
+  let portalUrl;
   if (serve) {
-    publicUrl = new URL(value(env, "PGHACKER_PUBLIC_URL"));
-    if (publicUrl.protocol !== "https:" || publicUrl.pathname !== "/" || publicUrl.search) {
-      throw new Error("PGHACKER_PUBLIC_URL must be an https origin, such as https://name.azurefd.net.");
-    }
+    publicUrl = httpsOrigin(env, "PGHACKER_PUBLIC_URL");
+    portalUrl = httpsOrigin(env, "PGHACKER_PORTAL_URL");
   }
   const start = integer(env, "PGHACKER_CRAWL_START_SESSIONS", 8, { max: 64 });
   const max = integer(env, "PGHACKER_CRAWL_MAX_SESSIONS", 16, { max: 64 });
@@ -134,7 +142,9 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     public: publicUrl
       ? {
         url: publicUrl.origin,
-        hosts: [...new Set([publicUrl.hostname, ...list(env, "PGHACKER_PUBLIC_HOSTS")])],
+        // Front Door's own host, the only one that serves the portal.
+        portalUrl: portalUrl.origin,
+        hosts: [...new Set([publicUrl.hostname, portalUrl.hostname, ...list(env, "PGHACKER_PUBLIC_HOSTS")])],
         frontDoorId: value(env, "PGHACKER_FRONT_DOOR_ID"),
       }
       : undefined,
@@ -371,11 +381,11 @@ export function processEnvironments(config) {
 
 /**
  * oauth2-proxy's arguments: GitHub sign-in for the portal, restricted to
- * the team (or the listed users); /mcp and the home page pass through
- * without it. Secrets come from its environment, never its arguments, which
- * any user can read. `listen` and `origins` (each target's http origin, as
- * scripts/lib/routes.mjs names them) replace the container's addresses, for
- * a test.
+ * the team (or the listed users), on the portal's host alone; /mcp and the
+ * home page pass through without it. Secrets come from its environment,
+ * never its arguments, which any user can read. `listen` and `origins` (each
+ * target's http origin, as scripts/lib/routes.mjs names them) replace the
+ * container's addresses, for a test.
  */
 export function oauth2ProxyArgs(config, {
   listen = `0.0.0.0:${PORTS.ingress}`,
@@ -396,12 +406,12 @@ export function oauth2ProxyArgs(config, {
     // /mcp and the home page's files without sign-in; the portal, at /portal
     // with its /api and /assets, after it (scripts/lib/routes.mjs).
     ...oauth2ProxyRouteArgs(origins),
-    `--redirect-url=${config.public.url}/oauth2/callback`,
-    `--whitelist-domain=${new URL(config.public.url).hostname}`,
-    // No forwarded header is trusted: Front Door and the ingress pass on a
-    // client's, and with --reverse-proxy oauth2-proxy matches its skip-auth
-    // routes against X-Forwarded-Uri. The callback is fixed, and the way back
-    // after sign-in relative, so nothing needs X-Forwarded-Host either.
+    // Sign-in happens on the portal's host alone, so its callback is fixed
+    // and nothing needs X-Forwarded-Host. No forwarded header is trusted:
+    // Front Door and the ingress pass on a client's, and with --reverse-proxy
+    // oauth2-proxy matches its skip-auth routes against X-Forwarded-Uri.
+    `--redirect-url=${config.public.portalUrl}/oauth2/callback`,
+    `--whitelist-domain=${new URL(config.public.portalUrl).hostname}`,
     "--reverse-proxy=false",
     "--cookie-name=_pghacker_auth",
     "--cookie-secure=true",

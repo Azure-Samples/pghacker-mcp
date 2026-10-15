@@ -29,8 +29,9 @@ const ENV = {
   PGHACKER_FOUNDRY_SOL: "gpt-6.1-sol",
   PGHACKER_FOUNDRY_LUNA: "gpt-6-luna",
   PGHACKER_FOUNDRY_EMBEDDING: "text-embedding-3-small",
-  PGHACKER_PUBLIC_URL: "https://pghacker-abc.z01.azurefd.net",
-  PGHACKER_PUBLIC_HOSTS: "pghacker-abc.z01.azurefd.net,pghacker-example.env.westus3.azurecontainerapps.io",
+  PGHACKER_PUBLIC_URL: "https://mcp.example.org",
+  PGHACKER_PORTAL_URL: "https://pghacker-abc.z01.azurefd.net",
+  PGHACKER_PUBLIC_HOSTS: "mcp.example.org,pghacker-abc.z01.azurefd.net,pghacker-example.env.westus3.azurecontainerapps.io",
   PGHACKER_FRONT_DOOR_ID: "6e1b0e1c-0000-4000-8000-000000000000",
   PGHACKER_GITHUB_ORG: "example-org",
   PGHACKER_GITHUB_TEAM: "example-team",
@@ -194,6 +195,14 @@ test("oauth2-proxy trusts no forwarded header, nor any client address", () => {
   assert.deepEqual(args.filter((arg) => /^--(reverse-proxy|trusted-(proxy-)?ip)\b/.test(arg)), ["--reverse-proxy=false"]);
 });
 
+test("oauth2-proxy signs users in on the portal's host alone, Front Door's, never the public domain's", () => {
+  const args = oauth2ProxyArgs(readAzureConfig(ENV));
+  // The public domain serves only the public paths (deploy/terraform/frontdoor.tf).
+  assert.ok(args.includes("--redirect-url=https://pghacker-abc.z01.azurefd.net/oauth2/callback"));
+  assert.deepEqual(args.filter((arg) => arg.startsWith("--whitelist-domain=")), ["--whitelist-domain=pghacker-abc.z01.azurefd.net"]);
+  assert.ok(!args.join(" ").includes("mcp.example.org"));
+});
+
 test("the configuration refuses what would be unsafe or incomplete", () => {
   assert.throws(() => readAzureConfig({ ...ENV, PGH_SWARM_PASSWORD: "" }), /PGH_SWARM_PASSWORD/);
   assert.throws(() => readAzureConfig({ ...ENV, AZURE_CLIENT_ID: "" }), /AZURE_CLIENT_ID/);
@@ -203,10 +212,18 @@ test("the configuration refuses what would be unsafe or incomplete", () => {
     /must not admit every GitHub user/,
   );
   assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_PUBLIC_URL: "http://example.org" }), /https origin/);
+  assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_PORTAL_URL: undefined }), /PGHACKER_PORTAL_URL/);
+  assert.throws(
+    () => readAzureConfig({ ...ENV, PGHACKER_PORTAL_URL: "https://pghacker-abc.z01.azurefd.net/portal/" }),
+    /PGHACKER_PORTAL_URL must be an https origin/,
+  );
   assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_PORTAL_ROLE: "owner" }), /user or admin/);
   assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_CRAWL_START_SESSIONS: "32" }), /must not exceed/);
-  // The jobs need neither the public URL nor oauth2-proxy's secrets.
-  const job = readAzureConfig({ ...ENV, PGHACKER_PUBLIC_URL: "", OAUTH2_PROXY_CLIENT_SECRET: "" }, { serve: false });
+  // The jobs need neither the public and portal URLs nor oauth2-proxy's secrets.
+  const job = readAzureConfig(
+    { ...ENV, PGHACKER_PUBLIC_URL: "", PGHACKER_PORTAL_URL: "", OAUTH2_PROXY_CLIENT_SECRET: "" },
+    { serve: false },
+  );
   const environments = processEnvironments(job);
   assert.equal(environments.mcp, undefined);
   assert.equal(environments.proxy, undefined);

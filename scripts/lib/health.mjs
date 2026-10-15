@@ -138,21 +138,44 @@ export async function checkSite(config, { timeout = 30_000, fetchImpl = fetch, l
 
 const SIGN_IN = /github\.com\/login\/oauth\/authorize|\/oauth2\/(start|sign_in)/;
 
+/** The portal's paths, which a separate public origin doesn't serve. */
+const PORTAL_ROUTES = ["/portal/", "/api/v1/health", "/assets/check-public.js", "/oauth2/start", "/check-public"];
+
 /**
- * A deployment's routes as a visitor sees them, read-only: the home page and
- * its files without sign-in, the portal's share links sent on to /portal/,
- * the portal, its files and anything else behind GitHub sign-in, the portal's
- * API answering 401, and pghacker-mcp answering anonymously. Each check is
+ * A deployment's routes as a visitor sees them, read-only. On `origin`, the
+ * public one: the home page and its files without sign-in, and pghacker-mcp
+ * answering anonymously. On `portal`'s (Front Door's own host name, the same
+ * origin without a custom domain): the portal's share links sent on to
+ * /portal/; the portal, its files and anything else behind GitHub sign-in,
+ * which comes back to that host's callback; the portal's API answering 401;
+ * and both, whatever X-Forwarded-Uri a client forges. A separate public
+ * origin must answer 404 for the portal's paths. Each check is
  * { name, ok, detail }; nothing signs in or changes anything.
  */
-export async function checkPublic(origin, { timeout = 30_000, fetchImpl = fetch, listToolsImpl = listTools } = {}) {
+export async function checkPublic(origin, {
+  portal = origin, timeout = 30_000, fetchImpl = fetch, listToolsImpl = listTools,
+} = {}) {
   const base = new URL(origin).origin;
-  const get = (route) => fetchImpl(`${base}${route}`, { redirect: "manual", signal: AbortSignal.timeout(timeout) });
-  const signIn = async (route) => {
-    const response = await get(route);
+  const portalBase = new URL(portal).origin;
+  const request = (at, route, headers = {}) => fetchImpl(`${at}${route}`, {
+    headers, redirect: "manual", signal: AbortSignal.timeout(timeout),
+  });
+  const get = (route) => request(base, route);
+  const status = async (at, route, expected, headers) => {
+    const response = await request(at, route, headers);
+    await response.arrayBuffer();
+    return { ok: response.status === expected, detail: `HTTP ${response.status}` };
+  };
+  const signIn = async (route, headers) => {
+    const response = await request(portalBase, route, headers);
     await response.arrayBuffer();
     const location = response.headers.get("location") ?? "";
     return { ok: response.status === 302 && SIGN_IN.test(location), detail: `HTTP ${response.status} ${location.split("?")[0]}`.trim() };
+  };
+  const tools = async (at) => {
+    const listed = await listToolsImpl(`${at}/mcp`, { timeout, fetchImpl });
+    const missing = EXPECTED_TOOLS.mcp.filter((tool) => !listed.includes(tool));
+    return { ok: missing.length === 0, detail: missing.length ? `missing ${missing.join(", ")}` : `${listed.length} tools` };
   };
   const checks = [];
   const check = async (name, run) => {
@@ -187,8 +210,16 @@ export async function checkPublic(origin, { timeout = 30_000, fetchImpl = fetch,
       detail: results.map((result) => `HTTP ${result.status} ${result.script}`).join(", "),
     };
   });
+  await check("pghacker-mcp lists its tools anonymously at /mcp", () => tools(base));
+  if (portalBase !== base) {
+    for (const route of PORTAL_ROUTES) {
+      await check(`the public domain answers 404 for ${route}`, () => status(base, route, 404));
+    }
+    await check("pghacker-mcp answers at the portal's host's /mcp too", () => tools(portalBase));
+  }
+
   await check("a portal share link goes on to /portal/", async () => {
-    const response = await get("/?session=check-public");
+    const response = await request(portalBase, "/?session=check-public");
     await response.arrayBuffer();
     const location = response.headers.get("location");
     return { ok: response.status === 302 && location === "/portal/?session=check-public", detail: `HTTP ${response.status} ${location ?? ""}`.trim() };
@@ -196,15 +227,17 @@ export async function checkPublic(origin, { timeout = 30_000, fetchImpl = fetch,
   for (const route of ["/portal/", "/portal", "/assets/check-public.js", "/check-public"]) {
     await check(`${route} asks for GitHub sign-in`, () => signIn(route));
   }
-  await check("the portal's API answers 401 without sign-in", async () => {
-    const response = await get("/api/v1/health");
+  await check("sign-in comes back to the portal's host", async () => {
+    const response = await request(portalBase, "/portal/");
     await response.arrayBuffer();
-    return { ok: response.status === 401, detail: `HTTP ${response.status}` };
+    const callback = URL.parse(response.headers.get("location") ?? "")?.searchParams.get("redirect_uri");
+    return { ok: callback === `${portalBase}/oauth2/callback`, detail: callback ?? `HTTP ${response.status}, no redirect_uri` };
   });
-  await check("pghacker-mcp lists its tools anonymously at /mcp", async () => {
-    const tools = await listToolsImpl(`${base}/mcp`, { timeout, fetchImpl });
-    const missing = EXPECTED_TOOLS.mcp.filter((tool) => !tools.includes(tool));
-    return { ok: missing.length === 0, detail: missing.length ? `missing ${missing.join(", ")}` : `${tools.length} tools` };
-  });
+  await check("the portal's API answers 401 without sign-in", () => status(portalBase, "/api/v1/health", 401));
+  for (const claimed of ["/mcp", "/"]) {
+    const forged = { "x-forwarded-uri": claimed };
+    await check(`/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: ${claimed}`, () => signIn("/portal/", forged));
+    await check(`the portal's API answers 401, claiming X-Forwarded-Uri: ${claimed}`, () => status(portalBase, "/api/v1/health", 401, forged));
+  }
   return checks;
 }

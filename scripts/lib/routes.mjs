@@ -33,6 +33,8 @@ export const ROUTES = [
  * request's own decoded path, without the query, and trusts no forwarded
  * header (scripts/lib/azure.mjs). It answers /robots.txt itself, before
  * any route, with "Disallow: /"; the home page's robots.txt says the same.
+ * A custom domain serves only these paths: keep Front Door's public_paths
+ * (deploy/terraform/frontdoor.tf) in step.
  */
 export const PUBLIC_ROUTES = [
   "^/mcp$",

@@ -165,59 +165,130 @@ test("the site's checks catch each broken route", async () => {
   }), new RegExp(`does not list ${EXPECTED_TOOLS.mcp[0]}`));
 });
 
-/** A deployment as a visitor sees it through Front Door and oauth2-proxy. */
-function deploymentFetch(overrides = {}) {
+const PUBLIC = "https://mcp.example.org";
+const PORTAL = "https://pghacker-example.z01.azurefd.net";
+
+/**
+ * A deployment as a visitor sees it through Front Door and oauth2-proxy: the
+ * portal and every other path on `portal`, Front Door's host name, and only
+ * the public paths on `origin`. `overrides` replace answers by URL; each gets
+ * the request's headers.
+ */
+function deploymentFetch({ origin = PUBLIC, portal = PORTAL, overrides = {} } = {}) {
   const signIn = () => new Response(null, {
     status: 302,
-    headers: { location: "https://github.com/login/oauth/authorize?client_id=example&state=x" },
+    headers: {
+      location: `https://github.com/login/oauth/authorize?client_id=example&redirect_uri=${encodeURIComponent(`${portal}/oauth2/callback`)}&state=x`,
+    },
   });
-  const routes = {
+  const site = {
     "/": () => html(HOME_PAGE, { "cache-control": "no-cache", "content-security-policy": "default-src 'self'" }),
     "/static/index-abc.js": () => new Response("export {};", { headers: IMMUTABLE }),
     "/static/theme-boot-def.js": () => new Response("(() => {})();", { headers: IMMUTABLE }),
+  };
+  const portalRoutes = {
+    ...site,
     "/?session=check-public": () => new Response(null, { status: 302, headers: { location: "/portal/?session=check-public" } }),
     "/portal/": signIn,
     "/portal": signIn,
     "/assets/check-public.js": signIn,
     "/check-public": signIn,
+    "/oauth2/start": signIn,
     "/api/v1/health": () => new Response('{"error":"Unauthorized"}', { status: 401 }),
+  };
+  // Front Door answers 404 for a path that no route of the host takes.
+  const notServed = () => new Response("Not found", { status: 404 });
+  const publicRoutes = Object.fromEntries(Object.keys(portalRoutes).map((route) => [route, site[route] ?? notServed]));
+  const at = (host, routes) => Object.entries(routes).map(([route, answer]) => [`${host}${route}`, answer]);
+  const answers = {
+    ...Object.fromEntries(at(origin, origin === portal ? portalRoutes : publicRoutes)),
+    ...Object.fromEntries(at(portal, portalRoutes)),
     ...overrides,
   };
-  return async (url) => {
-    const { pathname, search } = new URL(url);
-    const route = routes[`${pathname}${search}`];
-    if (!route) throw new Error(`Unexpected test route: ${pathname}${search}`);
-    return route();
+  return async (url, { headers = {} } = {}) => {
+    const answer = answers[url];
+    if (!answer) throw new Error(`Unexpected test URL: ${url}`);
+    return answer(headers);
   };
 }
 
-test("a deployment checks out from outside: home public, portal behind sign-in, MCP anonymous", async () => {
-  const checks = await checkPublic("https://pghacker-example.z01.azurefd.net", {
-    fetchImpl: deploymentFetch(),
+const PUBLIC_CHECKS = [
+  "the home page, without sign-in",
+  "its scripts from /static/, kept a year",
+  "pghacker-mcp lists its tools anonymously at /mcp",
+];
+const PORTAL_CHECKS = [
+  "a portal share link goes on to /portal/",
+  "/portal/ asks for GitHub sign-in",
+  "/portal asks for GitHub sign-in",
+  "/assets/check-public.js asks for GitHub sign-in",
+  "/check-public asks for GitHub sign-in",
+  "sign-in comes back to the portal's host",
+  "the portal's API answers 401 without sign-in",
+  "/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: /mcp",
+  "the portal's API answers 401, claiming X-Forwarded-Uri: /mcp",
+  "/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: /",
+  "the portal's API answers 401, claiming X-Forwarded-Uri: /",
+];
+
+test("a deployment checks out from outside: home and MCP public on its domain, the portal behind sign-in on Front Door's host alone", async () => {
+  const checks = await checkPublic(PUBLIC, { portal: `${PORTAL}/portal/`, fetchImpl: deploymentFetch(), listToolsImpl: allTools });
+  assert.deepEqual(checks.map((check) => check.name), [
+    ...PUBLIC_CHECKS,
+    "the public domain answers 404 for /portal/",
+    "the public domain answers 404 for /api/v1/health",
+    "the public domain answers 404 for /assets/check-public.js",
+    "the public domain answers 404 for /oauth2/start",
+    "the public domain answers 404 for /check-public",
+    "pghacker-mcp answers at the portal's host's /mcp too",
+    ...PORTAL_CHECKS,
+  ]);
+  assert.deepEqual(checks.filter((check) => !check.ok), []);
+});
+
+test("without a custom domain, one host serves the home page, MCP and the portal", async () => {
+  const checks = await checkPublic(PORTAL, {
+    fetchImpl: deploymentFetch({ origin: PORTAL }),
     listToolsImpl: allTools,
   });
-  assert.equal(checks.length, 9);
+  assert.deepEqual(checks.map((check) => check.name), [...PUBLIC_CHECKS, ...PORTAL_CHECKS]);
   assert.deepEqual(checks.filter((check) => !check.ok), []);
 });
 
 test("each failure of a deployment's routes is reported, not thrown", async () => {
-  const portalOpen = () => html(PORTAL_PAGE);
-  const checks = await checkPublic("https://pghacker-example.z01.azurefd.net/", {
+  const portalPage = () => html(PORTAL_PAGE);
+  const signInAt = (host) => () => new Response(null, {
+    status: 302,
+    headers: { location: `https://github.com/login/oauth/authorize?redirect_uri=${encodeURIComponent(`${host}/oauth2/callback`)}&state=x` },
+  });
+  // A forged X-Forwarded-Uri gets past sign-in, as before oauth2-proxy stopped trusting it.
+  const bypass = (answer) => (headers) => (headers["x-forwarded-uri"] ? portalPage() : answer());
+  const checks = await checkPublic(PUBLIC, {
+    portal: PORTAL,
     fetchImpl: deploymentFetch({
-      "/": () => html(PORTAL_PAGE),
-      "/static/theme-boot-def.js": () => new Response("Not found", { status: 404 }),
-      "/portal/": portalOpen,
-      "/api/v1/health": () => new Response("{}", { status: 200 }),
+      overrides: {
+        [`${PUBLIC}/`]: portalPage,
+        [`${PUBLIC}/static/theme-boot-def.js`]: () => new Response("Not found", { status: 404 }),
+        [`${PUBLIC}/portal/`]: signInAt(PUBLIC),
+        [`${PORTAL}/portal/`]: bypass(signInAt(PUBLIC)),
+        [`${PORTAL}/api/v1/health`]: bypass(() => new Response('{"error":"Unauthorized"}', { status: 401 })),
+      },
     }),
     listToolsImpl: async () => { throw new Error("HTTP 429"); },
   });
-  const failed = checks.filter((check) => !check.ok).map((check) => check.name);
-  assert.deepEqual(failed, [
+  const failed = checks.filter((check) => !check.ok);
+  assert.deepEqual(failed.map((check) => check.name), [
     "the home page, without sign-in",
     "its scripts from /static/, kept a year",
-    "/portal/ asks for GitHub sign-in",
-    "the portal's API answers 401 without sign-in",
     "pghacker-mcp lists its tools anonymously at /mcp",
+    "the public domain answers 404 for /portal/",
+    "pghacker-mcp answers at the portal's host's /mcp too",
+    "sign-in comes back to the portal's host",
+    "/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: /mcp",
+    "the portal's API answers 401, claiming X-Forwarded-Uri: /mcp",
+    "/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: /",
+    "the portal's API answers 401, claiming X-Forwarded-Uri: /",
   ]);
-  assert.match(checks.at(-1).detail, /HTTP 429/);
+  assert.match(failed[2].detail, /HTTP 429/);
+  assert.equal(failed[5].detail, `${PUBLIC}/oauth2/callback`);
 });

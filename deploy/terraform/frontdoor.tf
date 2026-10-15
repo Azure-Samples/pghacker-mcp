@@ -1,14 +1,20 @@
 # The public entry: an Azure Front Door Standard endpoint in front of the app,
 # which keeps the host name, <name>-<hash>.<zone>.azurefd.net, when the
-# Container Apps environment is replaced. An optional custom domain shares
-# its route. Everything passes through as is, and oauth2-proxy routes it:
-# /mcp to the anonymous MCP endpoint, / to the public home page, /portal to
-# the GitHub-gated portal.
+# Container Apps environment is replaced. That host name serves every path,
+# and oauth2-proxy routes it: /mcp to the anonymous MCP endpoint, / to the
+# public home page, /portal to the GitHub-gated portal. An optional custom
+# domain gets only the public paths, so the portal and its sign-in stay on
+# one host, whose callback is fixed.
 
 locals {
   # The endpoint's ID from known values: azurerm checks the route's reference
   # to it while planning, before azapi knows the ID of a new endpoint.
   front_door_endpoint_id = "${local.rg_id_static}/providers/Microsoft.Cdn/profiles/${local.front_door_profile_name}/afdEndpoints/${var.front_door_endpoint_name}"
+
+  # What a custom domain serves: the paths that oauth2-proxy lets through
+  # without sign-in (scripts/lib/routes.mjs's PUBLIC_ROUTES), and /robots.txt,
+  # which it answers itself. Front Door answers 404 for any other path there.
+  public_paths = ["/", "/mcp", "/static/*", "/favicon.svg", "/robots.txt"]
 }
 
 # Front Door waits up to 240 s, its longest, for the app's response. The
@@ -84,20 +90,40 @@ resource "azurerm_cdn_frontdoor_origin" "this" {
   weight                         = 1000
 }
 
-# Every path, HTTPS only at the edge and to the app. No cache block means no
-# caching and no compression, so MCP responses and streams and the portal's
-# WebSockets pass through untouched.
+# Every path on Front Door's own host name, HTTPS only at the edge and to the
+# app. No cache block means no caching and no compression, so MCP responses
+# and streams and the portal's WebSockets pass through untouched. It waits
+# for the custom domain's route, so that the domain, which it served before,
+# always has one while an apply moves it.
 resource "azurerm_cdn_frontdoor_route" "this" {
-  name                            = "app"
+  name                          = "app"
+  cdn_frontdoor_endpoint_id     = local.front_door_endpoint_id
+  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.this.id
+  cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.this.id]
+  patterns_to_match             = ["/*"]
+  supported_protocols           = ["Https"]
+  https_redirect_enabled        = false
+  forwarding_protocol           = "HttpsOnly"
+  link_to_default_domain        = true
+
+  depends_on = [azapi_resource.front_door_endpoint, azurerm_cdn_frontdoor_route.public]
+}
+
+# The custom domain's public paths, to the same origin, as uncached as the
+# rest.
+resource "azurerm_cdn_frontdoor_route" "public" {
+  count = var.front_door_custom_domain == null ? 0 : 1
+
+  name                            = "public"
   cdn_frontdoor_endpoint_id       = local.front_door_endpoint_id
   cdn_frontdoor_origin_group_id   = azurerm_cdn_frontdoor_origin_group.this.id
   cdn_frontdoor_origin_ids        = [azurerm_cdn_frontdoor_origin.this.id]
-  cdn_frontdoor_custom_domain_ids = azurerm_cdn_frontdoor_custom_domain.this[*].id
-  patterns_to_match               = ["/*"]
+  cdn_frontdoor_custom_domain_ids = [azurerm_cdn_frontdoor_custom_domain.this[0].id]
+  patterns_to_match               = local.public_paths
   supported_protocols             = ["Https"]
   https_redirect_enabled          = false
   forwarding_protocol             = "HttpsOnly"
-  link_to_default_domain          = true
+  link_to_default_domain          = false
 
   depends_on = [azapi_resource.front_door_endpoint]
 }

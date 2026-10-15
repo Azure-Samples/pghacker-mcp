@@ -1,6 +1,6 @@
 # pghacker-mcp's Terraform
 
-[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the home page, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, and Azure Front Door Standard as the public entry: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in.
+[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the home page, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, and Azure Front Door Standard as the public entry: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in, on Front Door's own host name alone (a custom domain serves only the first two).
 
 | Path | Contents |
 |---|---|
@@ -114,7 +114,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
 | `app_env` | `{}` | More app environment variables, such as `RUST_LOG`, `PGHACKER_CRAWL`, `PGHACKER_CODE_HISTORY` and the extraction order's; can't replace the settings above or set `OAUTH2_PROXY_*`. Each process gets only those it uses |
 | `front_door_endpoint_name` | `"pghacker"` | Front Door endpoint, `<name>-<hash>.<zone>.azurefd.net`; changing it changes the public host name |
-| `front_door_custom_domain` | `null` | Optional hostname you own, such as `mcp.example.com` or `example.com`; managed TLS, shared routing, canonical public URL and OAuth callback. Set it only in ignored environment settings; DNS stays with your provider. See [Custom domains](README.md#custom-domains). |
+| `front_door_custom_domain` | `null` | Optional hostname you own, such as `mcp.example.com` or `example.com`; managed TLS, a route of its own for the home page and `/mcp` only, and the canonical public and MCP URLs. The portal and its OAuth callback stay on Front Door's host name. Set it only in ignored environment settings; DNS stays with your provider. See [Custom domains](README.md#custom-domains). |
 
 ## Outputs
 
@@ -122,7 +122,8 @@ None is secret. `terraform output -raw <name>` prints one.
 
 | Output | Meaning |
 |---|---|
-| `public_url`, `portal_url`, `mcp_url`, `oauth_callback_url` | Canonical URLs on the custom domain when set, otherwise Front Door's default hostname: the home page, the portal, the MCP endpoint and the GitHub OAuth App's callback |
+| `public_url`, `mcp_url` | Canonical URLs on the custom domain when set, otherwise Front Door's default hostname: the home page and the MCP endpoint |
+| `portal_url`, `oauth_callback_url` | On Front Door's default hostname, with or without a custom domain: the portal and the GitHub OAuth App's callback |
 | `front_door_host_name`, `front_door_id` | Front Door's host name and profile ID (`X-Azure-FDID`) |
 | `front_door_custom_domain_validation` | Ownership TXT record's full `name`, `value` and token `expiration`; null without a custom domain |
 | `app_fqdn` | The app's own host name, Front Door's origin |

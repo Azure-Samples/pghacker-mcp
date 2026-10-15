@@ -188,6 +188,7 @@ run "app_and_restore_job" {
       PGHACKER_FOUNDRY_LUNA         = "gpt-6-luna"
       PGHACKER_FOUNDRY_EMBEDDING    = "text-embedding-3-small"
       PGHACKER_PUBLIC_URL           = "https://pghacker-example.mock.azurefd.net"
+      PGHACKER_PORTAL_URL           = "https://pghacker-example.mock.azurefd.net"
       PGHACKER_PUBLIC_HOSTS         = "pghacker-example.mock.azurefd.net,pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io"
       PGHACKER_FRONT_DOOR_ID        = "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11"
       PGHACKER_RATE_PER_MINUTE      = "60"

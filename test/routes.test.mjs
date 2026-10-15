@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { APP_ROOT } from "../scripts/lib/config.mjs";
 import {
   API_ROUTE, PUBLIC_ROUTES, ROUTES, TARGETS, isPublic, matchRoute, oauth2ProxyRouteArgs,
 } from "../scripts/lib/routes.mjs";
@@ -91,4 +94,26 @@ test("oauth2-proxy's origins must be plain http origins", () => {
   assert.throws(() => oauth2ProxyRouteArgs({ ...ORIGINS, home: undefined }), /home/);
   assert.throws(() => oauth2ProxyRouteArgs({ ...ORIGINS, portal: "http://127.0.0.1:3001/" }), /portal/);
   assert.throws(() => oauth2ProxyRouteArgs({ ...ORIGINS, mcp: "https://127.0.0.1:3102" }), /mcp/);
+});
+
+/** The paths Front Door serves on a custom domain (deploy/terraform/frontdoor.tf). */
+function frontDoorPublicPaths() {
+  const text = readFileSync(path.join(APP_ROOT, "deploy", "terraform", "frontdoor.tf"), "utf8");
+  const list = /^\s*public_paths\s*=\s*\[([^\]]*)\]/m.exec(text)?.[1];
+  assert.ok(list, "frontdoor.tf has no public_paths");
+  return [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
+/** Whether Front Door's patterns take `pathname`: one ending in /* every path below it, any other only itself. */
+function frontDoorTakes(patterns, pathname) {
+  return patterns.some((pattern) => (pattern.endsWith("/*") ? pathname.startsWith(pattern.slice(0, -1)) : pathname === pattern));
+}
+
+test("a custom domain takes just the public paths, and /robots.txt, which oauth2-proxy answers", () => {
+  const patterns = frontDoorPublicPaths();
+  for (const [pathname, , open] of CASES) assert.equal(frontDoorTakes(patterns, pathname), open, pathname);
+  assert.equal(frontDoorTakes(patterns, "/robots.txt"), true);
+  for (const pathname of ["/oauth2/start", "/oauth2/callback", "/oauth2/sign_out"]) {
+    assert.equal(frontDoorTakes(patterns, pathname), false, pathname);
+  }
 });

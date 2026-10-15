@@ -27,6 +27,9 @@ locals {
   front_door_host = azapi_resource.front_door_endpoint.output.host_name
   public_host     = coalesce(var.front_door_custom_domain, local.front_door_host)
   public_url      = "https://${local.public_host}"
+  # The portal and its sign-in stay on Front Door's own host name: a custom
+  # domain serves only the public paths (frontdoor.tf).
+  portal_url = "https://${local.front_door_host}"
 
   # The account's Azure OpenAI endpoint, which its custom subdomain names.
   foundry_endpoint = "https://${azurerm_cognitive_account.foundry.custom_subdomain_name}.openai.azure.com"
@@ -98,6 +101,7 @@ locals {
     local.job_env,
     {
       PGHACKER_PUBLIC_URL           = local.public_url
+      PGHACKER_PORTAL_URL           = local.portal_url
       PGHACKER_PUBLIC_HOSTS         = join(",", distinct([local.public_host, local.front_door_host, local.app_fqdn]))
       PGHACKER_FRONT_DOOR_ID        = azurerm_cdn_frontdoor_profile.this.resource_guid
       PGHACKER_RATE_PER_MINUTE      = tostring(var.mcp_rate_per_minute)

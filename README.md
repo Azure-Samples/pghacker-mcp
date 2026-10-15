@@ -73,7 +73,7 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 
 ## Deploy to Azure
 
-[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/`, requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
+[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/` on Front Door's own host name, requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
 
 ## Learn more
 

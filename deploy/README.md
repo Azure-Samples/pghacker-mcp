@@ -25,6 +25,7 @@ flowchart LR
 - **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client (`X-Azure-ClientIP`, IPv6 by /64), and serves only requests that came through this Front Door profile (`X-Azure-FDID`).
 - **`https://<front door>/`** is the public home page (`home/`): what pghacker-mcp is, the MCP URL (its own origin's `/mcp`) and how to add it to an agent, and example prompts with their answers. Its files are public; any other path needs sign-in. oauth2-proxy answers `/robots.txt` itself (`Disallow: /`).
 - **`https://<front door>/portal/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
+  - Only Front Door's own host name serves it. A [custom domain](#custom-domains) gets the home page and `/mcp`, and Front Door answers 404 for its other paths. Sign-in therefore happens on one host, at one callback.
   - PilotSwarm 0.8.2 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`) reach the home page, which sends them on to `/portal/`. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
@@ -135,7 +136,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 7. **The GitHub OAuth App.**
    - Register it under your GitHub organization's **Settings > Developer settings > OAuth Apps** (or under your account), with:
      - homepage `terraform output -raw public_url`
-     - callback `terraform output -raw oauth_callback_url` (oauth2-proxy's `/oauth2/callback`, which moving the portal to `/portal/` didn't change)
+     - callback `terraform output -raw oauth_callback_url`: oauth2-proxy's `/oauth2/callback` on Front Door's own host name, which a custom domain doesn't change. Turn off the callback's wildcard matching, which GitHub turns on for an app with a single callback: it would also accept the callback's subdomains and sub-paths, and oauth2-proxy sends exactly this URL.
    - Some organizations restrict OAuth Apps. Until an org owner approves this one, GitHub hides org and team membership from it, and every sign-in fails with a 500 (the logs say `user is missing required organization`).
      - To ask for approval, open `https://github.com/settings/connections/applications/<client ID>` and click **Request** next to your organization.
      - Until then, `github_users` (a list of logins) lets those users in. It doesn't follow the team: once the app is approved, keep only the logins that aren't on the team.
@@ -158,10 +159,11 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '[.result.tools[].name]'
    ```
 
-   From the repository root, check the routes from outside, read-only: the home page and its files without sign-in, the portal and its API behind it, and `/mcp`:
+   From the repository root, check the routes from outside, read-only. On the public URL: the home page and its files without sign-in, and `/mcp`; with a custom domain, Front Door's 404 for the portal's paths. On the portal's: the portal and its API behind sign-in, whose callback is on that host, even with a forged `X-Forwarded-Uri`:
 
    ```sh
-   npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)"
+   npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)" \
+     --portal-url "$(terraform -chdir=deploy/terraform output -raw portal_url)"
    ```
 
    Then open `public_url`, the home page, without signing in, and `portal_url`: GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
@@ -338,10 +340,13 @@ front_door_custom_domain = "mcp.example.com"
 ```
 
 This requests Front Door-managed TLS and makes that hostname the canonical
-public, MCP and OAuth callback URL. The default `azurefd.net` hostname stays
-enabled on the same HTTPS-only, uncached route. The app accepts both hostnames
-and the origin hostname; the origin host header and certificate checks do not
-change. Portal sign-in uses the canonical hostname.
+public and MCP URL. The domain gets a route of its own for the public paths
+alone: the home page, its files, `/mcp` and `/robots.txt`. Front Door answers
+404 for any other path there. The portal and its sign-in stay on the default
+`azurefd.net` hostname, which keeps every path, so the OAuth callback
+(`oauth_callback_url`) doesn't change, and oauth2-proxy never has to tell the
+hosts apart. The app accepts both hostnames and the origin hostname; the
+origin host header and certificate checks do not change.
 
 For a new domain, first create only its Front Door resource, so you can publish
 the ownership record before changing the app's public URL:
@@ -356,9 +361,14 @@ Publish the output's `name` and `value` as a TXT record with your DNS provider.
 The name is fully qualified; providers that append the zone name need only the
 relative part (`_dnsauth` for an apex domain, `_dnsauth.mcp` for this example).
 Wait for the domain's validation state in Front Door to become **Approved**.
-Then apply the full configuration to associate the domain with the route and
-update the app. Update the existing GitHub OAuth App's homepage and callback
-to `public_url` and `oauth_callback_url` at the same time.
+Then apply the full configuration, which gives the domain its route and
+updates the app. The GitHub OAuth App's homepage can become `public_url`; its
+callback stays `oauth_callback_url`.
+
+A deployment whose portal was on the custom domain, before it had a route of
+its own, moves the portal to `portal_url`. Add `oauth_callback_url` to the
+GitHub OAuth App's callbacks (it takes several) before applying, and remove
+the custom domain's callback afterwards.
 
 Once the managed certificate has deployed, point a subdomain's CNAME to
 `front_door_host_name`. An apex domain such as `example.com` instead needs

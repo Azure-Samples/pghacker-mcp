@@ -593,6 +593,7 @@ variable "app_env" {
       "PGHACKER_GITHUB_TEAM",
       "PGHACKER_GITHUB_USERS",
       "PGHACKER_PORTAL_ROLE",
+      "PGHACKER_PORTAL_URL",
       "PGHACKER_PUBLIC_HOSTS",
       "PGHACKER_PUBLIC_URL",
       "PGHACKER_RATE_BURST",
@@ -617,7 +618,7 @@ variable "front_door_endpoint_name" {
 }
 
 variable "front_door_custom_domain" {
-  description = "Optional custom hostname for Front Door and the canonical public, MCP and OAuth callback URLs, such as mcp.example.com or example.com. Null keeps the azurefd.net hostname. Set deployment-specific domains only in ignored environment settings; publish the ownership TXT record and DNS alias with your DNS provider."
+  description = "Optional custom hostname for Front Door's public paths (the home page and /mcp) and the canonical public and MCP URLs, such as mcp.example.com or example.com. The portal and its OAuth callback stay on the azurefd.net hostname. Null keeps the azurefd.net hostname for everything. Set deployment-specific domains only in ignored environment settings; publish the ownership TXT record and DNS alias with your DNS provider."
   type        = string
   default     = null
 

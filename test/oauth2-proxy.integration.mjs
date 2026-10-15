@@ -39,7 +39,8 @@ const ENV = {
   PGHACKER_FOUNDRY_SOL: "gpt-6.1-sol",
   PGHACKER_FOUNDRY_LUNA: "gpt-6-luna",
   PGHACKER_FOUNDRY_EMBEDDING: "text-embedding-3-small",
-  PGHACKER_PUBLIC_URL: "https://pghacker-example.z01.azurefd.net",
+  PGHACKER_PUBLIC_URL: "https://mcp.example.org",
+  PGHACKER_PORTAL_URL: "https://pghacker-example.z01.azurefd.net",
   PGHACKER_GITHUB_ORG: "example-org",
   PGHACKER_GITHUB_TEAM: "example-team",
   OAUTH2_PROXY_CLIENT_ID: "example-client-id",
@@ -218,11 +219,11 @@ async function signIn(route, headers = {}) {
   };
 }
 
-test("sign-in completes at the fixed callback, whatever host or path the request claims", async () => {
-  const callback = `${ENV.PGHACKER_PUBLIC_URL}/oauth2/callback`;
+test("sign-in completes on the portal's host, whatever host or path the request claims", async () => {
+  const callback = `${ENV.PGHACKER_PORTAL_URL}/oauth2/callback`;
   // Front Door names the visitor's host in X-Forwarded-Host.
-  const frontDoor = { "x-forwarded-proto": "https", "x-forwarded-host": new URL(ENV.PGHACKER_PUBLIC_URL).hostname };
-  const forged = { ...frontDoor, "x-forwarded-host": "elsewhere.example.org", "x-forwarded-uri": "/elsewhere" };
+  const frontDoor = { "x-forwarded-proto": "https", "x-forwarded-host": new URL(ENV.PGHACKER_PORTAL_URL).hostname };
+  const forged = { ...frontDoor, "x-forwarded-host": "mcp.example.org", "x-forwarded-uri": "/elsewhere" };
   for (const headers of [{}, frontDoor, forged]) {
     const started = await signIn("/portal/?session=abc", headers);
     assert.equal(started.callback, callback);
@@ -233,6 +234,7 @@ test("sign-in completes at the fixed callback, whatever host or path the request
   }
   const start = (rd) => signIn(`/oauth2/start?rd=${encodeURIComponent(rd)}`);
   assert.equal((await start("/portal/?session=abc")).back, "/portal/?session=abc");
-  assert.equal((await start(`${ENV.PGHACKER_PUBLIC_URL}/portal/`)).back, `${ENV.PGHACKER_PUBLIC_URL}/portal/`);
+  assert.equal((await start(`${ENV.PGHACKER_PORTAL_URL}/portal/`)).back, `${ENV.PGHACKER_PORTAL_URL}/portal/`);
   assert.equal((await start("https://evil.example/")).back, "/");
+  assert.equal((await start(`${ENV.PGHACKER_PUBLIC_URL}/portal/`)).back, "/");
 });

@@ -172,8 +172,8 @@ data "azapi_resource" "github_secret" {
 # The supervisor and its services in one container: oauth2-proxy on 8080
 # sends /mcp to pghacker-mcp and / to the home page without sign-in, and
 # /portal (with the portal's /api and /assets), after GitHub sign-in, to the
-# PilotSwarm portal (scripts/lib/routes.mjs). A singleton: one replica,
-# always on.
+# PilotSwarm portal (scripts/lib/routes.mjs), which Front Door serves only on
+# its own host name (frontdoor.tf). A singleton: one replica, always on.
 resource "azurerm_container_app" "app" {
   count = var.create_app ? 1 : 0
 
