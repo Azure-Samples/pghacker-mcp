@@ -158,7 +158,7 @@ pub struct SearchArgs {
     /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
-    /// Search over a range of commits instead of at one commit: `all`, a branch, tag or commit with its ancestors (REL_17_STABLE), or A..B (B's history that isn't A's). Gives each line once per path and text, with the commits that added and removed it and the branch heads and releases that have it. Requires output lines, group_by file, context 0 and paths without globs or virtual roots.
+    /// Search over a range of commits instead of at one commit: `all`, a branch, tag or commit with its ancestors (REL_17_STABLE), or A..B (B's history that isn't A's). Gives each line once per path and text, with its first adding commit, its removal commits and the branch heads and releases that have it. Requires output lines, group_by file, context 0 and paths without globs or virtual roots.
     #[serde(default)]
     pub history: Option<String>,
 }

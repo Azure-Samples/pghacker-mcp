@@ -47,7 +47,8 @@ threads) is met or `next_extraction_batch` returns `done: true`:
    extracted before (`previously`: `extracted` or `skipped`) has new
    messages: read it whole again, reuse its `existing_extracts`, and give each
    participant's position as the thread now shows it. It replaces their
-   earlier position on the same feature or decision.
+   earlier position on the same feature or decision, except a position moved
+   there by a merge: the indexer keeps that one so `undo_merge` can restore it.
 5. `submit_extracts` for the thread. If it returns errors, nothing was saved:
    fix every error (usually a quote that isn't verbatim) and submit again.
 6. A thread without technical discussion (announcements, administrivia,
