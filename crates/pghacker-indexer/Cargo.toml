@@ -35,5 +35,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+pghacker-api.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true

@@ -9,7 +9,7 @@
  */
 export const EXCLUDED_TABLES = [
   "graph_nodes", "graph_edges", "graph_sync_runs", "graph_changes", "graph_sync_state", "graph_label_counts",
-  "schema_migrations",
+  "graph_committers", "schema_migrations",
 ];
 
 /** Tables whose rows mean a corpus is already there. */

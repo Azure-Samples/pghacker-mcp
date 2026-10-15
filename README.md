@@ -54,7 +54,9 @@ empty and future registered labels. The graph mapping migration adds outgoing
 `(start_key, label, end_key)` and incoming `(end_key, label, start_key)` B-trees on
 `pghacker.graph_edges`. Existing AGE endpoint and vertex-ID indexes are reused;
 edge-ID indexes are non-unique and do not change graph IDs, properties, or
-projection behavior.
+projection behavior. The commit history's labels `BACKPATCH_OF` and `COMMITTED`
+are such labels: bootstrap creates them empty, with AGE's `start_id` and `end_id`
+indexes and the `id` index, so an existing database needs no preparation for them.
 
 For an existing database, prepare missing indexes **before upgrading**. Startup
 checks the actual catalog definitions and usable state, including already-applied
@@ -177,10 +179,29 @@ parent arrives later. Writers only append to the log, so they never wait on
 the graph.
 
 A full sync recomputes the whole graph instead: once after the change capture
-is installed, after a `TRUNCATE` (as a corpus restore does), weekly as a
-reconcile that warns if it finds drift, and on request with
-`pghacker-indexer graph-reconcile`. `ingest_status` shows the label counts the
-sync keeps, the changes waiting and the last full sync.
+is installed, after a `TRUNCATE` (as a corpus restore does), after an upgrade
+that changes what the graph projects, weekly as a reconcile that warns if it
+finds drift, and on request with `pghacker-indexer graph-reconcile`.
+`ingest_status` shows the label counts the sync keeps, the changes waiting and
+the last full sync.
+
+The [commit history](#commit-history), once installed, joins the graph: a
+`Commit` vertex for every commit, keyed by its full SHA, with its subject, date,
+author name, branch and back-patch group; `MODIFIES` to the files it changed,
+`DISCUSSED_IN` to the threads that discussed it, `BACKPATCH_OF` from each
+commit of a back-patch group to the group's first, and `COMMITTED` from the one
+mail author whose name, ignoring case, is the commit's author name (in
+PostgreSQL's history, the committer's). Mail's citations of a commit join its
+vertex once `resolve_anchors` resolves them to the full SHA. The history's file
+versions give the `File` vertices (`loaded` when the history has the path, else
+named by mail or an extract), their `Subsystem` vertices and the `PART_OF`
+edges. The history's tables have no triggers, since an install swaps them in
+whole: its writers record their own changes in the same transaction, namely a
+sync's new commits and their files, the links that a refresh adds or drops,
+and the commits whose back-patch group a regroup changes. An install asks for
+a full sync. Each batch also checks the history's author names, so that
+`COMMITTED` follows the authors' merges and renames. Without a history, nothing
+more is projected.
 
 ### How duplicates are found
 
@@ -238,6 +259,13 @@ hand. The `patch_lines` job indexes the mail's patches for `search_patches`
 whether or not the history is installed. `add_source` for a PostgreSQL
 version loads nothing: it names the commit the history already has, or starts
 the sync when the history lacks it.
+
+An installed history joins the graph
+([How the graph follows the tables](#how-the-graph-follows-the-tables)), and
+mail's commit citations join their commits. PostgreSQL's history adds about
+750,000 vertices and edges. On a laptop, the full sync that
+the install asks for took 36 seconds, and a full sync of the whole graph takes
+about 20 seconds more than without it.
 
 In the `pghacker-replay` crate's `perf_tuning/` folder, `history_parity`
 checks a history against git on random commits: `get_commit` against

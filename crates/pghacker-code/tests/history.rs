@@ -475,6 +475,54 @@ async fn an_installed_build_replaces_the_tables_in_pghacker() {
     );
 }
 
+#[tokio::test]
+async fn an_install_waits_for_the_graph_sync_and_asks_for_a_full_one() {
+    let repo = fixture();
+    let db = TestDb::create().await.unwrap();
+    build(&db, &repo.path(), Vec::new()).await;
+    // A graph sync is running: it holds its lock, and reads the history.
+    let mut syncing = db.indexer().await.unwrap();
+    let sync = syncing.transaction().await.unwrap();
+    sync.batch_execute(
+        "SELECT pg_advisory_xact_lock(hashtext('pghacker.graph_sync'));
+         SELECT count(*) FROM pghacker.code_commits;",
+    )
+    .await
+    .unwrap();
+    let url = db.admin_url.clone();
+    let install = tokio::spawn(async move {
+        let mut client = pghacker_core::db::connect(&url, "pghacker-test")
+            .await
+            .unwrap();
+        history::store::swap(&mut client, SCHEMA).await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!install.is_finished(), "the install waits for the sync");
+    // Meanwhile, the code tools read the tables installed before.
+    let reader = db.reader().await.unwrap();
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reader.query_one("SELECT count(*) FROM code_commits", &[]),
+    )
+    .await
+    .expect("no exclusive lock is queued ahead of the readers")
+    .unwrap();
+    assert_eq!(read.get::<_, i64>(0), 0);
+    sync.commit().await.unwrap();
+    install.await.unwrap().unwrap();
+    assert_eq!(count(&reader, "SELECT count(*) FROM code_commits").await, 9);
+    let admin = db.admin().await.unwrap();
+    let reason: String = admin
+        .query_one(
+            "SELECT full_reason FROM pghacker.graph_sync_state WHERE full_requested > full_done",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(reason, "a commit history was installed");
+}
+
 /// Every table's rows in a form independent of ids and weave keys: equal
 /// for two histories with the same commits.
 async fn dump(client: &Client, s: &str) -> Vec<String> {

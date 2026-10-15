@@ -27,7 +27,12 @@ const VERTEX_PROPERTIES: &[(&str, &str)] = &[
     ("Release", "key, version"),
     ("Subsystem", "key, name"),
     ("File", "key, path, subsystem, loaded"),
-    ("Commit", "key, sha"),
+    (
+        "Commit",
+        "key, sha; and with the commit history: subject, committed_at, author (in PostgreSQL's \
+         history, the committer's name), branch, backpatch (the SHA of its back-patch group's first \
+         commit)",
+    ),
     ("CommitFestEntry", "key, entry, url"),
 ];
 
@@ -48,8 +53,16 @@ const EDGE_ENDPOINTS: &[(&str, &str)] = &[
     ("HOLDS", "Author -> Position"),
     ("ABOUT", "Position -> Feature or Decision"),
     ("EVIDENCED_BY", "Feature, Decision or Position -> Message"),
-    ("MODIFIES", "Commit -> File (wave 2)"),
-    ("DISCUSSED_IN", "Commit -> Thread (wave 2)"),
+    ("MODIFIES", "Commit -> File"),
+    ("DISCUSSED_IN", "Commit -> Thread"),
+    (
+        "BACKPATCH_OF",
+        "Commit -> Commit: each other commit of a back-patch group to the group's first",
+    ),
+    (
+        "COMMITTED",
+        "Author -> Commit: the one author whose name is the commit's author name",
+    ),
 ];
 
 /// A label's vertices or edges: as the graph sync counted them, or else
@@ -200,7 +213,8 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
             "edges": edges,
             "keys": "Every vertex has a unique key property: author:<id>, thread:<id>, message:<Message-ID>, \
                      feature:<slug>, decision:<id>, position:<id>, release:<major>, subsystem:<name>, file:<path>, \
-                     commit:<sha>, cf:<entry>.",
+                     commit:<sha>, cf:<entry>. A commit's SHA is the full one when the commit history has the \
+                     commit, else as a message wrote it.",
         },
         "tables": tables,
         "examples": {
@@ -208,6 +222,7 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (a:Author)-[:HOLDS]->(p:Position)-[:ABOUT]->(f:Feature {slug: 'sql-pgq'}) RETURN a.name, p.stance, p.summary $$) AS (author agtype, stance agtype, summary agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (t:Thread)-[:DISCUSSES]->(f:Feature) RETURN f.name, count(t) ORDER BY count(t) DESC LIMIT 10 $$) AS (feature agtype, threads agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (m:Message)-[:MENTIONS]->(f:File)-[:PART_OF]->(s:Subsystem {name: 'parser'}) RETURN f.path, count(m) ORDER BY count(m) DESC LIMIT 10 $$) AS (path agtype, mentions agtype)",
+                "SELECT * FROM cypher('pghacker_graph', $$ MATCH (a:Author)-[:COMMITTED]->(c:Commit)-[:MODIFIES]->(:File {path: 'src/backend/parser/parse_jsontable.c'}), (c)-[:DISCUSSED_IN]->(t:Thread) RETURN c.sha, c.committed_at, c.subject, a.name, t.subject ORDER BY c.committed_at DESC LIMIT 10 $$) AS (sha agtype, committed_at agtype, subject agtype, committer agtype, thread agtype)",
             ],
             "sql": sql,
         },

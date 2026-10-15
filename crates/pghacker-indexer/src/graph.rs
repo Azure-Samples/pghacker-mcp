@@ -1,14 +1,18 @@
 //! Projects the tables into the AGE graph `pghacker_graph`. Writes go straight
 //! into AGE's label tables, which is much faster than Cypher MERGE, and
 //! `graph_nodes` and `graph_edges` record which vertex and edge each key
-//! became. Vertex properties never include emails.
+//! became. The graph never reads `author_emails`. Text is as its table
+//! stores it: mail ingest redacts addresses in messages' subjects and
+//! senders' names, so Message, Thread and Author properties show them as
+//! `[email]`; Commit subjects are the history's, addresses included.
 //!
 //! Triggers on the tables record in `graph_changes` the keys of the vertices
 //! and edges that each change may affect (migration 0010). The commit
-//! history's file versions, which give the File and Subsystem vertices and
-//! the PART_OF edges, have no triggers: what changes them records their keys
-//! itself ([`crate::history::capture_files`]). [`sync_changes`] recomputes
-//! just those from the tables, in bounded batches:
+//! history's tables, whose commits and file versions give the Commit, File
+//! and Subsystem vertices and their edges, have none: its writers record
+//! what they change themselves, with migration 0014's functions.
+//! [`sync_changes`] recomputes just those from the tables, in bounded
+//! batches:
 //!
 //! - A vertex is wanted if its row exists and isn't merged; a file, release,
 //!   subsystem, commit or CommitFest entry if any row names it. A file is
@@ -18,6 +22,9 @@
 //! - A vertex that leaves the graph takes its edges with it, and one that
 //!   enters it brings the edges that were waiting for it, such as a reply's to
 //!   a parent that arrived later.
+//! - A commit's COMMITTED edge comes from the one author with the commit's
+//!   author name, so the authors' names decide it: `graph_committers` keeps
+//!   each name's author, and `COMMITTER_CHANGES` compares it in each batch.
 //!
 //! [`sync`] recomputes the whole graph and diffs it against the bookkeeping:
 //! once the change capture is installed, after a TRUNCATE (as a restore does),
@@ -36,6 +43,11 @@ use pghacker_core::{EDGE_LABELS, GRAPH, VERTEX_LABELS};
 
 /// The change entries that a batch applies at most.
 pub const BATCH: i64 = 1000;
+
+/// What the graph projects, numbered: raise it when a change to the
+/// projection needs a full sync to apply. A full sync records it in
+/// `graph_sync_state`, and [`run`] runs one while the graph has an older one.
+pub const PROJECTION: i32 = 2;
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncStats {
@@ -134,9 +146,22 @@ macro_rules! file_props {
     };
 }
 
+/// The properties of commit `x.value`, from `commit_rows`: only its key and
+/// SHA when only mail names it.
 macro_rules! commit_props {
     () => {
-        "jsonb_build_object('key', 'commit:' || x.value, 'sha', x.value)"
+        "jsonb_strip_nulls(jsonb_build_object(
+    'key', 'commit:' || x.value, 'sha', x.value, 'subject', c.subject, 'committed_at', c.committed_at,
+    'author', c.author_name, 'branch', l.name, 'backpatch', r.sha))"
+    };
+}
+
+/// The history's row of commit `x.value`, its lane, and its back-patch
+/// group's first commit.
+macro_rules! commit_rows {
+    () => {
+        "LEFT JOIN code_commits c ON c.sha = x.value LEFT JOIN code_lanes l ON l.id = c.lane
+LEFT JOIN code_commits r ON r.addr = c.backpatch"
     };
 }
 
@@ -147,11 +172,28 @@ macro_rules! cf_props {
     };
 }
 
-/// The key of the vertex that anchor `a` mentions.
+/// The key of the vertex that anchor `a` mentions: a commit by its full SHA
+/// once resolve_anchors has found it in the history, else as written.
 macro_rules! anchor_key {
     () => {
-        "CASE a.kind WHEN 'file' THEN 'file:' WHEN 'commit' THEN 'commit:' WHEN 'commitfest' THEN 'cf:'
-     ELSE 'release:' END || a.value"
+        "CASE a.kind WHEN 'file' THEN 'file:' || a.value WHEN 'commit' THEN 'commit:' || coalesce(a.resolved, a.value)
+     WHEN 'commitfest' THEN 'cf:' || a.value ELSE 'release:' || a.value END"
+    };
+}
+
+/// The lower-cased names of the authors whose keys are in a text[]
+/// parameter: their display names and the names they sent mail under.
+macro_rules! names_of {
+    ($param:literal) => {
+        concat!(
+            "SELECT DISTINCT lower(n.name) AS name FROM (
+        SELECT a.display_name AS name FROM authors a WHERE a.id = ANY (",
+            ids!("author:", $param),
+            ")
+        UNION ALL SELECT an.name FROM author_names an WHERE an.author_id = ANY (",
+            ids!("author:", $param),
+            ")) n"
+        )
     };
 }
 
@@ -250,7 +292,11 @@ UNION ALL
 SELECT 'commit:' || x.value, 'Commit', ",
     commit_props!(),
     "
-FROM (SELECT DISTINCT value FROM anchors WHERE kind = 'commit') x
+FROM (SELECT sha AS value FROM code_commits
+      UNION SELECT coalesce(resolved, value) FROM anchors WHERE kind = 'commit') x
+",
+    commit_rows!(),
+    "
 UNION ALL
 SELECT 'cf:' || x.value, 'CommitFestEntry', ",
     cf_props!(),
@@ -295,8 +341,26 @@ SELECT 'EVIDENCED_BY', ", extract_key!(), ", 'message:' || m.message_id
 FROM citations c JOIN messages m ON m.id = c.message_id
 LEFT JOIN features f ON c.extract_kind = 'feature' AND f.id = c.extract_id
 WHERE c.extract_kind <> 'feature' OR f.id IS NOT NULL
+UNION ALL
+SELECT 'MODIFIES', 'commit:' || c.sha, 'file:' || f.path FROM code_commit_files f JOIN code_commits c ON c.addr = f.addr
+UNION ALL
+SELECT DISTINCT 'DISCUSSED_IN', 'commit:' || t.sha, 'thread:' || t.thread_id FROM code_commit_threads t
+UNION ALL
+SELECT 'BACKPATCH_OF', 'commit:' || c.sha, 'commit:' || r.sha
+FROM code_commits c JOIN code_commits r ON r.addr = c.backpatch WHERE r.addr <> c.addr
+UNION ALL
+SELECT 'COMMITTED', w.author_key, 'commit:' || c.sha
+FROM want_committers w JOIN code_commits c ON lower(c.author_name) = w.name
 ON CONFLICT DO NOTHING"
 );
+
+/// Each author name in the history, lower-cased, with the key of the one
+/// author that has it (`graph_committer`, migration 0014). A full sync takes
+/// both its COMMITTED edges and `graph_committers` from this one reading.
+const WANT_COMMITTERS: &str = "CREATE TEMP TABLE want_committers ON COMMIT DROP AS
+SELECT n.name, 'author:' || g.author_id AS author_key
+FROM (SELECT DISTINCT lower(author_name) AS name FROM code_commits) n
+CROSS JOIN LATERAL graph_committer(n.name) g";
 
 /// The wanted vertices among the keys in $1, as WANT_NODES computes them.
 const KEYED_NODES: &str = concat!(
@@ -376,7 +440,11 @@ SELECT 'commit:' || x.value, 'Commit', ",
 FROM unnest(",
     names!("commit:", "$1"),
     ") x (value)
-WHERE EXISTS (SELECT FROM anchors a WHERE a.kind = 'commit' AND a.value = x.value)
+",
+    commit_rows!(),
+    "
+WHERE c.addr IS NOT NULL
+   OR EXISTS (SELECT FROM anchors a WHERE a.kind = 'commit' AND coalesce(a.resolved, a.value) = x.value)
 UNION ALL
 SELECT 'cf:' || x.value, 'CommitFestEntry', ",
     cf_props!(),
@@ -452,12 +520,16 @@ FROM messages m JOIN anchors a ON a.message_id = m.id
 WHERE m.message_id = ANY (", names!("message:", "$1"), ")
 UNION ALL
 SELECT 'message:' || m.message_id, ", anchor_key!(), "
-FROM (SELECT CASE WHEN starts_with(k, 'file:') THEN 'file' WHEN starts_with(k, 'commit:') THEN 'commit'
-                  WHEN starts_with(k, 'cf:') THEN 'commitfest' WHEN starts_with(k, 'release:') THEN 'release' END AS kind,
+FROM (SELECT CASE WHEN starts_with(k, 'file:') THEN 'file' WHEN starts_with(k, 'cf:') THEN 'commitfest'
+                  WHEN starts_with(k, 'release:') THEN 'release' END AS kind,
              substr(k, strpos(k, ':') + 1) AS value
       FROM unnest($2::text[]) k) t
 JOIN anchors a ON a.kind = t.kind AND a.value = t.value
-JOIN messages m ON m.id = a.message_id"
+JOIN messages m ON m.id = a.message_id
+UNION ALL
+SELECT 'message:' || m.message_id, ", anchor_key!(), "
+FROM anchors a JOIN messages m ON m.id = a.message_id
+WHERE a.kind = 'commit' AND coalesce(a.resolved, a.value) = ANY (", names!("commit:", "$2"), ")"
         ),
     },
     EdgeSource {
@@ -579,7 +651,109 @@ LEFT JOIN features f ON c.extract_kind = 'feature' AND f.id = c.extract_id
 WHERE m.message_id = ANY (", names!("message:", "$2"), ")"
         ),
     },
+    EdgeSource {
+        label: "MODIFIES",
+        starts: &["commit:"],
+        ends: &["file:"],
+        by_end: false,
+        sql: concat!(
+            "SELECT 'commit:' || c.sha, 'file:' || f.path FROM code_commits c JOIN code_commit_files f ON f.addr = c.addr
+WHERE c.sha = ANY (", names!("commit:", "$1"), ")
+UNION ALL
+SELECT 'commit:' || c.sha, 'file:' || f.path FROM code_commit_files f JOIN code_commits c ON c.addr = f.addr
+WHERE f.path = ANY (", names!("file:", "$2"), ")"
+        ),
+    },
+    EdgeSource {
+        label: "DISCUSSED_IN",
+        starts: &["commit:"],
+        ends: &["thread:"],
+        by_end: false,
+        sql: concat!(
+            "SELECT DISTINCT 'commit:' || t.sha, 'thread:' || t.thread_id FROM code_commit_threads t
+WHERE t.sha = ANY (", names!("commit:", "$1"), ")
+UNION ALL
+SELECT DISTINCT 'commit:' || t.sha, 'thread:' || t.thread_id FROM code_commit_threads t
+WHERE t.thread_id = ANY (", ids!("thread:", "$2"), ")"
+        ),
+    },
+    EdgeSource {
+        label: "BACKPATCH_OF",
+        starts: &["commit:"],
+        ends: &["commit:"],
+        by_end: false,
+        sql: concat!(
+            "SELECT 'commit:' || c.sha, 'commit:' || r.sha FROM code_commits c JOIN code_commits r ON r.addr = c.backpatch
+WHERE r.addr <> c.addr AND c.sha = ANY (", names!("commit:", "$1"), ")
+UNION ALL
+SELECT 'commit:' || c.sha, 'commit:' || r.sha FROM code_commits r JOIN code_commits c ON c.backpatch = r.addr
+WHERE c.addr <> r.addr AND r.sha = ANY (", names!("commit:", "$2"), ")"
+        ),
+    },
+    EdgeSource {
+        label: "COMMITTED",
+        starts: &["author:"],
+        ends: &["commit:"],
+        by_end: true,
+        sql: concat!(
+            "WITH commits AS (SELECT c.sha, lower(c.author_name) AS name FROM code_commits c
+                 WHERE c.sha = ANY (", names!("commit:", "$2"), "))
+SELECT 'author:' || m.author_id, 'commit:' || c.sha
+FROM (", names_of!("$1"), ") x
+CROSS JOIN LATERAL graph_committer(x.name) m
+JOIN code_commits c ON lower(c.author_name) = x.name
+WHERE m.author_id = ANY (", ids!("author:", "$1"), ")
+UNION ALL
+SELECT 'author:' || m.author_id, 'commit:' || c.sha
+FROM (SELECT DISTINCT name FROM commits) x CROSS JOIN LATERAL graph_committer(x.name) m
+JOIN commits c ON c.name = x.name"
+        ),
+    },
 ];
+
+/// The author names whose committer changed: each name in the history whose
+/// one author now (`graph_committer`) differs from the one
+/// `graph_committers` keeps, as (name, was, now), keeping the new one. A
+/// commit's COMMITTED edge comes from the one author with its author name,
+/// so it follows the authors' names, not a row of its own: each batch
+/// compares them all, a few hundred index lookups for PostgreSQL's 61
+/// names. A batch runs whenever a change is captured, and every writer of
+/// author_names also changes a captured column of authors
+/// (count_author_message, merge_authors, undo_merge), so a name whose author
+/// changes is compared by the batch that applies that change.
+const COMMITTER_CHANGES: &str = "WITH RECURSIVE names (name) AS (
+    (SELECT lower(author_name) FROM code_commits ORDER BY 1 LIMIT 1)
+    UNION ALL
+    SELECT x.name FROM names n CROSS JOIN LATERAL (
+        SELECT lower(c.author_name) AS name FROM code_commits c
+        WHERE lower(c.author_name) > n.name ORDER BY 1 LIMIT 1) x
+), changed AS (
+    SELECT n.name, k.author_key AS was, 'author:' || m.author_id AS now
+    FROM names n
+    LEFT JOIN LATERAL graph_committer(n.name) m ON true
+    LEFT JOIN graph_committers k ON k.name = n.name
+    WHERE ('author:' || m.author_id) IS DISTINCT FROM k.author_key
+), kept AS (
+    INSERT INTO graph_committers (name, author_key) SELECT name, now FROM changed WHERE now IS NOT NULL
+    ON CONFLICT (name) DO UPDATE SET author_key = EXCLUDED.author_key
+), dropped AS (
+    DELETE FROM graph_committers k USING changed x WHERE k.name = x.name AND x.now IS NULL
+)
+SELECT name, was, now FROM changed";
+
+/// The COMMITTED edges to recompute for the names in $1 whose committer was
+/// $2 and is $3: from both, into every commit of the name. An author not in
+/// the graph yet gets its edges when its vertex enters.
+const COMMITTER_EDGES: &str = "SELECT DISTINCT k.key, 'commit:' || c.sha
+FROM unnest($1::text[], $2::text[], $3::text[]) x (name, was, now)
+CROSS JOIN LATERAL (VALUES (x.was), (x.now)) k (key)
+JOIN code_commits c ON lower(c.author_name) = x.name
+WHERE k.key IS NOT NULL";
+
+/// Edge labels that an older image doesn't know. Its full sync drops their
+/// bookkeeping along with the commits' vertices but leaves their AGE rows,
+/// which a full sync removes.
+const LATER_EDGE_LABELS: &[&str] = &["BACKPATCH_OF", "COMMITTED"];
 
 fn edge_source(label: &str) -> Option<&'static EdgeSource> {
     EDGE_SOURCES.iter().find(|source| source.label == label)
@@ -756,7 +930,8 @@ pub async fn request_full(client: &impl GenericClient, reason: &str) -> Result<(
 
 /// Recomputes the whole graph and brings it up to date, in one transaction.
 /// It answers the requests for a full sync made before it, applies the change
-/// entries committed before it, and recounts the labels.
+/// entries committed before it, recounts the labels, and records its
+/// [`PROJECTION`].
 pub async fn sync(client: &mut Client) -> Result<SyncStats> {
     let started = Instant::now();
     let tx = client.transaction().await?;
@@ -784,6 +959,9 @@ pub async fn sync(client: &mut Client) -> Result<SyncStats> {
     tx.batch_execute(WANT_NODES)
         .await
         .context("cannot compute the graph's vertices")?;
+    tx.batch_execute(WANT_COMMITTERS)
+        .await
+        .context("cannot compute the committers")?;
     tx.batch_execute(WANT_EDGES)
         .await
         .context("cannot compute the graph's edges")?;
@@ -791,11 +969,24 @@ pub async fn sync(client: &mut Client) -> Result<SyncStats> {
         "DELETE FROM want_edges w
          WHERE NOT EXISTS (SELECT FROM want_nodes n WHERE n.key = w.start_key)
             OR NOT EXISTS (SELECT FROM want_nodes n WHERE n.key = w.end_key);
-         ANALYZE want_nodes; ANALYZE want_edges;",
+         ANALYZE want_nodes; ANALYZE want_edges;
+         DELETE FROM graph_committers;
+         INSERT INTO graph_committers (name, author_key) SELECT name, author_key FROM want_committers;",
     )
     .await?;
     let labels = labels(&tx).await?;
 
+    for label in LATER_EDGE_LABELS {
+        stats.edges_removed += tx
+            .execute(
+                &format!(
+                    "DELETE FROM {GRAPH}.\"{label}\" e
+                     WHERE NOT EXISTS (SELECT FROM graph_edges g WHERE g.graph_id = e.id)"
+                ),
+                &[],
+            )
+            .await?;
+    }
     for label in EDGE_LABELS {
         stats.edges_removed += tx
             .execute(
@@ -915,9 +1106,11 @@ pub async fn sync(client: &mut Client) -> Result<SyncStats> {
     )
     .await?;
     tx.execute(
-        "INSERT INTO graph_sync_state AS s (full_requested, full_done, last_full_at) VALUES ($1, $1, now())
-         ON CONFLICT (id) DO UPDATE SET full_done = greatest(s.full_done, $1), last_full_at = now()",
-        &[&requested],
+        "INSERT INTO graph_sync_state AS s (full_requested, full_done, last_full_at, projection)
+         VALUES ($1, $1, now(), $2)
+         ON CONFLICT (id) DO UPDATE
+             SET full_done = greatest(s.full_done, $1), last_full_at = now(), projection = $2",
+        &[&requested, &PROJECTION],
     )
     .await?;
     stats.ms = started.elapsed().as_millis() as u64;
@@ -1051,6 +1244,34 @@ pub async fn sync_changes(client: &mut Client, limit: i64) -> Result<SyncStats> 
         entered.extend(vertices.iter().map(|(key, _)| key.clone()));
     }
 
+    // The authors' names, as the vertices now stand, decide who committed
+    // the commits of a name.
+    let flips = tx
+        .query(COMMITTER_CHANGES, &[])
+        .await
+        .context("cannot compare the committers")?;
+    if !flips.is_empty() {
+        let (mut names, mut was, mut now) = (Vec::new(), Vec::new(), Vec::new());
+        for row in &flips {
+            let (name, before, after): (String, Option<String>, Option<String>) =
+                (row.get(0), row.get(1), row.get(2));
+            tracing::info!(%name, was = ?before, now = ?after, "a committer's name changed author");
+            names.push(name);
+            was.push(before);
+            now.push(after);
+        }
+        for row in tx
+            .query(COMMITTER_EDGES, &[&names, &was, &now])
+            .await
+            .context("cannot find the committers' commits")?
+        {
+            edges
+                .entry("COMMITTED".to_owned())
+                .or_default()
+                .insert((row.get(0), row.get(1)));
+        }
+    }
+
     // The edges: those the changes name, found again from their rows, and the
     // edges of the vertices that entered the graph.
     let mut starts: HashMap<&str, BTreeSet<String>> = HashMap::new();
@@ -1171,11 +1392,16 @@ pub async fn sync_changes(client: &mut Client, limit: i64) -> Result<SyncStats> 
     }
 
     for (label, delta) in counts.iter().filter(|(_, delta)| **delta != 0) {
-        tx.execute(
-            "UPDATE graph_label_counts SET count = count + $2 WHERE label = $1",
-            &[label, delta],
-        )
-        .await?;
+        let kept = tx
+            .execute(
+                "UPDATE graph_label_counts SET count = count + $2 WHERE label = $1",
+                &[label, delta],
+            )
+            .await?;
+        // As an older image's full sync leaves the labels it doesn't know.
+        if kept == 0 {
+            request_full(&tx, &format!("the graph keeps no count of {label}")).await?;
+        }
     }
     tx.execute("DELETE FROM graph_changes WHERE id = ANY ($1)", &[&ids])
         .await?;
@@ -1215,9 +1441,10 @@ pub async fn pending(client: &impl GenericClient) -> Result<bool> {
         .get(0))
 }
 
-/// The graph sync job's run: a full sync if one was requested, or if
-/// `reconcile_every` has passed since the last one and no change is waiting;
-/// else batches of changes until none is left or `budget` is spent.
+/// The graph sync job's run: a full sync if one was requested, the graph has
+/// an older projection or a label has no kept count, or if `reconcile_every`
+/// has passed since the last one and no change is waiting; else batches of
+/// changes until none is left or `budget` is spent.
 pub async fn run(
     client: &mut Client,
     budget: Duration,
@@ -1225,10 +1452,18 @@ pub async fn run(
 ) -> Result<RunReport> {
     let started = Instant::now();
     let mut report = RunReport::default();
+    let registered: Vec<&str> = VERTEX_LABELS.iter().chain(EDGE_LABELS).copied().collect();
     let state = client
         .query_opt(
-            "SELECT full_requested > full_done, full_reason, last_full_at FROM graph_sync_state",
-            &[],
+            "SELECT full_requested > full_done OR projection < $1
+                    OR EXISTS (SELECT FROM unnest($2::text[]) l (label)
+                               WHERE NOT EXISTS (SELECT FROM graph_label_counts c WHERE c.label = l.label)),
+                    CASE WHEN full_requested > full_done THEN full_reason
+                         WHEN projection < $1 THEN 'the projection changed'
+                         ELSE 'a label has no count, as after an older image''s full sync' END,
+                    last_full_at
+             FROM graph_sync_state",
+            &[&PROJECTION, &registered],
         )
         .await?;
     let (requested, reason, last_full) = match &state {
@@ -1301,6 +1536,8 @@ pub struct Drift {
     pub age: Vec<String>,
     /// `label: kept, actual`.
     pub counts: Vec<String>,
+    /// Author names whose kept committer differs, as `name: kept, wanted`.
+    pub committers: Vec<String>,
 }
 
 impl Drift {
@@ -1312,6 +1549,7 @@ impl Drift {
             && self.extra_edges.is_empty()
             && self.age.is_empty()
             && self.counts.is_empty()
+            && self.committers.is_empty()
     }
 }
 
@@ -1333,6 +1571,7 @@ pub async fn check(client: &mut Client) -> Result<Drift> {
     )
     .await?;
     tx.batch_execute(WANT_NODES).await?;
+    tx.batch_execute(WANT_COMMITTERS).await?;
     tx.batch_execute(WANT_EDGES).await?;
     tx.batch_execute(
         "DELETE FROM want_edges w
@@ -1345,6 +1584,16 @@ pub async fn check(client: &mut Client) -> Result<Drift> {
         rows.iter().map(|row| row.get(0)).collect()
     };
     let mut drift = Drift {
+        committers: list(
+            tx.query(
+                "SELECT coalesce(k.name, w.name) || ': ' || coalesce(k.author_key, 'none') || ', '
+                        || coalesce(w.author_key, 'none')
+                 FROM graph_committers k FULL JOIN want_committers w ON w.name = k.name
+                 WHERE k.author_key IS DISTINCT FROM w.author_key ORDER BY 1 LIMIT $1",
+                &[&DRIFT_EXAMPLES],
+            )
+            .await?,
+        ),
         missing_nodes: list(
             tx.query(
                 "SELECT w.key FROM want_nodes w WHERE NOT EXISTS (SELECT FROM graph_nodes g WHERE g.key = w.key)

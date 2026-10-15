@@ -128,6 +128,54 @@ async fn populated_upgrade_requires_preparation_and_preserves_mappings() {
 }
 
 #[tokio::test]
+async fn the_commit_history_labels_need_no_preparation() {
+    // A populated graph from before BACKPATCH_OF and COMMITTED, as production's.
+    let db = TestDb::create().await.unwrap();
+    let mut admin = db.admin().await.unwrap();
+    admin
+        .batch_execute(
+            "SELECT ag_catalog.drop_label('pghacker_graph', 'BACKPATCH_OF');
+             SELECT ag_catalog.drop_label('pghacker_graph', 'COMMITTED');",
+        )
+        .await
+        .unwrap();
+    let mut indexer = db.indexer().await.unwrap();
+    indexer
+        .batch_execute(
+            "INSERT INTO graph_nodes (key, label, graph_id, props) VALUES
+             ('message:one', 'Message', '1'::ag_catalog.graphid, '{}'),
+             ('message:two', 'Message', '2'::ag_catalog.graphid, '{}');
+         INSERT INTO graph_edges (label, start_key, end_key, graph_id)
+             VALUES ('MENTIONS', 'message:one', 'message:two', '3'::ag_catalog.graphid);",
+        )
+        .await
+        .unwrap();
+    let error = migrate::migrate(&mut indexer).await.unwrap_err();
+    assert!(format!("{error:#}").contains("run bootstrap"), "{error:#}");
+    // Bootstrap creates them empty, with their ID and both endpoint indexes.
+    migrate::bootstrap_database(&mut admin).await.unwrap();
+    let requirements = graph_indexes::inspect(&indexer).await.unwrap();
+    for label in ["BACKPATCH_OF", "COMMITTED"] {
+        let kinds: Vec<(Kind, State)> = requirements
+            .iter()
+            .filter(|r| r.label.as_deref() == Some(label))
+            .map(|r| (r.kind, r.state))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (Kind::EdgeEndpoint, State::Ready),
+                (Kind::EdgeEndpoint, State::Ready),
+                (Kind::EdgeId, State::Ready)
+            ],
+            "{label}"
+        );
+    }
+    assert!(migrate::migrate(&mut indexer).await.unwrap().is_empty());
+    graph_indexes::check(&indexer).await.unwrap();
+}
+
+#[tokio::test]
 async fn empty_setup_refuses_a_competing_writer_lock() {
     let db = TestDb::create().await.unwrap();
     let mut indexer = db.indexer().await.unwrap();

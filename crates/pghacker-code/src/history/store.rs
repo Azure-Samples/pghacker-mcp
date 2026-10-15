@@ -53,6 +53,14 @@ pub fn readable_schema(name: &str) -> Result<&str> {
     Ok(name)
 }
 
+/// Whether writes to the history in `schema` are recorded for the graph:
+/// they are in `pghacker`, whose tables the graph projects. The history's
+/// tables have no triggers, so its writers record in `graph_changes`, in the
+/// writing transaction, what they change, with migration 0014's functions.
+pub(crate) fn captured(schema: &str) -> bool {
+    schema == "pghacker"
+}
+
 /// The history's tables, from migration 0011.
 pub const TABLES: [&str; 9] = [
     "code_history",
@@ -634,13 +642,18 @@ pub async fn finish(client: &Client, schema: &str, built: &Built<'_>) -> Result<
 
 /// Replaces `pghacker`'s history tables with the build's, in one
 /// transaction, and drops the build's schema. The tables go to pgh_indexer,
-/// which syncs them.
+/// which syncs them. The graph projects them: a full sync is requested.
 pub async fn swap(client: &mut Client, schema: &str) -> Result<()> {
     let s = schema_name(schema)?;
     let canonical: Vec<String> = TABLES.iter().map(|t| format!("pghacker.{t}")).collect();
     let tx = client.transaction().await?;
+    // The graph sync reads these tables, a full sync for minutes. Waiting for
+    // it on its lock, rather than queueing the exclusive lock behind it,
+    // leaves the code tools reading meanwhile; and no sync starts until the
+    // swap is done.
     let mut sql = format!(
-        "LOCK TABLE {} IN ACCESS EXCLUSIVE MODE; DROP TABLE {};",
+        "SELECT pg_advisory_xact_lock(hashtext('pghacker.graph_sync'));
+         LOCK TABLE {} IN ACCESS EXCLUSIVE MODE; DROP TABLE {};",
         canonical.join(", "),
         canonical.join(", ")
     );
@@ -656,7 +669,8 @@ pub async fn swap(client: &mut Client, schema: &str) -> Result<()> {
              IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgh_reader') THEN
                  GRANT SELECT ON {} TO pgh_reader;
              END IF;
-         END $$;",
+         END $$;
+         SELECT pghacker.graph_request_full('a commit history was installed');",
         TABLES
             .iter()
             .map(|t| format!("ALTER TABLE pghacker.{t} OWNER TO pgh_indexer;"))

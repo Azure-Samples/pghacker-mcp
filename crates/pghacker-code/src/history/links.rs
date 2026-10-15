@@ -2,7 +2,8 @@
 //! threads whose messages the commit's Discussion trailers name, and the
 //! threads whose messages cite the commit by SHA (mail's commit anchors).
 //! Mail keeps arriving and cites old commits, so the links are recomputed
-//! whole after each build and sync; without mail tables there are none.
+//! whole after each build and sync, and the ones that changed are written;
+//! without mail tables there are none.
 
 use std::collections::HashMap;
 
@@ -119,15 +120,32 @@ pub async fn refresh(client: &impl GenericClient, schema: &str) -> Result<Linked
     let threads: Vec<i64> = rows.iter().map(|r| r.1).collect();
     let via: Vec<&str> = rows.iter().map(|r| r.2).collect();
     let messages: Vec<i64> = rows.iter().map(|r| r.3).collect();
-    client
-        .batch_execute(&format!("DELETE FROM {s}.code_commit_threads"))
-        .await?;
+    // Only the links that changed are written; in pghacker, they're recorded
+    // for the graph too (DISCUSSED_IN).
+    let changes = if super::store::captured(s) {
+        "INSERT INTO pghacker.graph_changes (label, key, end_key) \
+         SELECT DISTINCT e.* FROM (SELECT * FROM gone UNION SELECT * FROM added) x \
+         CROSS JOIN LATERAL pghacker.graph_commit_thread_entries(x.sha, x.thread_id) e"
+    } else {
+        "SELECT"
+    };
     client
         .execute(
             &format!(
-                "INSERT INTO {s}.code_commit_threads (sha, thread_id, via, message_id) \
-                 SELECT * FROM unnest($1::text[], $2::int8[], $3::text[], $4::int8[]) \
-                 ON CONFLICT DO NOTHING"
+                "WITH new AS (
+                     SELECT * FROM unnest($1::text[], $2::int8[], $3::text[], $4::int8[])
+                         AS n (sha, thread_id, via, message_id)
+                 ), gone AS (
+                     DELETE FROM {s}.code_commit_threads t
+                     WHERE NOT EXISTS (SELECT FROM new n WHERE n.sha = t.sha AND n.thread_id = t.thread_id
+                                                          AND n.via = t.via AND n.message_id = t.message_id)
+                     RETURNING t.sha, t.thread_id
+                 ), added AS (
+                     INSERT INTO {s}.code_commit_threads (sha, thread_id, via, message_id)
+                     SELECT * FROM new ON CONFLICT DO NOTHING
+                     RETURNING sha, thread_id
+                 )
+                 {changes}"
             ),
             &[&shas, &threads, &via, &messages],
         )

@@ -5,6 +5,10 @@
 //! weave order: a new line's key falls between its anchor's and the next key
 //! in the lineage, the place the build's linked list gives it. When two keys
 //! are too close, the lineage is renumbered and `weave_epoch` bumped.
+//!
+//! In `pghacker`, each batch of commits records in `graph_changes` what its
+//! commits change in the graph, as do the links' refresh and the regroup
+//! that follow.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -336,6 +340,7 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
         ledger.next_lineage = row.get::<_, i32>(2) as u32;
     }
     let mut walker = Walker::with_ledger(&repo, &paths, ledger)?;
+    let capture = super::store::captured(&s);
     for batch in pending.chunks(opts.batch.max(1)) {
         let tx = handle.block_on(client.transaction())?;
         let mut heads: HashMap<i16, i64> = HashMap::new();
@@ -360,6 +365,16 @@ fn sync_blocking(handle: &Handle, mut client: Client, opts: &SyncOptions) -> Res
             handle.block_on(tx.execute(
                 &format!("UPDATE {s}.code_lanes SET head_addr = $2 WHERE id = $1"),
                 &[&lane, &head],
+            ))?;
+        }
+        if capture {
+            // What the new commits change in the graph.
+            let addrs: Vec<i64> = batch.iter().map(|p| p.commit.addr).collect();
+            handle.block_on(tx.execute(
+                "INSERT INTO pghacker.graph_changes (label, key, end_key) \
+                 SELECT DISTINCT e.* FROM unnest($1::int8[]) a \
+                 CROSS JOIN LATERAL pghacker.graph_commit_entries(a) e",
+                &[&addrs],
             ))?;
         }
         handle.block_on(tx.commit())?;

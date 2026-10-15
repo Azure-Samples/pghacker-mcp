@@ -6,7 +6,7 @@
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, extraction, graph, history};
+use pghacker_indexer::{Indexer, extraction, graph};
 use serde_json::{Value, json};
 use tokio_postgres::Client;
 
@@ -64,11 +64,36 @@ fn version(id: u64, path: &str, subsystem: &str) -> String {
     )
 }
 
-/// Loads the fixture. The history's tables have no triggers: as a sync does,
-/// its versions' graph entries are recorded after them.
+/// The newest of the history's file versions, -1 for none: versions written
+/// after it have greater IDs.
+async fn newest_version(client: &Client) -> i32 {
+    client
+        .query_one("SELECT coalesce(max(id), -1) FROM code_file_versions", &[])
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Records the graph entries of the file versions after `after`, as the
+/// history's sync records those of the files its commits change
+/// (`graph_commit_entries`): the history's tables have no triggers.
+async fn record_versions(client: &Client, after: i32) -> u64 {
+    client
+        .execute(
+            "INSERT INTO graph_changes (label, key, end_key)
+             SELECT DISTINCT e.*
+             FROM (SELECT DISTINCT path, subsystem FROM code_file_versions WHERE id > $1) v
+             CROSS JOIN LATERAL graph_code_file_entries(v.path, v.subsystem) e",
+            &[&after],
+        )
+        .await
+        .unwrap()
+}
+
+/// Loads the fixture, recording its versions' graph entries as a sync would.
 async fn load(client: &Client) {
     client.batch_execute(FIXTURE).await.unwrap();
-    assert!(history::capture_files(client, -1).await.unwrap() > 0);
+    assert!(record_versions(client, -1).await > 0);
 }
 
 /// A fresh database with the fixture, and the graph built by a full sync.
@@ -402,7 +427,7 @@ async fn history_files_follow_syncs_and_installs() {
     );
     // A sync adds versions, a new file's and an existing file's, which no
     // trigger captures: it records their entries itself.
-    let newest = history::newest_version(&client).await.unwrap();
+    let newest = newest_version(&client).await;
     assert_eq!(newest, 4);
     client
         .batch_execute(&format!(
@@ -414,7 +439,7 @@ async fn history_files_follow_syncs_and_installs() {
         .await
         .unwrap();
     assert_eq!(changes(&client).await, 0, "the history has no triggers");
-    assert!(history::capture_files(&client, newest).await.unwrap() > 0);
+    assert!(record_versions(&client, newest).await > 0);
     converged(&mut client).await;
     assert_eq!(
         props(&client, "file:doc/src/sgml/release-19.sgml").await,
@@ -511,6 +536,72 @@ async fn a_truncate_asks_for_a_full_sync() {
 }
 
 #[tokio::test]
+async fn an_older_projection_needs_a_full_sync() {
+    let (_db, mut client) = synced().await;
+    let projection = "SELECT projection FROM graph_sync_state";
+    let recorded: i32 = client.query_one(projection, &[]).await.unwrap().get(0);
+    assert_eq!(recorded, graph::PROJECTION);
+    // As if an indexer with the previous projection had answered the
+    // requests, as while an old revision runs the jobs beside a new one.
+    client
+        .batch_execute("UPDATE graph_sync_state SET projection = projection - 1")
+        .await
+        .unwrap();
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert_eq!(report.full.map(|stats| stats.changed()), Some(0));
+    let recorded: i32 = client.query_one(projection, &[]).await.unwrap().get(0);
+    assert_eq!(recorded, graph::PROJECTION);
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert!(report.full.is_none());
+}
+
+#[tokio::test]
+async fn a_label_without_a_count_asks_for_a_full_sync() {
+    // As an older image's full sync leaves a label it doesn't know.
+    let (_db, mut client) = synced().await;
+    client
+        .batch_execute(
+            "DELETE FROM graph_label_counts WHERE label = 'AUTHORED';
+             INSERT INTO messages (message_id, list, thread_id, author_id, subject, sent_at)
+             VALUES ('m5@example.org', 'pgsql-hackers', 10, 1, 'Re: JSON_TABLE plan clause', '2026-06-06');",
+        )
+        .await
+        .unwrap();
+    // A batch that changes the label can't count it: it asks for a full sync.
+    graph::sync_changes(&mut client, graph::BATCH)
+        .await
+        .unwrap();
+    let requested: bool = client
+        .query_one(
+            "SELECT full_requested > full_done FROM graph_sync_state",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(requested);
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert!(report.full.is_some());
+    converged(&mut client).await;
+    // And the sync job runs one itself while a label has no count.
+    client
+        .batch_execute("DELETE FROM graph_label_counts WHERE label = 'HOLDS'")
+        .await
+        .unwrap();
+    let report = graph::run(&mut client, std::time::Duration::from_secs(10), None)
+        .await
+        .unwrap();
+    assert_eq!(report.full.map(|stats| stats.changed()), Some(0));
+    converged(&mut client).await;
+}
+
+#[tokio::test]
 async fn the_counts_follow_the_graph() {
     let (_db, mut client) = synced().await;
     client
@@ -594,6 +685,7 @@ async fn a_restore_rebuilds_the_graph() {
     client
         .batch_execute(
             "TRUNCATE graph_nodes, graph_edges, graph_sync_runs, graph_changes, graph_sync_state, graph_label_counts,
+                      graph_committers,
                       authors, threads, messages, anchors, features, decisions, positions, citations, feature_threads,
                       feature_files, code_file_versions, author_names CASCADE;
              DELETE FROM pghacker_graph._ag_label_edge;
@@ -903,12 +995,19 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
         }
         16 => {
             let (kind, value) = anchor(rng);
-            match rng.below(3) {
+            match rng.below(4) {
                 0 => format!(
                     "INSERT INTO anchors (message_id, kind, value) VALUES ({}, '{kind}', '{value}') ON CONFLICT DO NOTHING",
                     or_null(message)
                 ),
                 1 => format!("DELETE FROM anchors WHERE ctid IN (SELECT ctid FROM anchors ORDER BY id OFFSET {row} LIMIT 1)"),
+                // A commit citation resolved to another's SHA, as
+                // resolve_anchors does with the history on, or unresolved.
+                2 => format!(
+                    "UPDATE anchors SET resolved = CASE WHEN resolved IS NULL THEN '{}' END
+                     WHERE ctid IN (SELECT ctid FROM anchors WHERE kind = 'commit' ORDER BY id OFFSET {row} LIMIT 1)",
+                    rng.of(&["abc1234", "def5678", "0123abcd"])
+                ),
                 _ => format!(
                     "UPDATE anchors SET kind = '{kind}', value = '{value}'
                      WHERE ctid IN (SELECT ctid FROM anchors ORDER BY id OFFSET {row} LIMIT 1)"
@@ -917,7 +1016,7 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
         }
         17 => {
             // As a sync does: new versions, whose graph entries it records.
-            let newest = history::newest_version(&*client).await.unwrap();
+            let newest = newest_version(client).await;
             let paths: Vec<&str> = FILES.iter().copied().filter(|_| rng.chance(50)).collect();
             if paths.is_empty() {
                 return;
@@ -928,7 +1027,7 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
             }
             let sql = format!("{VERSION_COLUMNS} {}", versions.join(", "));
             client.batch_execute(&sql).await.unwrap();
-            history::capture_files(&*client, newest).await.unwrap();
+            record_versions(client, newest).await;
             return;
         }
         18 => {
@@ -974,7 +1073,8 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
             format!(
                 "UPDATE threads SET extraction_state = 'extracted' WHERE id = {};
                  UPDATE features SET description = 'Changed {n}.' WHERE id = {};
-                 UPDATE anchors SET resolved = 'x{n}' WHERE ctid IN (SELECT ctid FROM anchors ORDER BY id OFFSET {row} LIMIT 1);",
+                 UPDATE anchors SET resolved = 'x{n}'
+                 WHERE ctid IN (SELECT ctid FROM anchors WHERE kind <> 'commit' ORDER BY id OFFSET {row} LIMIT 1);",
                 or_null(thread),
                 or_null(feature)
             )

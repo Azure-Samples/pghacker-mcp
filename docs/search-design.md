@@ -61,6 +61,8 @@ The history is the code tools' only source: `PGHACKER_CODE_HISTORY` only names a
 
 A bulk build takes 6 minutes on 12 cores (2 walking the commits) and 1.6 GB of memory; it writes a schema of its own and swaps it into `pghacker` in one transaction. An hourly job applies new commits through the same walker, then refreshes back-patch groups and thread links; a build to N and syncs to M equal one build to M, down to weave order. The `patch_lines` job indexes patches 200 at a time until none waits; meanwhile `search_patches` says how many are left.
 
+The AGE graph projects the installed history: a `Commit` vertex per commit, `MODIFIES` its files, `DISCUSSED_IN` its threads, `BACKPATCH_OF` its back-patch group's first commit, and `COMMITTED` from the one mail author with its author name. The history's tables have no triggers, since an install swaps them in whole: the sync, the links' refresh and the regroup record what they change for the graph's incremental sync, and an install asks for a full one.
+
 ## Validation
 
 - **Exactness:** every regular file of 79 commits (39 branch heads, 40 at random; 345,081 files, 203M lines, text read as Latin-1 included) rebuilds to its git blob byte for byte; index and sequential scans agree.

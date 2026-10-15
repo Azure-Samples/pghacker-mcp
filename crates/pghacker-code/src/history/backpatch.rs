@@ -182,12 +182,25 @@ pub async fn regroup(client: &impl GenericClient, schema: &str) -> Result<u64> {
             backpatch.push(rep);
         }
     }
+    // In pghacker, the commits whose group changed are recorded for the
+    // graph: their vertex, and their BACKPATCH_OF edges before and after.
+    let changes = if super::store::captured(s) {
+        "INSERT INTO pghacker.graph_changes (label, key, end_key) \
+         SELECT DISTINCT e.* FROM changed x CROSS JOIN LATERAL (VALUES (x.old), (x.new)) b (backpatch) \
+         CROSS JOIN LATERAL pghacker.graph_backpatch_entries(x.addr, b.backpatch) e"
+    } else {
+        "SELECT"
+    };
     client
         .execute(
             &format!(
-                "UPDATE {s}.code_commits c SET backpatch = u.backpatch \
-                 FROM unnest($1::int8[], $2::int8[]) AS u(addr, backpatch) \
-                 WHERE c.addr = u.addr AND c.backpatch IS DISTINCT FROM u.backpatch"
+                "WITH changed AS (
+                     UPDATE {s}.code_commits c SET backpatch = u.backpatch
+                     FROM unnest($1::int8[], $2::int8[]) AS u (addr, backpatch), {s}.code_commits o
+                     WHERE c.addr = u.addr AND o.addr = u.addr AND c.backpatch IS DISTINCT FROM u.backpatch
+                     RETURNING c.addr, o.backpatch AS old, u.backpatch AS new
+                 )
+                 {changes}"
             ),
             &[&addrs, &backpatch],
         )

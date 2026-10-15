@@ -35,7 +35,9 @@ pub const VERTEX_LABELS: &[&str] = &[
     "CommitFestEntry",
 ];
 
-/// The graph's edge labels, created by bootstrap.
+/// The graph's edge labels, created by bootstrap: a new one empty, with its
+/// indexes. MODIFIES, DISCUSSED_IN, BACKPATCH_OF and COMMITTED connect the
+/// commit history.
 pub const EDGE_LABELS: &[&str] = &[
     "AUTHORED",
     "REPLIES_TO",
@@ -51,4 +53,6 @@ pub const EDGE_LABELS: &[&str] = &[
     "EVIDENCED_BY",
     "MODIFIES",
     "DISCUSSED_IN",
+    "BACKPATCH_OF",
+    "COMMITTED",
 ];

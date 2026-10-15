@@ -235,6 +235,11 @@ migration still fail strict restore compatibility: regenerate them with the
 approved new image rather than weakening the check. `docs/design.md` is not
 part of this change.
 
+The commit history's edge labels, `BACKPATCH_OF` and `COMMITTED` (migration
+`0014_commit_graph`), need no preparation: the new image's bootstrap creates
+them empty, with their `id`, `start_id` and `end_id` indexes, in the same
+transaction, and `--check` then passes.
+
 ## Commit history
 
 The code tools read PostgreSQL's whole commit history ([README](../README.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed. Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
@@ -252,6 +257,19 @@ It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.gi
 Check `tools/list` (First deployment, step 9) and run the evaluation.
 
 **Retired snapshots.** Until the history, the code tools read source snapshots (15 in production: 48M lines, 5.9 GB). Migration `0016_retire_snapshots` drops their tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and records the graph keys of their files and of the history's, so the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history, without a full sync: a File is `loaded` when the history has its path. It also cancels any `code_snapshot` job still queued. An image without `0016` reads the dropped tables in the graph sync and `ingest_status`, so there is no rolling back past it: fix forward.
+
+**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph (README, "How the graph follows the tables"): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
+- The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each install (step 2).
+- Full syncs, including the weekly reconcile, then take about as much longer (226 s today, so roughly 270 s): locally, the history's part took 20 s of a full sync.
+- The history's writers record their changes for the incremental sync: an hourly sync's few commits cost a batch of milliseconds.
+- An older image doesn't know `BACKPATCH_OF` and `COMMITTED`: its graph sync stops at their change entries. After rolling back to one, as `pgh_indexer`:
+
+  ```sql
+  DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
+  SELECT pghacker.graph_request_full('rolled back past 0014');
+  ```
+
+  Its full sync brings the graph to its own projection: it drops those labels' counts and bookkeeping but leaves their edges in AGE. Rolled forward again, this image finds the counts missing and runs a full sync, which removes those edges and projects them again.
 
 ## Production mode in use
 
@@ -281,7 +299,7 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 - **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches (README, "How the graph follows the tables").
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.
-  - A full sync runs once after the upgrade that installs the change capture, after a restore, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
+  - A full sync runs once after the upgrade that installs the change capture, after an upgrade that changes what the graph projects, after a restore or a commit-history install, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
 - **Secrets.**
   - Rotating the GitHub OAuth App's secret means a new `github-client-secret` version and then a restart.
   - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. The next bootstrap sets it on the role.
