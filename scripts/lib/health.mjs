@@ -75,6 +75,11 @@ export async function checkPortal(config, { timeout = 90_000, fetchImpl = fetch 
 /** The home page's marker, which PilotSwarm's page doesn't have. */
 const HOME_MARKER = '<meta name="application-name" content="pghacker-mcp"';
 
+/** The scripts that `html` loads from /static/: the page's, and its theme's before the first paint. */
+function staticScripts(html) {
+  return [...html.matchAll(/src="(\/static\/[A-Za-z0-9_.-]+\.js)"/g)].map((match) => match[1]);
+}
+
 /**
  * The site's routes through the edge on PORTAL_PORT, as scripts/lib/routes.mjs
  * gives them: the home page and its files, the portal's share links sent on
@@ -98,12 +103,17 @@ export async function checkSite(config, { timeout = 30_000, fetchImpl = fetch, l
   if (/assets\/[A-Za-z0-9_.-]+\.js/.test(html)) {
     throw new Error("The home page refers to assets/*.js, which the portal would take for a new build of itself.");
   }
-  const script = /src="(\/static\/[A-Za-z0-9_.-]+\.js)"/.exec(html)?.[1];
-  const asset = script ? await get(script) : undefined;
-  if (!asset?.ok || !/immutable/.test(asset.headers.get("cache-control") ?? "")) {
-    throw new Error("The home page's script did not load from /static/ as an immutable file.");
+  const scripts = staticScripts(html);
+  if (scripts.length === 0) {
+    throw new Error("The home page names no script under /static/.");
   }
-  await asset.arrayBuffer();
+  for (const script of scripts) {
+    const asset = await get(script);
+    await asset.arrayBuffer();
+    if (!asset.ok || !/immutable/.test(asset.headers.get("cache-control") ?? "")) {
+      throw new Error(`The home page's script ${script} did not load from /static/ as an immutable file.`);
+    }
+  }
 
   const share = await get("/?session=smoke-test", { redirect: "manual" });
   if (share.status !== 302 || share.headers.get("location") !== "/portal/?session=smoke-test") {
@@ -153,22 +163,29 @@ export async function checkPublic(origin, { timeout = 30_000, fetchImpl = fetch,
     }
   };
 
-  let script;
+  let scripts = [];
   await check("the home page, without sign-in", async () => {
     const response = await get("/");
     const html = await response.text();
-    script = /src="(\/static\/[A-Za-z0-9_.-]+\.js)"/.exec(html)?.[1];
+    scripts = staticScripts(html);
     const ok = response.status === 200 && html.includes(HOME_MARKER)
       && /no-cache/.test(response.headers.get("cache-control") ?? "")
       && Boolean(response.headers.get("content-security-policy"))
       && !/assets\/[A-Za-z0-9_.-]+\.js/.test(html);
     return { ok, detail: `HTTP ${response.status}, ${response.headers.get("cache-control") ?? "no cache-control"}` };
   });
-  await check("its script from /static/, kept a year", async () => {
-    if (!script) return { ok: false, detail: "the page names no /static/ script" };
-    const response = await get(script);
-    await response.arrayBuffer();
-    return { ok: response.status === 200 && /immutable/.test(response.headers.get("cache-control") ?? ""), detail: `HTTP ${response.status} ${script}` };
+  await check("its scripts from /static/, kept a year", async () => {
+    if (scripts.length === 0) return { ok: false, detail: "the page names no /static/ script" };
+    const results = [];
+    for (const script of scripts) {
+      const response = await get(script);
+      await response.arrayBuffer();
+      results.push({ script, ok: response.status === 200 && /immutable/.test(response.headers.get("cache-control") ?? ""), status: response.status });
+    }
+    return {
+      ok: results.every((result) => result.ok),
+      detail: results.map((result) => `HTTP ${result.status} ${result.script}`).join(", "),
+    };
   });
   await check("a portal share link goes on to /portal/", async () => {
     const response = await get("/?session=check-public");

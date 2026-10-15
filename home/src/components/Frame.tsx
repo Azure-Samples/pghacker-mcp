@@ -1,4 +1,5 @@
 import { PRODUCT } from "../content.ts";
+import { ThemeMenu } from "./ThemeMenu.tsx";
 
 /** The mark: a speech bubble with a quotation, for cited answers, on the brand colour. */
 export function BrandMark({ size = 32 }: { size?: number }) {
@@ -25,10 +26,7 @@ export function TopBar() {
             <span className="brand-sub">{PRODUCT.subtitle}</span>
           </span>
         </a>
-        <nav className="topbar-nav" aria-label="On this page">
-          <a href="#connect">Connect</a>
-          <a href="#examples">Examples</a>
-        </nav>
+        <ThemeMenu />
       </div>
     </header>
   );

@@ -154,22 +154,10 @@ main:focus {
   white-space: nowrap;
 }
 
-.topbar-nav {
-  display: flex;
-  align-items: center;
-  gap: 20px;
+/* The theme menu, at the top bar's right end. */
+.theme-menu {
+  position: relative;
   margin-left: auto;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.topbar-nav a {
-  color: var(--fg-2);
-}
-
-.topbar-nav a:hover {
-  color: var(--foreground);
-  text-decoration: none;
 }
 
 .footer {
@@ -258,6 +246,105 @@ main:focus {
 .btn-outline:hover {
   border-color: var(--input);
   background: var(--secondary);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.btn-ghost:hover,
+.btn-ghost[data-state="open"] {
+  border-color: var(--border);
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+.btn-icon {
+  width: 36px;
+  padding: 0;
+}
+
+.btn-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* A dropdown menu, under its button, at the right. */
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  width: 160px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 3px);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--float-shadow);
+  transform-origin: top right;
+}
+
+.menu:focus {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .menu {
+    animation: menu-in 0.1s ease-out;
+  }
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.95);
+  }
+}
+
+.menu-heading {
+  padding: 4px 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.menu-item {
+  position: relative;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 32px 4px 6px;
+  border: 0;
+  border-radius: calc(var(--radius) - 4px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: default;
+  user-select: none;
+}
+
+.menu-item:focus {
+  outline: none;
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.menu-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.menu-check {
+  position: absolute;
+  right: 8px;
+  display: flex;
 }
 
 .btn-sm {

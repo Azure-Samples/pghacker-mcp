@@ -16,7 +16,8 @@ const replies = {
 };
 
 const PORTAL_PAGE = '<!doctype html><title>PilotSwarm</title><script type="module" crossorigin src="/assets/index-BrOn9Elg.js"></script>';
-const HOME_PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" crossorigin src="/static/index-abc.js"></script>';
+const HOME_PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" crossorigin src="/static/index-abc.js"></script><script src="/static/theme-boot-def.js"></script>';
+const IMMUTABLE = { "cache-control": "public, max-age=31536000, immutable" };
 
 function fakeFetch(overrides = {}, calls = []) {
   return async (url) => {
@@ -115,7 +116,10 @@ function siteFetch(overrides = {}) {
   const routes = {
     "/": () => html(HOME_PAGE, { "cache-control": "no-cache" }),
     "/static/index-abc.js": () => new Response("export {};", {
-      headers: { "content-type": "text/javascript", "cache-control": "public, max-age=31536000, immutable" },
+      headers: { "content-type": "text/javascript", ...IMMUTABLE },
+    }),
+    "/static/theme-boot-def.js": () => new Response("(() => {})();", {
+      headers: { "content-type": "text/javascript", ...IMMUTABLE },
     }),
     "/?session=smoke-test": () => new Response(null, { status: 302, headers: { location: "/portal/?session=smoke-test" } }),
     "/portal": () => html(PORTAL_PAGE),
@@ -145,6 +149,8 @@ test("the site's checks catch each broken route", async () => {
     [{ "/": () => html(HOME_PAGE, { "cache-control": "public, max-age=600" }) }, /no-cache/],
     [{ "/": () => html(HOME_PAGE.replace("/static/", "/assets/"), { "cache-control": "no-cache" }) }, /assets\/\*\.js/],
     [{ "/static/index-abc.js": () => new Response("x", { headers: { "cache-control": "no-cache" } }) }, /immutable/],
+    [{ "/static/theme-boot-def.js": () => new Response("Not found", { status: 404 }) }, /theme-boot-def\.js/],
+    [{ "/": () => html(HOME_PAGE.replaceAll(/ src="\/static\/[^"]+"/g, ""), { "cache-control": "no-cache" }) }, /no script under \/static\//],
     [{ "/?session=smoke-test": () => html(HOME_PAGE) }, /share link/],
     [{ "/portal": () => html(HOME_PAGE) }, /portal at \/portal\./],
     [{ "/portal/": () => new Response("Not found", { status: 404 }) }, /portal at \/portal\/\./],
@@ -167,7 +173,8 @@ function deploymentFetch(overrides = {}) {
   });
   const routes = {
     "/": () => html(HOME_PAGE, { "cache-control": "no-cache", "content-security-policy": "default-src 'self'" }),
-    "/static/index-abc.js": () => new Response("export {};", { headers: { "cache-control": "public, max-age=31536000, immutable" } }),
+    "/static/index-abc.js": () => new Response("export {};", { headers: IMMUTABLE }),
+    "/static/theme-boot-def.js": () => new Response("(() => {})();", { headers: IMMUTABLE }),
     "/?session=check-public": () => new Response(null, { status: 302, headers: { location: "/portal/?session=check-public" } }),
     "/portal/": signIn,
     "/portal": signIn,
@@ -198,6 +205,7 @@ test("each failure of a deployment's routes is reported, not thrown", async () =
   const checks = await checkPublic("https://pghacker-example.z01.azurefd.net/", {
     fetchImpl: deploymentFetch({
       "/": () => html(PORTAL_PAGE),
+      "/static/theme-boot-def.js": () => new Response("Not found", { status: 404 }),
       "/portal/": portalOpen,
       "/api/v1/health": () => new Response("{}", { status: 200 }),
     }),
@@ -206,7 +214,7 @@ test("each failure of a deployment's routes is reported, not thrown", async () =
   const failed = checks.filter((check) => !check.ok).map((check) => check.name);
   assert.deepEqual(failed, [
     "the home page, without sign-in",
-    "its script from /static/, kept a year",
+    "its scripts from /static/, kept a year",
     "/portal/ asks for GitHub sign-in",
     "the portal's API answers 401 without sign-in",
     "pghacker-mcp lists its tools anonymously at /mcp",

@@ -1,7 +1,8 @@
 /*
  * The design tokens, as plain CSS variables: the surfaces, text, borders,
- * indigo accent, statuses, radii and shadows. The page follows the system's
- * light or dark preference.
+ * indigo accent, statuses, radii and shadows. The page is light; the dark
+ * tokens apply under the `dark` class on <html>, which the theme menu and
+ * theme-boot.js set (src/theme.ts).
  */
 :root {
   color-scheme: light;
@@ -56,44 +57,42 @@
   --terminal-foreground: #e2e8f0;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
+.dark {
+  color-scheme: dark;
 
-    --background: #0a0d15;
-    --card: #11151f;
-    --card-foreground: #e8ebf2;
-    --secondary: #171c29;
-    --muted: #171c29;
-    --accent: #171c29;
+  --background: #0a0d15;
+  --card: #11151f;
+  --card-foreground: #e8ebf2;
+  --secondary: #171c29;
+  --muted: #171c29;
+  --accent: #171c29;
 
-    --foreground: #e8ebf2;
-    --fg-2: #c3c9d6;
-    --muted-foreground: #8b93a7;
+  --foreground: #e8ebf2;
+  --fg-2: #c3c9d6;
+  --muted-foreground: #8b93a7;
 
-    --border: #242b3b;
-    --input: #323a4e;
+  --border: #242b3b;
+  --input: #323a4e;
 
-    --primary: #6366f1;
-    --primary-hover: #818cf8;
-    --primary-text: #a5b4fc;
-    --primary-soft: rgba(129, 140, 248, 0.13);
-    --ring: #a5b4fc;
-    --brand: #818cf8;
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --primary-text: #a5b4fc;
+  --primary-soft: rgba(129, 140, 248, 0.13);
+  --ring: #a5b4fc;
+  --brand: #818cf8;
 
-    --success: #22c55e;
-    --success-text: #4ade80;
-    --success-soft: rgba(34, 197, 94, 0.14);
-    --warning: #f59e0b;
-    --warning-text: #fbbf24;
-    --warning-soft: rgba(245, 158, 11, 0.14);
+  --success: #22c55e;
+  --success-text: #4ade80;
+  --success-soft: rgba(34, 197, 94, 0.14);
+  --warning: #f59e0b;
+  --warning-text: #fbbf24;
+  --warning-soft: rgba(245, 158, 11, 0.14);
 
-    --sidebar: #0d1019;
-    --sidebar-accent: #1b2130;
-    --topbar: rgba(10, 13, 21, 0.8);
+  --sidebar: #0d1019;
+  --sidebar-accent: #1b2130;
+  --topbar: rgba(10, 13, 21, 0.8);
 
-    --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 20px rgba(0, 0, 0, 0.25);
-    --float-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
-    --terminal: #05070c;
-  }
+  --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 20px rgba(0, 0, 0, 0.25);
+  --float-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
+  --terminal: #05070c;
 }
