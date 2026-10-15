@@ -141,7 +141,7 @@ Extracting a thread again replaces its participants' positions there, except tho
 
 ## Tests and profiling
 
-`npm test` also runs the site's routes, the edge's and the home page's tests; `npm --prefix home test` runs the home page's alone. `npm run test:routes` sends requests through the real oauth2-proxy, with the container's flags, and checks which paths it lets through without sign-in; it downloads oauth2-proxy's release once, checked against its checksum. With the app running, `npm run smoke` checks the site's routes too.
+`npm test` also runs the site's routes, the edge's and the home page's tests; `npm --prefix home test` runs the home page's alone. `npm run test:routes` sends requests through the real oauth2-proxy, with the container's flags, and checks which paths it lets through without sign-in, whatever forwarded headers a client forges, and where sign-in sends GitHub and comes back to; it downloads oauth2-proxy's release once, checked against its checksum. With the app running, `npm run smoke` checks the site's routes too.
 
 The Rust tests create temporary databases on the local PostgreSQL, with the settings in `.env`, or the environment's first.
 

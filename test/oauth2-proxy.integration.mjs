@@ -188,8 +188,51 @@ test("without sign-in, no identity reaches a target, whatever the client sends",
   assert.equal(answer.user, null);
 });
 
-test("a forged X-Forwarded-Uri doesn't skip sign-in", { todo: "Azure-Samples/pghacker-mcp#1" }, async () => {
-  for (const claimed of ["/", "/mcp"]) {
-    assert.equal(await reach("/portal/", { headers: { "x-forwarded-uri": claimed } }), "sign-in", claimed);
+// oauth2-proxy matches its skip-auth routes against X-Forwarded-Uri when it
+// trusts forwarded headers, and Front Door and the ingress pass a client's on.
+test("a forged X-Forwarded-Uri doesn't skip sign-in", async () => {
+  for (const claimed of ["/mcp", "/", "/static/index-abc.js", "/favicon.svg"]) {
+    const headers = { "x-forwarded-uri": claimed };
+    for (const route of ["/portal", "/portal/", "/portal/?session=abc", "/assets/index-BrOn9Elg.js", "/index.html", "/no-such-page"]) {
+      assert.equal(await reach(route, { headers }), "sign-in", `${route} claiming ${claimed}`);
+    }
+    for (const route of ["/api/v1/health", "/api/auth/me"]) {
+      assert.equal(await reach(route, { headers }), 401, `${route} claiming ${claimed}`);
+    }
+    assert.equal(await reach("/", { method: "POST", headers }), "sign-in", `POST / claiming ${claimed}`);
   }
+});
+
+/** The sign-in that GET `route` starts: GitHub's redirect_uri, the way back, and the CSRF cookie. */
+async function signIn(route, headers = {}) {
+  const response = await fetch(`${base}${route}`, { headers, redirect: "manual" });
+  await response.arrayBuffer();
+  const location = new URL(response.headers.get("location"));
+  assert.equal(`${location.origin}${location.pathname}`, "https://github.com/login/oauth/authorize", route);
+  // oauth2-proxy's state is <nonce>:<where to go back to>.
+  const state = location.searchParams.get("state");
+  return {
+    callback: location.searchParams.get("redirect_uri"),
+    back: state.slice(state.indexOf(":") + 1),
+    csrf: response.headers.getSetCookie().find((cookie) => cookie.startsWith("_pghacker_auth_csrf=")),
+  };
+}
+
+test("sign-in completes at the fixed callback, whatever host or path the request claims", async () => {
+  const callback = `${ENV.PGHACKER_PUBLIC_URL}/oauth2/callback`;
+  // Front Door names the visitor's host in X-Forwarded-Host.
+  const frontDoor = { "x-forwarded-proto": "https", "x-forwarded-host": new URL(ENV.PGHACKER_PUBLIC_URL).hostname };
+  const forged = { ...frontDoor, "x-forwarded-host": "elsewhere.example.org", "x-forwarded-uri": "/elsewhere" };
+  for (const headers of [{}, frontDoor, forged]) {
+    const started = await signIn("/portal/?session=abc", headers);
+    assert.equal(started.callback, callback);
+    assert.equal(started.back, "/portal/?session=abc");
+    // The CSRF cookie stays on the host that started sign-in, the callback's.
+    assert.ok(started.csrf);
+    assert.doesNotMatch(started.csrf, /domain=/i);
+  }
+  const start = (rd) => signIn(`/oauth2/start?rd=${encodeURIComponent(rd)}`);
+  assert.equal((await start("/portal/?session=abc")).back, "/portal/?session=abc");
+  assert.equal((await start(`${ENV.PGHACKER_PUBLIC_URL}/portal/`)).back, `${ENV.PGHACKER_PUBLIC_URL}/portal/`);
+  assert.equal((await start("https://evil.example/")).back, "/");
 });

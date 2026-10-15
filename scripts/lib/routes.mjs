@@ -30,7 +30,8 @@ export const ROUTES = [
 /**
  * What anyone may request without signing in, as oauth2-proxy's skip-auth
  * routes: METHOD=regex, or a regex for every method. oauth2-proxy matches the
- * decoded path, without the query. It answers /robots.txt itself, before
+ * request's own decoded path, without the query, and trusts no forwarded
+ * header (scripts/lib/azure.mjs). It answers /robots.txt itself, before
  * any route, with "Disallow: /"; the home page's robots.txt says the same.
  */
 export const PUBLIC_ROUTES = [

@@ -398,7 +398,11 @@ export function oauth2ProxyArgs(config, {
     ...oauth2ProxyRouteArgs(origins),
     `--redirect-url=${config.public.url}/oauth2/callback`,
     `--whitelist-domain=${new URL(config.public.url).hostname}`,
-    "--reverse-proxy=true",
+    // No forwarded header is trusted: Front Door and the ingress pass on a
+    // client's, and with --reverse-proxy oauth2-proxy matches its skip-auth
+    // routes against X-Forwarded-Uri. The callback is fixed, and the way back
+    // after sign-in relative, so nothing needs X-Forwarded-Host either.
+    "--reverse-proxy=false",
     "--cookie-name=_pghacker_auth",
     "--cookie-secure=true",
     "--cookie-samesite=lax",

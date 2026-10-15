@@ -187,6 +187,13 @@ test("oauth2-proxy signs in the team for the portal, passes /mcp and the home pa
   assert.ok(users.includes("--github-user=example-user,another-example-user"));
 });
 
+test("oauth2-proxy trusts no forwarded header, nor any client address", () => {
+  const args = oauth2ProxyArgs(readAzureConfig(ENV));
+  // Trusting forwarded headers would let a forged X-Forwarded-Uri choose the
+  // path that the skip-auth routes match; trusting IPs would skip sign-in.
+  assert.deepEqual(args.filter((arg) => /^--(reverse-proxy|trusted-(proxy-)?ip)\b/.test(arg)), ["--reverse-proxy=false"]);
+});
+
 test("the configuration refuses what would be unsafe or incomplete", () => {
   assert.throws(() => readAzureConfig({ ...ENV, PGH_SWARM_PASSWORD: "" }), /PGH_SWARM_PASSWORD/);
   assert.throws(() => readAzureConfig({ ...ENV, AZURE_CLIENT_ID: "" }), /AZURE_CLIENT_ID/);
