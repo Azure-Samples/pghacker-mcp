@@ -259,8 +259,7 @@ audits, realistic before/after ID and both endpoint plans, and resource/latency
 gates. Production DDL, cleanup, and deployment are distinct approvals; a script
 flag is not user authorization. Older corpus seed manifests without the new
 migration still fail strict restore compatibility: regenerate them with the
-approved new image rather than weakening the check. `docs/design.md` is not
-part of this change.
+approved new image rather than weakening the check.
 
 The commit history's edge labels, `BACKPATCH_OF` and `COMMITTED` (migration
 `0014_commit_graph`), need no preparation: the new image's bootstrap creates
