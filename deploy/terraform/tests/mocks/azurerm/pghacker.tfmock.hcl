@@ -116,3 +116,11 @@ mock_resource "azurerm_cdn_frontdoor_profile" {
     resource_guid = "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11"
   }
 }
+
+mock_resource "azurerm_cdn_frontdoor_custom_domain" {
+  defaults = {
+    id               = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/mcp-example-org"
+    validation_token = "mock-domain-validation-token"
+    expiration_date  = "2026-12-01T00:00:00Z"
+  }
+}

@@ -114,6 +114,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
 | `app_env` | `{}` | More supervisor environment variables, such as `RUST_LOG`, `PGHACKER_CODE_HISTORY` and the extraction-order settings; can't replace the settings above or set `OAUTH2_PROXY_*`. Child processes receive only the supervisor's explicit allowlist, not every `app_env` entry. |
 | `front_door_endpoint_name` | `"pghacker"` | Front Door endpoint, `<name>-<hash>.<zone>.azurefd.net`; changing it changes the public host name |
+| `front_door_custom_domain` | `null` | Optional hostname you own, such as `mcp.example.com` or `example.com`; managed TLS, shared routing, canonical public URL and OAuth callback. Set it only in ignored environment settings; DNS stays with your provider. See [Custom domains](README.md#custom-domains). |
 
 ## Outputs
 
@@ -121,8 +122,9 @@ None is secret. `terraform output -raw <name>` prints one.
 
 | Output | Meaning |
 |---|---|
-| `public_url`, `mcp_url`, `oauth_callback_url` | Front Door URLs: the portal, the MCP endpoint, the GitHub OAuth App's callback |
+| `public_url`, `mcp_url`, `oauth_callback_url` | Canonical URLs on the custom domain when set, otherwise Front Door's default hostname: the portal, MCP endpoint and GitHub OAuth App's callback |
 | `front_door_host_name`, `front_door_id` | Front Door's host name and profile ID (`X-Azure-FDID`) |
+| `front_door_custom_domain_validation` | Ownership TXT record's full `name`, `value` and token `expiration`; null without a custom domain |
 | `app_fqdn` | The app's own host name, Front Door's origin |
 | `subscription_id`, `resource_group_name` | Where everything is |
 | `acr_name`, `acr_login_server` | Registry |

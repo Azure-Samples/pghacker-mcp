@@ -1,7 +1,8 @@
 # The public entry: an Azure Front Door Standard endpoint in front of the app,
 # which keeps the host name, <name>-<hash>.<zone>.azurefd.net, when the
-# Container Apps environment is replaced. Everything passes through as is:
-# /mcp to the anonymous MCP endpoint, the rest to the GitHub-gated portal.
+# Container Apps environment is replaced. An optional custom domain shares
+# its route. Everything passes through as is: /mcp to the anonymous MCP
+# endpoint, the rest to the GitHub-gated portal.
 
 locals {
   # The endpoint's ID from known values: azurerm checks the route's reference
@@ -42,6 +43,19 @@ resource "azapi_resource" "front_door_endpoint" {
   response_export_values = { host_name = "properties.hostName" }
 }
 
+resource "azurerm_cdn_frontdoor_custom_domain" "this" {
+  count = var.front_door_custom_domain == null ? 0 : 1
+
+  name                     = replace(var.front_door_custom_domain, ".", "-")
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.this.id
+  host_name                = var.front_door_custom_domain
+
+  tls {
+    certificate_type = "ManagedCertificate"
+    minimum_version  = "TLS12"
+  }
+}
+
 # A single origin, so no health probes, which Front Door allows only then: a
 # failed probe would have nowhere else to send requests. No session affinity
 # either, with one replica behind it.
@@ -73,15 +87,16 @@ resource "azurerm_cdn_frontdoor_origin" "this" {
 # caching and no compression, so MCP responses and streams and the portal's
 # WebSockets pass through untouched.
 resource "azurerm_cdn_frontdoor_route" "this" {
-  name                          = "app"
-  cdn_frontdoor_endpoint_id     = local.front_door_endpoint_id
-  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.this.id
-  cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.this.id]
-  patterns_to_match             = ["/*"]
-  supported_protocols           = ["Https"]
-  https_redirect_enabled        = false
-  forwarding_protocol           = "HttpsOnly"
-  link_to_default_domain        = true
+  name                            = "app"
+  cdn_frontdoor_endpoint_id       = local.front_door_endpoint_id
+  cdn_frontdoor_origin_group_id   = azurerm_cdn_frontdoor_origin_group.this.id
+  cdn_frontdoor_origin_ids        = [azurerm_cdn_frontdoor_origin.this.id]
+  cdn_frontdoor_custom_domain_ids = azurerm_cdn_frontdoor_custom_domain.this[*].id
+  patterns_to_match               = ["/*"]
+  supported_protocols             = ["Https"]
+  https_redirect_enabled          = false
+  forwarding_protocol             = "HttpsOnly"
+  link_to_default_domain          = true
 
   depends_on = [azapi_resource.front_door_endpoint]
 }

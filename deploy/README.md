@@ -329,6 +329,63 @@ the newer image finds the counts missing, removes those edges and projects
 them again. The other added columns and tables remain in place and are
 ignored by the older image; do not drop them or remove migration records.
 
+## Custom domains
+
+`front_door_custom_domain` is optional and defaults to `null`, which keeps the
+`azurefd.net` URLs. To use your own domain, set it in your ignored environment
+settings, never in the shared configuration or the committed example:
+
+```hcl
+front_door_custom_domain = "mcp.example.com"
+```
+
+This requests Front Door-managed TLS and makes that hostname the canonical
+public, MCP and OAuth callback URL. The default `azurefd.net` hostname stays
+enabled on the same HTTPS-only, uncached route. The app accepts both hostnames
+and the origin hostname; the origin host header and certificate checks do not
+change. Portal sign-in uses the canonical hostname.
+
+For a new domain, first create only its Front Door resource, so you can publish
+the ownership record before changing the app's public URL:
+
+```sh
+terraform apply -var-file=../environments/local.tfvars \
+  -target=azurerm_cdn_frontdoor_custom_domain.this
+terraform output -json front_door_custom_domain_validation
+```
+
+Publish the output's `name` and `value` as a TXT record with your DNS provider.
+The name is fully qualified; providers that append the zone name need only the
+relative part (`_dnsauth` for an apex domain, `_dnsauth.mcp` for this example).
+Wait for the domain's validation state in Front Door to become **Approved**.
+Then apply the full configuration to associate the domain with the route and
+update the app. Update the existing GitHub OAuth App's homepage and callback
+to `public_url` and `oauth_callback_url` at the same time.
+
+Once the managed certificate has deployed, point a subdomain's CNAME to
+`front_door_host_name`. An apex domain such as `example.com` instead needs
+your provider's ANAME/ALIAS/CNAME flattening, or an Azure DNS A alias targeting
+the Front Door endpoint resource. Do not use an ordinary apex CNAME or pin
+Front Door's resolved IP addresses.
+
+If the domain already exists in this profile, import it instead of creating
+another one. The configuration names the domain resource by replacing dots
+in the hostname with hyphens. With matching environment settings:
+
+```sh
+terraform import -var-file=../environments/local.tfvars \
+  'azurerm_cdn_frontdoor_custom_domain.this[0]' \
+  '<existing Front Door custom-domain resource ID>'
+terraform plan -var-file=../environments/local.tfvars
+```
+
+Review the plan before applying; importing must not replace the existing domain
+or certificate. DNS remains managed by your provider, outside this configuration.
+For apex domains, monitor **Pending revalidation**: managed certificate renewal
+can require a fresh TXT token, not just the original record.
+[Azure's custom-domain and apex guidance](https://learn.microsoft.com/azure/frontdoor/apex-domain-onboard)
+describes validation, DNS and certificate rotation.
+
 ## Production mode in use
 
 Ask a **pghacker Crawler** session in the portal, for example:
