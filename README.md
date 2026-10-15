@@ -164,8 +164,7 @@ All four search tools expose `budget_ms`:
 
 | Operation | Default | Maximum |
 | --- | --- | --- |
-| `search` at one commit (no `history`) | 4 seconds | 10 seconds |
-| `search` over a range of commits (`history`) | 10 seconds | 15 seconds |
+| `search`, with or without `history` | 10 seconds | 15 seconds |
 | `grep`, `search_patches`, `search_commits` | 10 seconds | 15 seconds |
 
 The minimum requested budget is clamped to 1 millisecond. For a commit-tree

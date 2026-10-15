@@ -29,12 +29,10 @@ Text that isn't UTF-8 is binary to commit-tree searches and reads: `search` with
 
 ## Indexes and queries
 
-`search` at one commit (no `history`) has a 4-second default budget and a
-10-second maximum. `search` over a range of commits (`history`), `grep`,
-`search_patches` and `search_commits` accept `budget_ms` with a 10-second
-default and a 15-second maximum. Budget's shared defaults are 10,000/15,000 ms;
-`search()` applies the separate 4,000/10,000 ms clamp without `history`.
-Each temporarily
+`search`, with or without `history`, `grep`, `search_patches` and
+`search_commits` accept `budget_ms` with a 10-second default and a 15-second
+maximum, using Budget's shared 10,000/15,000 ms defaults. `history` changes
+the search scope, not its time budget. Each temporarily
 overrides the reader's 10-second statement timeout and restores the previous
 setting before returning, including on errors.
 These are time budgets, not hard wall-clock deadlines: single regex and

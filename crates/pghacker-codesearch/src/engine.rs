@@ -12,8 +12,7 @@ use tokio_postgres::types::ToSql;
 
 use crate::pattern::Filter;
 
-/// Budget's default and largest time budgets, in milliseconds. `search`
-/// without `history` applies its own 4000/10000 ms default and maximum.
+/// The shared default and largest search time budgets, in milliseconds.
 pub const DEFAULT_BUDGET_MS: u32 = 10_000;
 pub const MAX_BUDGET_MS: u32 = 15_000;
 

@@ -74,8 +74,7 @@ Deterministic code handles verbatim facts and models only judgments; the agent-b
 | **output, group_by, context** | At one commit: lines, files or counts, per file or match, with at most 20 context lines (`-l`, `-c`, `-C`); `history` uses `lines` and `file` only |
 | **limit, offset, order, budget_ms** | A page with totals (default 100, at most 2,000), path or coverage order at one commit, and a time budget (`head`, `-m`); history results are in path order |
 
-`search` at one commit (no `history`) defaults to 4 seconds, at most 10;
-`search` over a range of commits (`history`), `grep`, `search_patches` and
+`search`, with or without `history`, `grep`, `search_patches` and
 `search_commits` default to 10 seconds, at most 15. All expose `budget_ms`
 and temporarily override the reader's default statement timeout. `search`
 and `grep` candidate reads stop at 200,000; incomplete `search` totals are lower bounds,

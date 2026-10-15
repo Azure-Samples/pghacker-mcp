@@ -55,8 +55,7 @@ after 1000 characters, plus an ellipsis. With history, search over a range of co
 revision and its ancestors, or A..B), giving each line once per path and text with its provenance. \
 History searches require output lines, group_by file and no context; paths take files or folders, \
 not globs or virtual roots (use include/exclude for globs), and results are in path order. \
-budget_ms for search at one commit (no history) defaults to 4000, at most 10000; for search \
-over a range of commits (history), it defaults to 10000, at most 15000.";
+budget_ms defaults to 10000, at most 15000, with or without history.";
 
 /// The grep tool's description, for agents.
 pub const GREP_DESCRIPTION: &str = "\

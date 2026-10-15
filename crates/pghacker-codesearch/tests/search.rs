@@ -408,6 +408,69 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
 }
 
 #[tokio::test]
+async fn commit_and_history_searches_use_the_shared_budget() -> Result<()> {
+    let db = TestDb::create().await?;
+    let snapshot = common::load(
+        &db,
+        "postgres",
+        "19",
+        &[("src/probe.c", Some("budget_probe\n"))],
+    )
+    .await?;
+    let admin = db.admin().await?;
+    // Return the candidate query's actual statement timeout as matching text.
+    admin
+        .batch_execute(&format!(
+            "ALTER TABLE {s}.code_line_instances RENAME TO budget_probe_lines;
+             CREATE VIEW {s}.code_line_instances AS
+             SELECT weave, lo, hi, id, lineage, bytes, alive, replaces,
+                    (extract(epoch FROM current_setting('statement_timeout')::interval) * 1000)::bigint::text
+                        || ' budget_probe' AS line
+             FROM {s}.budget_probe_lines;
+             GRANT SELECT ON {s}.code_line_instances TO pgh_reader;",
+            s = snapshot.history.schema,
+        ))
+        .await?;
+    let reader = db.reader().await?;
+    reader
+        .batch_execute("SET statement_timeout = '1739ms'")
+        .await?;
+    for history in [None, Some("all")] {
+        for (budget_ms, maximum) in [
+            (None, 10_000u64),
+            (Some(12_000), 12_000),
+            (Some(u32::MAX), 15_000),
+        ] {
+            let args = SearchArgs {
+                query: "budget_probe".into(),
+                budget_ms,
+                history: history.map(str::to_owned),
+                ..SearchArgs::default()
+            };
+            let result = search(&reader, &snapshot, &args).await?;
+            assert_eq!(result.total_lines, 1);
+            assert!(result.complete && !result.budget_exceeded);
+            let text = if history.is_some() {
+                &result.history[0].text
+            } else {
+                &result.lines[0].text
+            };
+            let remaining_ms: u64 = text.split_whitespace().next().unwrap().parse()?;
+            assert!(
+                remaining_ms > maximum - 2_000 && remaining_ms <= maximum,
+                "history={history:?}, budget_ms={budget_ms:?}: {remaining_ms}ms remaining, expected near {maximum}ms"
+            );
+            let restored: String = reader
+                .query_one("SHOW statement_timeout", &[])
+                .await?
+                .get(0);
+            assert_eq!(restored, "1739ms");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result<()> {
     use pghacker_codesearch::grep::{Limits, run};
     use pghacker_codesearch::snapshot::FileTable;

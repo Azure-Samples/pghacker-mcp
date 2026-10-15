@@ -152,7 +152,7 @@ pub struct SearchArgs {
     /// At one commit: `path` (default) or `coverage` (files matching the most query terms first). History results are in path order.
     #[serde(default)]
     pub order: Order,
-    /// Time budget in milliseconds: search at one commit (no history), default 4000, at most 10000; search over a range of commits (history), default 10000, at most 15000.
+    /// Time budget in milliseconds: default 10000, at most 15000, with or without history.
     #[serde(default)]
     pub budget_ms: Option<u32>,
     /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
@@ -365,12 +365,7 @@ pub async fn search(
     snapshot: &Snapshot,
     args: &SearchArgs,
 ) -> Result<SearchResult> {
-    let budget_ms = if args.history.is_some() {
-        args.budget_ms
-    } else {
-        Some(args.budget_ms.unwrap_or(4_000).clamp(1, 10_000))
-    };
-    let budget = Budget::new(budget_ms);
+    let budget = Budget::new(args.budget_ms);
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
     let result = search_inner(client, snapshot, args, &budget).await;
     engine::restore_timeout(client, &old).await;
