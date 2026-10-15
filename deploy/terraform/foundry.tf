@@ -17,7 +17,7 @@ locals {
   ])
 }
 
-# Deployments, listing keys and the private endpoint go through Azure
+# Deployments and the private endpoint go through Azure
 # Resource Manager, which the account's network rules don't restrict.
 resource "azurerm_cognitive_account" "foundry" {
   name                          = local.foundry_account_name

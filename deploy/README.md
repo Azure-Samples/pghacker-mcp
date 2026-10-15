@@ -108,7 +108,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
    Fix what `failures` lists, then run the probe again until `ok` is true.
 
-6. **The corpus.** Dump the local corpus (`npm start` or `npm run db:up` locally), build its seed image from the app image, and restore it before the app exists:
+6. **The corpus.** Dump the local corpus (with `npm start` running locally), build its seed image from the app image, and restore it before the app exists:
 
    ```sh
    npm run corpus:dump                             # from the repository root: .runtime/corpus/<id>/
@@ -160,6 +160,32 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 ## Updates
 
 Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap briefly: the new indexer serves its tools at once, but runs jobs only once the old one has stopped.
+
+### Schema upgrades
+
+Migration numbers name schema changes, not the order production revisions
+were deployed. Fresh databases apply them in filename order; an existing
+database applies every missing migration and checks the checksums of those
+already recorded.
+
+| Migration | Change |
+| --- | --- |
+| `0013_duplicate_candidates` | Incremental feature/decision duplicate candidates for `find_duplicates`. |
+| `0014_commit_graph` | Commit vertices and history edges, full-SHA anchors, and graph projection tracking. |
+| `0015_restore_addresses` | The `restore_addresses()` job-queue function; the accompanying ingest code preserves addresses. |
+| `0016_retire_snapshots` | Drops snapshot tables and capture functions; cancels queued or running `code_snapshot` jobs. |
+| `0017_extraction_lease_versions` | Records each leased thread's content version so mail arriving during extraction remains pending. |
+| `0018_feature_release_at` | Tracks a release claim's thread evidence date so older backfill cannot overwrite newer evidence. |
+
+Production applied `0016` before the later-stacked `0013`–`0015`.
+**Do not roll back to an image that reads snapshot tables**, even to undo
+a lower-numbered migration: those tables no longer exist. A history-only
+image can, however, predate `0014`: the previous production image,
+`33616a4`, already includes `0016` and is compatible with the schema through
+`0018`. For that target, use the [history-only rollback procedure](#rollback-to-a-history-only-image-before-0014)
+below. Keep the added columns and tables in place; that image ignores them.
+Applied migration files are immutable, including their comments, because
+their checksums are verified on every start.
 
 ### Email addresses
 
@@ -254,7 +280,7 @@ transaction, and `--check` then passes.
 
 ## Commit history
 
-The code tools read PostgreSQL's whole commit history ([README](../README.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed. Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
+The code tools read PostgreSQL's whole commit history ([README](../README.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed. All tools are listed regardless; check `get_ontology.loaded.code` or `list_sources.history` for readiness. Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
 
 ```sh
 ../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
@@ -264,24 +290,44 @@ It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.gi
 - The code tools read it at once: `search`, `grep`, `read_file`, `list_files` and `blame` read any commit, and paths below `/branch/<name>/`, `/tag/<name>/` and `/commit/<rev>/`; `get_commit` and `search_commits` answer as `git show` and `git log`.
 - The indexer's hourly `code_history_sync` job fetches new commits into its own clone and applies them. The clone is about 850 MB in `PGHACKER_GIT_DIR`, fetched again after a restart.
 - The next `resolve_anchors` run resolves mail's file anchors to the history's paths.
-- `PGHACKER_CODE_HISTORY` in `app_env` names another schema for the code tools to read; unset, `pghacker`.
+- `PGHACKER_CODE_HISTORY` in `app_env` names another schema for the code tools to read; unset, `pghacker`. It is not a switch between engines.
 
 Check `tools/list` (First deployment, step 9) and run the evaluation.
 
-**Retired snapshots.** Until the history, the code tools read source snapshots (15 in production: 48M lines, 5.9 GB). Migration `0016_retire_snapshots` drops their tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and records the graph keys of their files and of the history's, so the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history, without a full sync: a File is `loaded` when the history has its path. It also cancels any `code_snapshot` job still queued. An image without `0016` reads the dropped tables in the graph sync and `ingest_status`, so there is no rolling back past it: fix forward.
+**Retired snapshots.** Before the history, the code tools read source snapshots (15 in production: 48M lines, 5.9 GB). Migration `0016_retire_snapshots` drops their tables (`code_snapshots`, `code_files`, `code_lines`) and change capture, and records the graph keys of their files and of the history's. The incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history: a File is `loaded` when the history has its path. Retirement alone does not request a full sync; the `0014` projection upgrade and each history install do separately. It also cancels any queued or running `code_snapshot` job. Snapshot-reading images are incompatible after this migration: [fix forward](#schema-upgrades).
 
-**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph (README, "How the graph follows the tables"): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
-- The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each install (step 2).
-- Full syncs, including the weekly reconcile, then take about as much longer (226 s today, so roughly 270 s): locally, the history's part took 20 s of a full sync.
+**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph (README, "How the graph follows the tables"): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. In the recorded October 2026 production sample of 105,545 commits, that added about 730,000 elements, 18% more by element count.
+- The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each `history build --install`.
+- In local measurements, the history's part took 20 s of a full sync. Element-count growth does not establish a production runtime; inspect current `ingest_status` and sync logs instead.
 - The history's writers record their changes for the incremental sync: an hourly sync's few commits cost a batch of milliseconds.
-- An older image doesn't know `BACKPATCH_OF` and `COMMITTED`: its graph sync stops at their change entries. After rolling back to one, as `pgh_indexer`:
 
-  ```sql
-  DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
-  SELECT pghacker.graph_request_full('rolled back past 0014');
-  ```
+### Rollback to a history-only image before 0014
 
-  Its full sync brings the graph to its own projection: it drops those labels' counts and bookkeeping but leaves their edges in AGE. Rolled forward again, this image finds the counts missing and runs a full sync, which removes those edges and projects them again.
+This procedure is for a compatible **history-only** image that predates
+`0014_commit_graph`, specifically the previous production image `33616a4`.
+It already includes snapshot retirement (`0016`); earlier snapshot-reading
+images cannot run against this database.
+
+After rolling back to that image, as `pgh_indexer`, cancel the queued or
+running `duplicates` and `restore_addresses` jobs it does not recognize,
+then remove the graph changes whose labels its graph sync does not know
+and request a full sync:
+
+```sql
+UPDATE pghacker.jobs SET state = 'cancelled'
+WHERE kind IN ('duplicates', 'restore_addresses') AND state IN ('queued', 'running');
+DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
+SELECT pghacker.graph_request_full('rolled back past 0014');
+```
+
+Without cancellation, those jobs fail as unknown kinds and can leave failed
+restore jobs to be re-queued. Do not queue them again until rolling forward.
+The older image's full sync brings the graph to its own projection: it drops
+the `BACKPATCH_OF` and `COMMITTED` counts and bookkeeping but leaves their
+edges in AGE. They remain there until the next roll-forward's full sync:
+the newer image finds the counts missing, removes those edges and projects
+them again. The other added columns and tables remain in place and are
+ignored by the older image; do not drop them or remove migration records.
 
 ## Production mode in use
 
@@ -294,6 +340,11 @@ It confirms the scope of large requests, since a whole archive is decades of mai
 The crawl scheduler's progress is in the container's log, with `[crawl]` lines. To stop extraction, set `app_env = { PGHACKER_CRAWL = "off" }` and apply. The other knobs are `crawl_start_sessions`, `crawl_max_sessions` and the Foundry capacities in `foundry_deployments`.
 
 Extraction leases new mail as it arrives, for up to half of the threads, and fills in the rest of the archive from the newest thread back (README, "The order of extraction"). `ingest_status.extraction.lanes`, and the log's `[crawl] Backlog:` lines every 10 minutes, show both lanes. To tune them, set `PGHACKER_EXTRACTION_NEW_MAIL_SHARE` or `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` in `app_env`. To go back to the order before the lanes, the largest threads never extracted first, set `app_env = { PGHACKER_EXTRACTION_ORDER = "largest" }` and apply; the app restarts with it.
+
+The supervisor forwards those extraction settings and `PGHACKER_CODE_HISTORY`
+explicitly. `app_env` is not a general pass-through to the Rust services:
+server-only pool, timeout, archive and graph-reconcile settings use their
+defaults unless the supervisor's allowlist is changed.
 
 ## Evaluating the deployment
 
