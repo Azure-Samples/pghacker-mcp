@@ -323,10 +323,13 @@ async fn restore(
     once: &Once,
 ) -> Result<Restored> {
     let message_id = normalize_message_id(&msg.message_id);
+    // No key changes, so the lock leaves foreign-key checks free: an extraction
+    // citing the message meanwhile doesn't wait on it, and can't deadlock with
+    // this transaction's lock on the thread later.
     let Some(row) = tx
         .query_typed_opt(
             "SELECT id, thread_id, author_id, subject, from_name, body, body_clean
-             FROM messages WHERE message_id = $1 FOR UPDATE",
+             FROM messages WHERE message_id = $1 FOR NO KEY UPDATE",
             &[(&message_id, Type::TEXT)],
         )
         .await?
