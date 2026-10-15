@@ -3,7 +3,7 @@
 # --- Public endpoints -------------------------------------------------------------
 
 output "public_url" {
-  description = "The public URL, on Front Door's host name: PGHACKER_PUBLIC_URL, the public home page and the GitHub OAuth App's homepage URL."
+  description = "The canonical public URL, on the custom domain when configured, otherwise Front Door's host name: PGHACKER_PUBLIC_URL, the public home page and the GitHub OAuth App's homepage URL."
   value       = local.public_url
 }
 
@@ -30,6 +30,15 @@ output "front_door_host_name" {
 output "front_door_id" {
   description = "The Front Door profile's ID (resource_guid), sent in each request's X-Azure-FDID header: PGHACKER_FRONT_DOOR_ID."
   value       = azurerm_cdn_frontdoor_profile.this.resource_guid
+}
+
+output "front_door_custom_domain_validation" {
+  description = "The ownership TXT record's full name, value and token expiration to publish with your DNS provider; null without a custom domain."
+  value = var.front_door_custom_domain == null ? null : {
+    name       = "_dnsauth.${var.front_door_custom_domain}"
+    value      = azurerm_cdn_frontdoor_custom_domain.this[0].validation_token
+    expiration = azurerm_cdn_frontdoor_custom_domain.this[0].expiration_date
+  }
 }
 
 output "app_fqdn" {

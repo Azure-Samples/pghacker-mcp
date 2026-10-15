@@ -605,7 +605,7 @@ variable "app_env" {
 # --- Front Door -------------------------------------------------------------------
 
 variable "front_door_endpoint_name" {
-  description = "The Front Door endpoint's name, which begins its host name, <name>-<hash>.<zone>.azurefd.net: the public URL, the MCP endpoint and the GitHub OAuth App's callback. Changing it replaces the endpoint and its host name."
+  description = "The Front Door endpoint's name, which begins its host name, <name>-<hash>.<zone>.azurefd.net. It remains reachable with a custom domain too. Changing it replaces the endpoint and its host name."
   type        = string
   default     = "pghacker"
   nullable    = false
@@ -613,5 +613,19 @@ variable "front_door_endpoint_name" {
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9-]{0,44}[a-z0-9]$", var.front_door_endpoint_name))
     error_message = "front_door_endpoint_name must be 2 to 46 lowercase letters, digits and hyphens, starting and ending with a letter or digit."
+  }
+}
+
+variable "front_door_custom_domain" {
+  description = "Optional custom hostname for Front Door and the canonical public, MCP and OAuth callback URLs, such as mcp.example.com or example.com. Null keeps the azurefd.net hostname. Set deployment-specific domains only in ignored environment settings; publish the ownership TXT record and DNS alias with your DNS provider."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.front_door_custom_domain == null ? true : (
+      length(var.front_door_custom_domain) <= 64
+      && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.front_door_custom_domain))
+    )
+    error_message = "front_door_custom_domain must be null or a lowercase DNS hostname of at most 64 characters, with valid labels and no scheme, path, port, wildcard or trailing dot."
   }
 }

@@ -61,7 +61,10 @@ memory     = "8Gi"
 job_cpu    = 2
 job_memory = "4Gi"
 
-front_door_endpoint_name      = "pghacker-example"
+front_door_endpoint_name = "pghacker-example"
+# Optional: your own hostname, such as "mcp.example.com" or "example.com".
+# Null keeps the default azurefd.net URL. See deploy/README.md, "Custom domains".
+front_door_custom_domain      = null
 restrict_origin_to_front_door = true
 mcp_rate_per_minute           = 60
 mcp_rate_burst                = 30

@@ -47,6 +47,15 @@ run "front_door_before_the_app" {
     )
     error_message = "Front Door, its origin and the callback URL must exist before the app."
   }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_custom_domain.this) == 0
+      && length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids) == 0
+      && output.front_door_custom_domain_validation == null
+    )
+    error_message = "Without a custom domain, no domain resource, route association or ownership TXT record should be created."
+  }
 }
 
 run "front_door_passes_everything_through" {
@@ -121,4 +130,186 @@ run "front_door_passes_everything_through" {
     )
     error_message = "The outputs must give the home page, portal, MCP and OAuth callback URLs on Front Door's host name, and the profile's ID."
   }
+}
+
+run "custom_domain_shares_the_route_and_is_canonical" {
+  state_key = "custom"
+
+  variables {
+    create_app               = true
+    front_door_custom_domain = "mcp.example.org"
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_custom_domain.this) == 1
+      && azurerm_cdn_frontdoor_custom_domain.this[0].name == "mcp-example-org"
+      && azurerm_cdn_frontdoor_custom_domain.this[0].host_name == "mcp.example.org"
+      && azurerm_cdn_frontdoor_custom_domain.this[0].cdn_frontdoor_profile_id == azurerm_cdn_frontdoor_profile.this.id
+      && azurerm_cdn_frontdoor_custom_domain.this[0].tls[0].certificate_type == "ManagedCertificate"
+      && azurerm_cdn_frontdoor_custom_domain.this[0].tls[0].minimum_version == "TLS12"
+    )
+    error_message = "The optional hostname must create a managed TLS 1.2 custom domain in this profile."
+  }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids == toset([azurerm_cdn_frontdoor_custom_domain.this[0].id])
+      && azurerm_cdn_frontdoor_route.this.link_to_default_domain
+      && azurerm_cdn_frontdoor_route.this.supported_protocols == toset(["Https"])
+      && azurerm_cdn_frontdoor_route.this.forwarding_protocol == "HttpsOnly"
+      && length(azurerm_cdn_frontdoor_route.this.cache) == 0
+      && azurerm_cdn_frontdoor_origin.this.origin_host_header == output.app_fqdn
+    )
+    error_message = "Both hostnames must share the uncached HTTPS route without changing the origin's host header."
+  }
+
+  assert {
+    condition = (
+      output.public_url == "https://mcp.example.org"
+      && output.mcp_url == "https://mcp.example.org/mcp"
+      && output.oauth_callback_url == "https://mcp.example.org/oauth2/callback"
+      && output.front_door_host_name == "pghacker-example.mock.azurefd.net"
+      && output.front_door_custom_domain_validation == {
+        name       = "_dnsauth.mcp.example.org"
+        value      = "mock-domain-validation-token"
+        expiration = "2026-12-01T00:00:00Z"
+      }
+    )
+    error_message = "Custom-domain URLs and the ownership TXT record must be exported while preserving the default hostname."
+  }
+
+  assert {
+    condition = (
+      one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_URL"]) == output.public_url
+      && one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_HOSTS"]) == "mcp.example.org,pghacker-example.mock.azurefd.net,pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io"
+    )
+    error_message = "The app must use the custom canonical URL and accept the custom, default and origin hostnames."
+  }
+}
+
+run "custom_domain_replans" {
+  command   = plan
+  state_key = "custom"
+
+  variables {
+    create_app               = true
+    front_door_custom_domain = "mcp.example.org"
+  }
+
+  assert {
+    condition     = output.public_url == "https://mcp.example.org" && azurerm_cdn_frontdoor_route.this.link_to_default_domain
+    error_message = "Replanning must preserve the custom canonical URL and default-domain route."
+  }
+}
+
+run "removing_custom_domain_restores_defaults" {
+  command   = plan
+  state_key = "custom"
+
+  variables {
+    create_app               = true
+    front_door_custom_domain = null
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_custom_domain.this) == 0
+      && length(azurerm_cdn_frontdoor_route.this.cdn_frontdoor_custom_domain_ids) == 0
+      && output.front_door_custom_domain_validation == null
+      && output.public_url == "https://pghacker-example.mock.azurefd.net"
+      && one([for env in azurerm_container_app.app[0].template[0].container[0].env : env.value if env.name == "PGHACKER_PUBLIC_HOSTS"]) == "pghacker-example.mock.azurefd.net,pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io"
+    )
+    error_message = "Removing the optional domain must restore the default URLs and hostname allowlist."
+  }
+}
+
+run "apex_custom_domain" {
+  state_key = "apex"
+
+  variables {
+    front_door_custom_domain = "example.org"
+  }
+
+  override_resource {
+    target = azurerm_cdn_frontdoor_custom_domain.this[0]
+    values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/example-org" }
+  }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_custom_domain.this[0].name == "example-org"
+      && output.public_url == "https://example.org"
+      && output.front_door_custom_domain_validation.name == "_dnsauth.example.org"
+    )
+    error_message = "Apex domains must work too, with the ownership TXT record under _dnsauth at the zone root."
+  }
+}
+
+run "managed_certificate_accepts_64_characters" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "${join("", [for i in range(60) : "a"])}.org"
+  }
+}
+
+run "managed_certificate_rejects_65_characters" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "${join("", [for i in range(61) : "a"])}.org"
+  }
+
+  expect_failures = [var.front_door_custom_domain]
+}
+
+run "custom_domain_rejects_urls" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "https://mcp.example.org"
+  }
+
+  expect_failures = [var.front_door_custom_domain]
+}
+
+run "custom_domain_rejects_wildcards" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "*.example.org"
+  }
+
+  expect_failures = [var.front_door_custom_domain]
+}
+
+run "custom_domain_rejects_empty_strings" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = ""
+  }
+
+  expect_failures = [var.front_door_custom_domain]
+}
+
+run "custom_domain_rejects_invalid_labels" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "mcp-.example.org"
+  }
+
+  expect_failures = [var.front_door_custom_domain]
+}
+
+run "custom_domain_rejects_ip_addresses" {
+  command = plan
+
+  variables {
+    front_door_custom_domain = "192.0.2.1"
+  }
+
+  expect_failures = [var.front_door_custom_domain]
 }
