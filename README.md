@@ -194,7 +194,7 @@ arbitrary SQL. Row and output caps are separate from the time budget:
 | `blame` | At most 2,000 lines. |
 | `get_commit` | Diff cut at 3,000 lines; context defaults to 3, at most 1,000. |
 | `search_commits` | 30 commits by default, at most 200; diff filters read at most 300,000 matching line instances and show at most 10 lines per commit. Check `incomplete`. |
-| `search_patches` | 20 threads by default, at most 100, with at most 10 matching lines per thread; at most 50,000 distinct matching lines and 20,000 patches read. Check `incomplete`, including while patch indexing is pending. |
+| `search_patches` | 20 threads by default, at most 100, with at most 10 matching lines per thread; at most 50,000 distinct matching lines and 20,000 patches read. Check `incomplete` for scan caps and time budgets. Patches not yet indexed are skipped; their backlog is reported only when no thread is returned. |
 | `query` | 100 rows by default, at most 1,000; SQL at most 65,536 bytes (64 KiB), CSV at most 1,048,576 bytes (1 MiB) before the banner and row count. |
 
 For a scoped code count, keep the text predicate

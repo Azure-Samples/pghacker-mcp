@@ -329,6 +329,23 @@ the newer image finds the counts missing, removes those edges and projects
 them again. The other added columns and tables remain in place and are
 ignored by the older image; do not drop them or remove migration records.
 
+Schema compatibility does not preserve the newer ingestion and extraction
+semantics. `33616a4` redacts email addresses in mail it ingests and applies
+reused features' releases in extraction order without maintaining
+`features.release_at`. A regressed release can therefore retain a newer,
+stale evidence date after rolling forward; the newer date guard does not
+automatically repair it. Consider `PGHACKER_CRAWL=off` to pause automatic
+extraction during the rollback; this does not stop mail ingestion. Review
+any releases changed by the older extractor against their newest thread
+evidence after rolling forward.
+
+After rolling forward, queue address restoration again, even if no restore
+job was cancelled, to recover addresses in mail ingested by the older image:
+
+```sql
+SELECT * FROM pghacker.restore_addresses();
+```
+
 ## Production mode in use
 
 Ask a **pghacker Crawler** session in the portal, for example:

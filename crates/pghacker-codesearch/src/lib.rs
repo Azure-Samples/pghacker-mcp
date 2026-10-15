@@ -50,8 +50,9 @@ match); page with limit and offset; order coverage puts files with the most term
 Results give totals, `cut` when more remain, `complete` false when totals are only lower \
 bounds, `budget_exceeded` when the time ran out, and similar names when nothing matched. \
 The page limit does not limit the work needed to compute totals; candidate reads stop at 200000. \
-limit defaults to 100, at most 2000; context is at most 20 lines, and displayed line text is cut \
-after 1000 characters, plus an ellipsis. With history, search over a range of commits (all, a \
+limit defaults to 100, at most 2000. Without history, context is at most 20 lines and displayed \
+line text is cut after 1000 characters, plus an ellipsis; history results give whole lines. \
+With history, search over a range of commits (all, a \
 revision and its ancestors, or A..B), giving each line once per path and text with its provenance. \
 History searches require output lines, group_by file and no context; paths take files or folders, \
 not globs or virtual roots (use include/exclude for globs), and results are in path order. \
@@ -121,8 +122,9 @@ default; added; removed; context; all), and paths, author, since, until and thre
 Each thread comes with the first and latest patch version that has the lines, the lines with \
 their files and line numbers, and, with the commit history, the linked commits that added them. \
 limit defaults to 20 threads, at most 100, with at most 10 matching lines per thread. \
-Reads at most 50000 distinct matching lines and 20000 patches; incomplete says matches may \
-be missing, including when patches are not yet indexed. budget_ms defaults to 10000, at most 15000.";
+Reads at most 50000 distinct matching lines and 20000 patches; incomplete reports scan caps \
+and time budgets. Patches not yet indexed are skipped; their backlog is reported only when \
+no thread is returned. budget_ms defaults to 10000, at most 15000.";
 
 /// The list_files tool's description, for agents.
 pub const LIST_FILES_DESCRIPTION: &str = "\

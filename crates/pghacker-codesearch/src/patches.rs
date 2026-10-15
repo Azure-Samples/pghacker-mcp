@@ -120,8 +120,8 @@ pub struct SearchPatchesResult {
     pub threads: Vec<ThreadHit>,
     /// More threads match than were returned.
     pub more: bool,
-    /// Some matches may be missing: too many matching lines or patches, the
-    /// time budget, or patches not yet indexed.
+    /// Partial after scan caps or the time budget; an empty result can also
+    /// report unindexed patches. Non-empty results do not report that backlog.
     pub incomplete: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
