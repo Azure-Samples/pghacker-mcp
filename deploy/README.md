@@ -334,10 +334,19 @@ semantics. `33616a4` redacts email addresses in mail it ingests and applies
 reused features' releases in extraction order without maintaining
 `features.release_at`. A regressed release can therefore retain a newer,
 stale evidence date after rolling forward; the newer date guard does not
-automatically repair it. Consider `PGHACKER_CRAWL=off` to pause automatic
-extraction during the rollback; this does not stop mail ingestion. Review
-any releases changed by the older extractor against their newest thread
-evidence after rolling forward.
+automatically repair it. Features the older image creates also have no
+`release_at`: after rolling forward, any later dated claim can replace
+their release, even a claim from an older thread.
+
+Consider `PGHACKER_CRAWL=off` to pause automatic extraction during the
+rollback; this does not stop mail ingestion. Before any extraction
+resumes after rolling forward, reconcile releases the older extractor set
+or changed, including their evidence dates. For missing dates, use the same
+conservative backfill as `0018`: the maximum `threads.last_at` linked through
+`feature_threads`. Scope a separately reviewed repair to the affected
+features with a non-NULL release and NULL `release_at`; the already-applied
+migration will not run this backfill again. Existing non-NULL dates need
+comparison with the actual release evidence, not a blind reset.
 
 After rolling forward, queue address restoration again, even if no restore
 job was cancelled, to recover addresses in mail ingested by the older image:
