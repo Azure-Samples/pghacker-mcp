@@ -34,8 +34,8 @@ seconds by default, at most 15. Each sets the statement timeout for its
 queries and restores the previous setting before returning, errors included.
 The budget is checked between steps, so the step in progress can run past
 it. `query` keeps the reader's 10-second timeout, with 5 seconds to get a
-connection and 20 for the whole call. The README lists the [other
-limits](../README.md#code-search-budgets-and-large-archives).
+connection and 20 for the whole call. The reference lists the [other
+limits](reference.md#limits).
 
 A trigram GIN index on `line` finds candidates; a btree on (`lineage`, `hi`, `lo`) scopes them to files. `alive` is only ever a filter: GiST scans of multiranges can miss rows on PostgreSQL 14 and later (reported on pgsql-hackers in August 2026, not yet fixed). The engine chooses among three plans:
 

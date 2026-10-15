@@ -2,8 +2,8 @@
 
 *October, 2026 | Maxim Lukiyanov | Azure PostgreSQL*
 
-The waves and test subsets below are the original plan; the [README](../README.md)
-and [search design](search-design.md) describe the system as built.
+The waves and test subsets below are the original plan; the [README](../README.md),
+[reference](reference.md) and [search design](search-design.md) describe the system as built.
 
 ## Why pghacker-mcp
 
@@ -76,8 +76,7 @@ Deterministic code handles verbatim facts and models only judgments; the agent-b
 seconds by default, at most 15. `search` and `grep` read at most 200,000
 candidate lines; past the budget or the cap, `search` totals are lower bounds,
 and `grep` fails rather than print partial counts. The
-[README](../README.md#code-search-budgets-and-large-archives) lists each
-tool's limits.
+[reference](reference.md#limits) lists each tool's limits.
 
 Results add totals, cut and budget flags, and similar names when nothing matches at a commit. `grep` takes grep command lines with their folder: flags such as `-E`, `-F` and `-P` set the dialect, and trailing `head`, `tail`, `wc -l`, `sort | uniq -c`, `cut -c` and `grep` stages run on its output. `read_file` and `list_files` read files; `blame`, `get_commit` and `search_commits` answer as git blame, show and log.
 

@@ -1,416 +1,82 @@
 # pghacker-mcp
 
-pghacker-mcp gives AI agents cited answers about PostgreSQL's design history and source code. It is a [PilotSwarm](https://github.com/microsoft/PilotSwarm) **0.8.2** app with three parts (see [docs/design.md](docs/design.md)):
+pghacker-mcp answers questions about PostgreSQL's design history and source code, with citations. Ask why a feature works as it does, or what happened to SQL/PGQ, and an agent finds the pgsql-hackers threads, commits and code that answer it, and quotes them.
 
-- **pghacker-mcp**: a public, stateless MCP server in async Rust. It serves the pgsql-hackers corpus and the PostgreSQL source through a read-only database role.
-- **pghacker-indexer**: an internal async Rust service. Its workers retrieve sources (monthly mbox archives, seed threads, git), parse, thread, embed and project them into an Apache AGE graph. Its MCP tools serve the crawler sessions.
-- **Crawler sessions**: PilotSwarm agents in `plugin/` that extract features, decisions and author positions, deduplicate them, and submit them with verbatim citations.
+It is a [PilotSwarm](https://github.com/microsoft/PilotSwarm) 0.8.2 app in three parts:
 
-Locally, it runs on test slices of the data:
-- two months of pgsql-hackers (June–July 2026);
-- whole threads on SQL/PGQ and SQL/JSON;
-- PostgreSQL's commit history, which you build from a clone ([Commit history](#commit-history)), of the whole tree or of a few folders.
+- **pghacker-mcp**: a public, read-only [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server, in Rust, that serves the mail and the code to agents.
+- **pghacker-indexer**: an internal Rust service that retrieves the mail and PostgreSQL's commit history, indexes them and projects them into a graph. Its MCP tools serve the crawler agents.
+- **Crawler agents**: PilotSwarm sessions that read the threads and record the features, decisions and authors' positions in them, with verbatim quotes.
 
-In Azure ([deploy/README.md](deploy/README.md)), it indexes whatever its users ask for, starting from the local corpus.
+## Quick start
 
-## Run locally
-
-Requires **Node.js 24+**, npm, **Rust** (the toolchain in `rust-toolchain.toml`), and a local Docker engine with Docker Compose. The scripts target macOS and Linux.
+You need Node.js 24 or later, Rust (the toolchain in `rust-toolchain.toml`), and Docker with Docker Compose, on macOS or Linux.
 
 ```bash
-npm run setup
-npm start
+npm run setup   # download PilotSwarm, install dependencies, build, and create .env
+npm start       # start PostgreSQL, both services, and PilotSwarm's worker and portal
 ```
 
-| Service | Address |
+| What | Address |
 | --- | --- |
-| Browser portal | `http://127.0.0.1:3001` |
-| pghacker-mcp (MCP) | `http://127.0.0.1:3102/mcp` |
-| pghacker-indexer (MCP) | `http://127.0.0.1:3101/mcp` |
-| PostgreSQL 17 + AGE, pgvector, pg_trgm, pg_textsearch | `127.0.0.1:55433` |
+| The portal, to chat with the agents | http://127.0.0.1:3001 |
+| pghacker-mcp, for your MCP client | http://127.0.0.1:3102/mcp |
+| pghacker-indexer, for the crawler agents | http://127.0.0.1:3101/mcp |
+| PostgreSQL 17 | 127.0.0.1:55433 |
 
-**Setup** downloads and verifies the PilotSwarm release tarballs, installs dependencies, and builds the two Rust binaries. It also creates an ignored `.env` (owner-only permissions) with random passwords for:
-- PilotSwarm's database;
-- `pgh_indexer`, which writes schema `pghacker` and the graph `pghacker_graph`;
-- `pgh_reader`, which pghacker-mcp uses: read-only, with a 10-second statement timeout.
+Everything listens on 127.0.0.1 only, and the portal has no sign-in, so **don't expose it**. `npm run stop` stops it all and keeps the data.
 
-An existing `.env` is kept, and missing role passwords are added to it.
+The agents need a language model: set `GITHUB_TOKEN` in your shell for GitHub Copilot's models, or add another provider in the portal's Admin Console. For semantic search, set the embedding settings, `HORIZON_EMBED_*`, in `.env` (`.env.example` shows them); without them, the mail searches use full text only. The [reference](docs/reference.md#configuration) lists every setting.
 
-**`npm start`** runs these steps in order:
-1. Starts PostgreSQL. The image in `db/Dockerfile` adds the PGDG builds of AGE 1.7, pgvector 0.8 and pg_textsearch 1.5.
-2. Rebuilds the binaries if needed (`cargo build --release --locked`).
-3. Bootstraps the roles, extensions, schema and graph, and runs the migrations.
-4. Starts and supervises both services, restarting either one if it exits. Logs go to `.runtime/logs`.
-5. Starts the PilotSwarm worker and portal.
+## Load the data
 
-Each process gets only the credentials it needs: the indexer gets `pgh_indexer`, pghacker-mcp gets `pgh_reader`, and the portal gets only the two MCP URLs.
+Locally, pghacker-mcp works on a slice of the data: two months of pgsql-hackers (June–July 2026), whole threads on SQL/PGQ and SQL/JSON, and PostgreSQL's commit history.
 
-Everything listens on loopback only, and sign-in is disabled: **don't expose it**. `npm run stop` stops the portal, the services and PostgreSQL; the data volume is kept. `npm run db:reset` (with the app stopped) drops and recreates schema `pghacker` and the graph, and leaves PilotSwarm's data alone.
+1. **Mail.** In the portal, ask a **pghacker Crawler** session to add pgsql-hackers (locally, the slice above), or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`. The indexer downloads the mail, embeds it and adds it to the graph; `ingest_status` shows its progress.
+2. **Code.** Build the commit history once, from a clone. It takes about 6 minutes; add `--path src/backend/parser` to keep only that folder.
 
-### Graph index readiness
+   ```bash
+   git clone --mirror https://git.postgresql.org/git/postgresql.git .runtime/postgres.git
+   export $(grep ^DATABASE_URL= .env)   # the build runs as the database's administrator
+   cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/postgres.git \
+       --url https://git.postgresql.org/git/postgresql.git --install
+   ```
 
-Bootstrap indexes every newly created concrete AGE edge label by `id`, including
-empty and future registered labels. The graph mapping migration adds outgoing
-`(start_key, label, end_key)` and incoming `(end_key, label, start_key)` B-trees on
-`pghacker.graph_edges`. Existing AGE endpoint and vertex-ID indexes are reused;
-edge-ID indexes are non-unique and do not change graph IDs, properties, or
-projection behavior. The commit history's labels `BACKPATCH_OF` and `COMMITTED`
-are such labels: bootstrap creates them empty, with AGE's `start_id` and `end_id`
-indexes and the `id` index, so an existing database needs no preparation for them.
+   The running services read it at once, without a restart, and the indexer applies new commits every hour.
+3. **Extraction.** Crawler agents read the threads:
 
-For an existing database, prepare missing indexes **before upgrading**. Startup
-checks the actual catalog definitions and usable state, including already-applied
-migrations, and refuses missing/invalid prerequisites. It never performs a large
-blocking build on populated tables or repairs an existing AGE label at startup.
-See [production preparation](deploy/README.md#graph-index-preparation) for the
-separate, opt-in operator script and recovery policy. Adding these indexes does
-not make the full graph sync incremental or establish its total runtime.
+   ```bash
+   npm run crawl -- --pilot              # 10 threads in one session, to review first
+   npm run crawl -- --concurrency 8      # then the rest, 8 sessions at a time
+   npm run crawl -- --dedup              # then one session that merges duplicates
+   ```
 
-### Configuration
+## Use it
 
-| Setting (`.env`) | Purpose |
+Connect any MCP client to `http://127.0.0.1:3102/mcp`, or ask a **pghacker Evaluator** session in the portal. Answers cite Message-IDs, verbatim quotes, commit SHAs and file paths.
+
+| Area | pghacker-mcp's tools |
 | --- | --- |
-| `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `DATABASE_URL` | The local database and its administrator's URL, generated by setup (port 55433). |
-| `PGH_INDEXER_PASSWORD`, `PGH_READER_PASSWORD` | The roles' passwords, generated by setup. |
-| `PORTAL_PORT` | The portal's port (3001). The other `PORTAL_*` settings and `WORKERS` keep their local-only values. |
-| `HORIZON_EMBED_URL`, `HORIZON_EMBED_MODEL`, `HORIZON_EMBED_DIM=1536`, `HORIZON_EMBED_API_KEY` (`_API_KEY_HEADER`, `_BEARER`), or in the shell | Embeddings for semantic and hybrid search, configured the same way as PilotSwarm's embedder. Example: an Azure OpenAI `text-embedding-3-small` deployment's `/embeddings?api-version=2024-10-21` URL. Without them, hybrid search uses full text only, and semantic search is unavailable. |
-| `GITHUB_TOKEN` or `GH_TOKEN`, or in the shell | GitHub Copilot models for the agents. `config/model_providers.json` lists them, with `github-copilot:gpt-6-luna` as the default. |
-| `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Service ports (3101, 3102). |
-| `PILOTSWARM_WORKER_CONCURRENCY`, `PILOTSWARM_ORCHESTRATION_CONCURRENCY` | Session turns and orchestrations the worker runs at once (8 each, 1 to 64). |
-| `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's per-client rate limit. Every local agent shares 127.0.0.1, so the launcher allows 3000 requests a minute in bursts of 500; the server's own default for public clients is 120 and 40. |
-| `PGHACKER_AGENT_MCP_URL`, or in the shell | Another pghacker-mcp for the local agents, such as a deployment's public `/mcp`, to evaluate it. |
-| `PGHACKER_CODE_HISTORY`, or in the shell | The schema whose commit history the code tools read, such as a build's before it is installed. Unset, `pghacker`, where `history build --install` puts it. |
-| `PGHACKER_EXTRACTION_ORDER`, `PGHACKER_EXTRACTION_NEW_MAIL_SHARE`, `PGHACKER_EXTRACTION_NEW_MAIL_DAYS`, or in the shell | [The order of extraction](#the-order-of-extraction): `lanes` (the default) or `largest`; new mail's share of the threads leased (0.5, above 0 and up to 1) and its window in days (7, 1 to 3650). |
+| Mail | `search_threads`, `get_thread`, `search_extracts`, `author_perspective`, `search_authors`, `get_author` |
+| Code | `search`, `grep`, `read_file`, `list_files` and `blame`, at any commit; `get_commit` and `search_commits`, like `git show` and `git log`; `search_patches`, in the patches posted to the list |
+| SQL and graph | `get_ontology` describes the data; `query` runs one read-only SQL statement, Cypher included |
 
-`config/test-slices.toml` chooses the months and seed threads that local runs retrieve. In Azure, `PGHACKER_SOURCES=open` lets `add_source` take any list, months or threads instead, and `follow` keeps a list current ([deploy/README.md](deploy/README.md)).
-
-The launchers give each process only the settings it needs (`scripts/lib/config.mjs`, `scripts/lib/azure.mjs`). Run on their own, the services also read:
-
-| Setting | Purpose |
-| --- | --- |
-| `PGHACKER_ADMIN_DATABASE_URL`, `PGHACKER_INDEXER_DATABASE_URL`, `PGHACKER_READER_DATABASE_URL` | The administrator's URL (bootstrap and `history`; else `DATABASE_URL`), pgh_indexer's and pgh_reader's (else the administrator's, with the roles' passwords). |
-| `PGH_SWARM_PASSWORD` | The password of PilotSwarm's own role, `pgh_swarm`, which bootstrap creates when it's set (Azure). |
-| `PGHACKER_INDEXER_ADDR`, `PGHACKER_MCP_ADDR`, `PGHACKER_MCP_INTERNAL_ADDR` | Listen addresses: `127.0.0.1:3101`, `127.0.0.1:3102`, and a second pghacker-mcp listener without the rate limit, for the agents (Azure: 3103). |
-| `PGHACKER_WORKERS` | The indexer's job workers (5). |
-| `PGHACKER_TOOL_CONNECTIONS`, `PGHACKER_TOOL_TIMEOUT_SECONDS` | [Tool calls' limits](#tool-calls-limits) (8, 30). |
-| `PGHACKER_MCP_POOL`, `PGHACKER_QUERY_POOL` | pghacker-mcp's connections (16), and `query`'s (8). |
-| `PGHACKER_SLICES`, `PGHACKER_SOURCES` | The test slices' file, and what `add_source` takes: `test-slices` (the default) or `open`. |
-| `PGHACKER_EXTRACTION` | `automatic` when a scheduler runs extraction, as in Azure, else `manual`; `ingest_status` reports it. |
-| `PGHACKER_CACHE_DIR`, `PGHACKER_GIT_DIR` | The archive's cache and the git clones (`.runtime/cache`, `.runtime/git`). |
-| `PGHACKER_GRAPH_RECONCILE_HOURS` | Hours between the reconciling full syncs (168); 0 for none. |
-| `PGHACKER_ARCHIVE_BASE_URL`, `PGHACKER_ARCHIVE_USER`, `PGHACKER_ARCHIVE_PASSWORD` | The archive (`https://www.postgresql.org`) and its published anti-scraper credentials (`archives`, `antispam`). |
-| `PGHACKER_HTTP_RATE`, `PGHACKER_HTTP_USER_AGENT` | The archive's requests per second (2), and the User-Agent. |
-| `PGHACKER_KEEP_DOWNLOADS` | Keep months' mbox files in the cache once ingested (true; false in Azure). |
-| `PGHACKER_ALLOWED_HOSTS` | Accepted Host headers, comma-separated, `*` for any; unset, loopback only. |
-| `PGHACKER_CLIENT_IP_HEADER`, `PGHACKER_TRUST_FORWARDED`, `PGHACKER_FRONT_DOOR_ID` | Who a client is, for the rate limit: a trusted proxy's header, the first X-Forwarded-For address, or else the peer; and the one Front Door profile to serve. |
-| `PGHACKER_DB_CA_FILE` | PEM certificates to trust for PostgreSQL's TLS, besides Mozilla's roots. |
-| `RUST_LOG` | Log filter; the launchers' default is `info,tokio_postgres=warn,rmcp=warn`. |
-
-`PGHACKER_ROOT` sets the repository root, whose `.env` tests and local tools read. `npm run crawl` reads `PGHACKER_CRAWL_MODEL` (`github-copilot:gpt-6-luna`), `PGHACKER_CRAWL_PER_SESSION` (8 threads) and, with `--watch`, `PGHACKER_CRAWL_START_SESSIONS` (else `--concurrency`) and `PGHACKER_CRAWL_MAX_SESSIONS` (16). The replay reads `PGHACKER_STUDY_DIR` and `PGHACKER_RG`, its ripgrep.
-
-## Tools
-
-**pghacker-mcp**:
-
-| Area | Tools |
-| --- | --- |
-| Mail | `search_threads`, `get_thread`, `search_extracts`, `author_perspective`, `search_authors`, `get_author`. The search tools take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (default). |
-| SQL and graph | `get_ontology` describes the data. `query` runs one read-only SQL statement, including Cypher on `pghacker_graph`, and returns CSV. |
-| Code | `search` is a first-class code search. `grep` runs grep command lines. `read_file` and `list_files` read the source. They read any commit of the [commit history](#commit-history), as do `blame`, `get_commit` and `search_commits`. `search_patches` finds lines in the patches posted to the lists, by thread, and the commits that landed them. |
-
-**pghacker-indexer**:
-
-| Area | Tools |
-| --- | --- |
-| Sources and progress | `add_source`, `remove_source`, `list_sources`, `ingest_status` |
-| Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
-| Repair | `find_duplicates` (pairs the indexer finds as extracts arrive; skips pairs already judged different), `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
-
-Results cite Message-IDs, verbatim quotes and file paths. Text keeps the email addresses written in it: subjects, bodies, patches and senders' names, a sender without a name showing as their address. The table that matches senders' addresses to authors, `author_emails`, isn't readable by pghacker-mcp, and the graph doesn't read it.
-
-Mail stored before ingest kept addresses has `[email]` in their place, and senders' names without them. With the indexer running, `cargo run --release -p pghacker-indexer -- restore-addresses` (with `.env`'s settings in the environment), or `SELECT * FROM pghacker.restore_addresses()` as `pgh_indexer`, queues jobs that read every stored month again (from the cache when it kept the mbox), and fetch the messages from thread pages one by one. They restore only text stored exactly as ingest once made it from the archive's; chunks they change are embedded again, and patches indexed again. `ingest_status` shows the jobs.
-
-### Code-search budgets and large archives
-
-`search` and `grep` scan the selected commit and paths, and the trees that
-virtual folders name; `search` with `history` scans a range of commits.
-Small scopes (at most 200,000 lines) and short or unindexable patterns read
-the scope's files first. Larger scopes with a required
-literal of at least six consecutive ASCII letters or digits in every
-alternative can use the trigram index. This is a performance hint only:
-the exact Rust matcher still verifies the candidates.
-
-The trigram index is shared by **every commit**: it indexes each line
-instance of the history once. A common term such as `for` can have millions
-of postings even when one version and a small folder are selected. File-first
-scans avoid enumerating those unrelated postings, but a whole tree still
-requires reading its own lines.
-
-`search`, `grep`, `search_patches` and `search_commits` take `budget_ms`:
-10 seconds by default, at most 15. It covers candidate retrieval,
-verification, counts, context and name suggestions, and temporarily replaces
-the reader's 10-second statement timeout, which is restored on success or
-error. It is checked between steps, so the step in progress, such as a regex
-evaluation, a pipeline stage or a history search's last queries, can run
-past it. `search` and `grep` read at most 200,000 candidate lines. `limit`
-pages the results **after** totals are computed; it does not make a broad
-count cheap. Check `complete` before using `search` totals; incomplete totals
-are lower bounds. Inverted counts that cannot be established fail, and
-incomplete `grep` searches fail without emitting a fabricated `0` or running
-a pipeline over partial data.
-
-The read-only `query` tool has its own limits: a 10-second statement
-timeout, 5 seconds to get a connection and 20 for the whole call. It does
-not rewrite arbitrary SQL. The tools' other limits:
-
-| Tool | Limits |
-| --- | --- |
-| `search` | 100 results by default, at most 2,000. At one commit, context of at most 20 lines, and lines cut at 1,000 characters; with `history`, whole lines, once per path and text, without context. |
-| `grep` | Output cut at 1 MiB, after the pipeline. |
-| `read_file`, `blame` | 2,000 lines; `read_file` also stops at 200 KB, but returns its first line whole. |
-| `list_files` | 500 entries by default, at most 5,000. |
-| `get_commit` | A diff of 3,000 lines; context 3 by default, at most 1,000. |
-| `search_commits` | 30 commits by default, at most 200; `changed_lines` and `occurrences` read at most 300,000 lines, and show 10 per commit. |
-| `search_patches` | 20 threads by default, at most 100, with 10 lines each; at most 50,000 matching lines and 20,000 patches read. Patches not yet indexed aren't searched; a search that finds nothing counts them. |
-| `query` | 100 rows by default, at most 1,000, and 1 MiB of CSV; 64 KiB of SQL. |
-
-`search_commits` and `search_patches` say `incomplete` when the budget or a
-cap cut them short.
-
-For a scoped code count, keep the text predicate
-outside a file-first scan so PostgreSQL cannot move it into a global trigram
-bitmap scan. A file version's lines are its lineage's instances alive at the
-version's `lo` (get_ontology describes the tables); here, at REL_17_STABLE's head:
-
-```sql
-WITH files AS MATERIALIZED (
-    SELECT v.lineage, v.lo
-    FROM code_refs r JOIN code_file_versions v
-      ON v.lo <= r.addr AND r.addr < v.hi AND (v.alive IS NULL OR v.alive @> r.addr)
-    WHERE r.kind = 'branch' AND r.name = 'REL_17_STABLE'
-      AND v.path LIKE 'src/backend/access/heap/%'
-)
-SELECT count(*)
-FROM (
-    SELECT i.line FROM files f JOIN code_line_instances i
-      ON i.lineage = f.lineage AND i.lo <= f.lo AND f.lo < i.hi
-         AND (i.alive IS NULL OR i.alive @> f.lo)
-    OFFSET 0
-) scoped
-WHERE scoped.line LIKE '%for (%';
-```
-
-Two performance-tuning programs, in their crates' `perf_tuning/` folders, run
-through Cargo as examples. `crates/pghacker-codesearch/perf_tuning/profile_search.rs`
-profiles common loop searches on an isolated, synthetic commit history (a
-master and eight release branches), with the local test database configured:
+## Check it
 
 ```bash
-cargo run --locked -p pghacker-codesearch --example profile_search
+npm test             # the launcher, configuration, readiness and evaluation helpers
+npm run rust:check   # rustfmt, clippy and the Rust tests
+npm run smoke        # with the app running: both servers, the portal, the worker and the agents
+npm run eval         # with the data loaded: 30 questions (eval/questions.json), into eval/RESULTS.md
 ```
-
-`crates/pghacker-replay/perf_tuning/profile_full.rs` compares the full PG19
-loop cases with GNU grep (requires Docker and downloads the pinned source into
-the ignored `.runtime` cache):
-
-```bash
-cargo run --locked -p pghacker-replay --example profile_full
-```
-
-### How the graph follows the tables
-
-The indexer projects the tables into the AGE graph `pghacker_graph`. Triggers
-on the tables it projects record, in each writing transaction, the keys of the
-vertices and edges the change may affect (`graph_changes`). The `graph_sync`
-job applies them in batches of up to 1,000, each in its own short
-transaction. It recomputes just those vertices and edges from the tables, and
-the edges of any vertex that enters or leaves the graph, such as a reply whose
-parent arrives later. Writers only append to the log, so they never wait on
-the graph.
-
-A full sync recomputes the whole graph instead: once after the change capture
-is installed, after a `TRUNCATE` (as a corpus restore does), after an upgrade
-that changes what the graph projects, weekly as a reconcile that warns if it
-finds drift, and on request with `pghacker-indexer graph-reconcile`.
-`ingest_status` shows the label counts the sync keeps, the changes waiting and
-the last full sync.
-
-The [commit history](#commit-history), once installed, joins the graph: a
-`Commit` vertex for every commit, keyed by its full SHA, with its subject, date,
-author name, branch and back-patch group; `MODIFIES` to the files it changed,
-`DISCUSSED_IN` to the threads that discussed it, `BACKPATCH_OF` from each
-other commit of a back-patch group to the group's first, and `COMMITTED` from the one
-mail author whose name, ignoring case, is the commit's author name (in
-PostgreSQL's history, the committer's). Mail's citations of a commit join its
-vertex once `resolve_anchors` resolves them to the full SHA. The history's file
-versions give the `File` vertices (`loaded` when the history has the path, else
-named by mail or an extract), their `Subsystem` vertices and the `PART_OF`
-edges. The history's tables have no triggers, since an install swaps them in
-whole: its writers record their own changes in the same transaction, namely a
-sync's new commits and their files, the links that a refresh adds or drops,
-and the commits whose back-patch group a regroup changes. An install asks for
-a full sync. Each batch also checks the history's author names, so that
-`COMMITTED` follows the authors' merges and renames. Without a history, nothing
-more is projected.
-
-### The order of extraction
-
-`next_extraction_batch` leases threads from two lanes. A thread needs
-extraction when extraction never read it, or read or skipped it before its
-latest messages came. Those whose latest message is from the last 7 days are
-**new mail**, leased oldest first, as mail arrives. All the others are the
-**backfill**, leased from the newest back to the archive's start, so the
-extracted months fill in from the present backward. While both lanes have
-threads, new mail gets at most half of the threads leased, and a lane without
-threads leaves the other every one. A thread whose mail changes after
-extraction keeps its place in time, and one whose mail changes while it's
-leased is leased again: extraction records the version its lease read.
-Extracting a thread again restates its participants' positions, each
-replacing the author's earlier one there on the same feature or decision,
-except one that a merge moved there, which stays for `undo_merge`. A
-feature's release is the one from its thread with the latest message,
-whatever the order of extraction; an undated thread only fills in a missing
-release.
-
-`ingest_status` shows both lanes (`extraction.lanes`): the threads waiting and
-leased, new mail's oldest activity, and the backfill's newest, after which
-every message has been read except in new mail.
-`PGHACKER_EXTRACTION_NEW_MAIL_DAYS` (7) and
-`PGHACKER_EXTRACTION_NEW_MAIL_SHARE` (0.5) set the window and the share.
-With `PGHACKER_EXTRACTION_ORDER=largest`, extraction leases the threads
-never extracted first, the largest first, instead of using the lanes.
-
-### How duplicates are found
-
-The `duplicates` job compares each new feature and decision with the live
-ones of its kind, by its embedding's nearest neighbours (the HNSW index) and
-by its name's trigrams, and keeps the pairs at least 0.8 alike by embedding
-or 0.6 by name (`duplicate_candidates`). Each pair is compared once, when the
-later of its two arrives, so the work grows with the new extracts rather than
-with every pair. `find_duplicates` lists the kept pairs whose two extracts are
-both live, except pairs judged different, and `pending` counts the extracts
-not compared yet. An extract stored before its embedding is compared again
-once it has one, and one whose merge is undone is compared again with the
-extracts that came meanwhile.
-
-### Tool calls' limits
-
-The indexer's tool calls have database connections of their own, apart from
-the job workers', so that no call can keep the jobs waiting: 8 by default
-(`PGHACKER_TOOL_CONNECTIONS`). Each statement of a call may run 30 seconds
-(`PGHACKER_TOOL_TIMEOUT_SECONDS`), and a call that waits 10 seconds for a
-connection fails as busy. When a call's client goes away, the indexer cancels
-the call's statements and closes their connections. `add_source` and
-`remove_source` run to the end regardless: a change of sources, once asked
-for, is made. At most two `find_duplicates` calls run at once; another that
-waits 10 seconds fails as busy.
-
-### Commit history
-
-The commit history stores every line of every commit of every branch once
-(the weave), and the code tools read any commit from it; [the search
-design](docs/search-design.md) describes it. It is their only source: until
-one is installed, they have no code to read. As the administrator, with
-`.env`'s `DATABASE_URL` in the environment:
-
-```bash
-# A bare clone with every branch and tag.
-git clone --mirror https://git.postgresql.org/git/postgresql.git .runtime/postgres.git
-# Build into a schema of its own (6 minutes), and swap it into pghacker.
-cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/postgres.git \
-    --url https://git.postgresql.org/git/postgresql.git --install
-# Or keep only some folders, for a smaller local build (repeat --path):
-#   ... history build ... --install --path src/backend/parser --path src/include/nodes
-# Rebuild every file of the branch heads and 40 random commits; compare with git.
-cargo run --release -p pghacker-indexer -- history verify --git-dir .runtime/postgres.git \
-    --schema pghacker --heads --sample 40
-```
-
-The running indexer and pghacker-mcp read it at once (in Azure, see
-[deploy/README.md](deploy/README.md#commit-history)). To read a build before
-installing it, set `PGHACKER_CODE_HISTORY` to its schema in `.env` and restart.
-`history build --fetch` fetches or updates the bare clone from `--url` itself,
-as the Azure job does.
-The hourly `code_history_sync` job
-fetches and applies new commits, and refreshes back-patch groups and the
-links from commits to threads; `history sync` and `history regroup` do it by
-hand. The `patch_lines` job indexes the mail's patches for `search_patches`
-whether or not the history is installed. `add_source` for a PostgreSQL
-version loads nothing: it names the commit the history already has, or starts
-the sync when the history lacks it.
-
-An installed history joins the graph
-([How the graph follows the tables](#how-the-graph-follows-the-tables)), and
-mail's commit citations join their commits. PostgreSQL's history adds about
-750,000 vertices and edges. On a laptop, the full sync that
-the install asks for took 36 seconds, and a full sync of the whole graph takes
-about 20 seconds more than without it.
-
-In the `pghacker-replay` crate's `perf_tuning/` folder, `history_parity`
-checks a history against git on random commits: `get_commit` against
-`git show`, its line counts, and `blame` against `git blame`.
-`profile_history` times one code-tool call. Both read the history in
-`--schema` (default `pghacker`) of `--database` (default the app's).
-
-## Build the corpus
-
-With the app running:
-
-1. Add the sources. Ask a `pghacker-crawler` session in the portal, or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`. The code comes from the [commit history](#commit-history), built once.
-2. Watch the progress with `ingest_status`. Workers download the mbox months and seed threads (2 requests/s, cached in `.runtime/cache`), embed chunks, resolve file anchors against the commit history and sync the graph.
-3. Extract:
-
-```bash
-npm run crawl -- --pilot                          # 10 threads in one pghacker-extract session, for review
-npm run crawl -- --concurrency 8                  # then the rest, 8 sessions at a time
-npm run crawl -- --dedup                          # a pghacker-dedup session merges duplicates
-npm run crawl -- --supervisor                     # or let the pghacker-crawler agent run the pilot
-npm run crawl -- --watch                          # or keep extracting as threads arrive, as Azure does
-```
-
-The worker runs `PILOTSWARM_WORKER_CONCURRENCY` session turns at once (8 by default; set it in `.env`), so keep `--concurrency` at or below it.
-
-## Checks
-
-```bash
-npm test                 # launcher, configuration, readiness and evaluation helpers
-npm run rust:check       # rustfmt, clippy -D warnings, and the Rust tests (they create temporary databases)
-npm run smoke            # with the app running: both MCP servers, the portal, the worker and the agents
-npm run eval             # with the corpus built: the 30-question evaluation (eval/questions.json, results in eval/RESULTS.md)
-```
-
-Rust integration tests read the local database configuration from `.env`, with
-process variables taking precedence. The Rust-created operator fixture forwards
-its scoped reader URL to Node; exporting `PGH_READER_PASSWORD` is not required.
-
-The code-search exactness replay lives in `crates/pghacker-replay`, against its own `pghacker_replay` database:
-
-```bash
-cargo run --release -p pghacker-replay -- prepare                       # create and migrate pghacker_replay
-cargo run --release -p pghacker-replay -- pg19                          # 2,000 generated searches on the PG19 subset
-PGHACKER_STUDY_DIR=<study> cargo run --release -p pghacker-replay -- study
-```
-
-Each workload reads one commit from a history of its own (schema `replay_pg19`, or `replay_study_<repo>`): a one-commit repository with exactly that commit's blobs, built once and reused while the commit is the same. The PG19 replay compares `search` and `grep` with ripgrep and with GNU grep in Docker: 2,000 of 2,000 match each. The study replay reruns recorded agent searches, which are private: they're read from outside the repository and its output stays under `.runtime/replay`. It matched ripgrep on all 10,540 replayable searches through `search` and 7,254 through `grep`, which is byte-identical to GNU grep on 7,277 command lines.
 
 ## Deploy to Azure
 
-[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform. Start with the synthetic [example.tfvars](deploy/environments/example.tfvars); real environment and backend files are local and ignored. It runs as one image (`Dockerfile`), with HorizonDB and Azure AI Foundry behind private endpoints and Front Door in front. `/mcp` is public; the portal requires GitHub sign-in through your configured organization, team, or explicit login list. `npm run corpus:dump` exports the local corpus for the deployment's restore job.
+[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, `/mcp` is public, the portal requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
 
-## Repository
+## Learn more
 
-| Path | Contents |
-| --- | --- |
-| `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing |
-| `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
-| `crates/pghacker-code` | The commit history's builder and sync |
-| `crates/pghacker-codesearch` | pg_trgm code search, the grep translator, `read_file`, `list_files`; the history engine, `blame`, `get_commit`, `search_commits`, `search_patches` |
-| `crates/pghacker-sqlquery` | The read-only `query` tool |
-| `crates/pghacker-api` | Mail and graph tools |
-| `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
-| `crates/pghacker-replay` | The exactness replay harness and the history parity check |
-| `migrations/`, `db/` | Schema and the PostgreSQL image |
-| `plugin/` | Branding, agents and the MCP catalog |
-| `scripts/` | The launcher, crawl and evaluation drivers; the container's supervisor, probe and corpus restore |
-| `Dockerfile`, `deploy/` | The image, and the Azure deployment: Terraform, its environment and the runbook |
-| `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18 (adds `bind_text`) |
+- [Reference](docs/reference.md): settings, tools and their limits, the commit history, the graph, extraction, tests and the repository's layout.
+- [Design](docs/design.md): why pghacker-mcp exists, and its plan.
+- [Search design](docs/search-design.md): how the code tools read every commit.
+- [Deployment](deploy/README.md): Azure, upgrades and operations.

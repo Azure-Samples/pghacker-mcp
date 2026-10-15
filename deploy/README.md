@@ -269,7 +269,7 @@ transaction, and `--check` then passes.
 
 ## Commit history
 
-The code tools read PostgreSQL's whole commit history ([README](../README.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed (`list_sources.history` shows it). Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
+The code tools read PostgreSQL's whole commit history ([reference](../docs/reference.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed (`list_sources.history` shows it). Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
 
 ```sh
 ../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
@@ -285,7 +285,7 @@ Check `tools/list` (First deployment, step 9) and run the evaluation.
 
 **Retired snapshots.** Migration `0016_retire_snapshots` drops the snapshots' tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and cancels unfinished `code_snapshot` jobs. It records the graph keys of their files and of the history's, so that the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history without a full sync: a File is `loaded` when the history has its path.
 
-**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph (README, "How the graph follows the tables"): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
+**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph ([the graph](../docs/reference.md#the-graph)): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
 - The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each install.
 - Full syncs, including the weekly reconcile, take longer accordingly: locally, the history's part took 20 s.
 - The history's writers record their changes for the incremental sync: an hourly sync's few commits cost a batch of milliseconds.
@@ -327,7 +327,7 @@ It confirms the scope of large requests, since a whole archive is decades of mai
 
 The crawl scheduler's progress is in the container's log, with `[crawl]` lines. To stop extraction, set `app_env = { PGHACKER_CRAWL = "off" }` and apply. The other knobs are `crawl_start_sessions`, `crawl_max_sessions` and the Foundry capacities in `foundry_deployments`.
 
-Extraction leases new mail as it arrives, for up to half of the threads, and fills in the rest of the archive from the newest thread back (README, "The order of extraction"). `ingest_status.extraction.lanes`, and the log's `[crawl] Backlog:` lines every 10 minutes, show both lanes. To tune them, set `PGHACKER_EXTRACTION_NEW_MAIL_SHARE` or `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` in `app_env`. To lease the largest threads never extracted first instead, set `app_env = { PGHACKER_EXTRACTION_ORDER = "largest" }` and apply; the app restarts with it.
+Extraction leases new mail as it arrives, for up to half of the threads, and fills in the rest of the archive from the newest thread back ([extraction](../docs/reference.md#extraction)). `ingest_status.extraction.lanes`, and the log's `[crawl] Backlog:` lines every 10 minutes, show both lanes. To tune them, set `PGHACKER_EXTRACTION_NEW_MAIL_SHARE` or `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` in `app_env`. To lease the largest threads never extracted first instead, set `app_env = { PGHACKER_EXTRACTION_ORDER = "largest" }` and apply; the app restarts with it.
 
 Of `app_env`'s settings, the Rust services get only the extraction order's, `PGHACKER_CODE_HISTORY` and general ones such as `RUST_LOG`.
 
@@ -347,7 +347,7 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 
 - **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[oauth2-proxy]`.
 - **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
-- **Graph sync.** The indexer applies the changes that triggers capture in short batches (README, "How the graph follows the tables").
+- **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.
   - A full sync runs once after the upgrade that installs the change capture, after an upgrade that changes what the graph projects, after a restore or a commit-history install, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
 - **Secrets.**
