@@ -78,9 +78,12 @@ pub static TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "next_extraction_batch",
-        description: "Leases 1-3 threads that need extraction (or the thread_ids given) from two lanes: new mail, \
-            the threads with messages from the last days, oldest first; and the backfill, every other thread, \
-            from the newest back. Returns each thread with its lane, participants (author_id, name), extracts \
+        description: "Leases 1-3 threads that need extraction (default 1, or the thread_ids given). By default, \
+            two lanes: new mail, the threads with a latest message from the last 7 days, oldest first; and the \
+            backfill, every other thread, from the newest back. While both lanes have work, new mail gets up to \
+            half the slots. The server can configure the window/share or use the older largest-first order; \
+            explicit thread_ids bypass that order. The lease records each thread's content version, so mail \
+            arriving during it still needs extraction afterwards. Returns each thread with its lane, participants (author_id, name), extracts \
             already linked to it, and the first page of messages: Message-ID, author, date, text without quoted \
             replies, patches (files changed) and anchors. Long threads have next_offset: page on with \
             read_messages. Returns done=true when no thread that needs extraction is free.",
@@ -105,10 +108,12 @@ pub static TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "submit_extracts",
         description: "Saves one leased thread's extracts, all or nothing: features (new with a slug, or reuse an \
-            existing id; status, release, files from the thread's patches), decisions (outcome, alternatives, \
+            existing id; status, release, files from the thread's patches; a reused feature's release changes \
+            only for evidence at least as recent, by the thread's latest message date), decisions (outcome, alternatives, \
             rationale, and the slug of the feature each decides), and positions (an author's stance on a \
             feature or decision, citing the author's own messages; a position restated in a thread replaces the \
-            author's earlier one there on the same feature or decision). Every extract cites messages of the \
+            author's earlier one there on the same feature or decision, except positions moved by merges, \
+            which remain for undo_merge). Every extract cites messages of the \
             thread with verbatim quotes. A new extract that resembles an existing one needs distinct_because, \
             which is recorded so that find_duplicates doesn't offer the pair. Send skip_reason instead for a \
             thread without technical discussion. On errors nothing is saved: fix all and resubmit.",
@@ -120,7 +125,8 @@ pub static TOOLS: &[ToolSpec] = &[
         description: "Lists pairs of features or decisions that look like the same thing, by semantic similarity \
             or name, except pairs already judged different: by an extractor's distinct_because or by \
             mark_distinct. The indexer finds the pairs as extracts arrive; pending counts the extracts it hasn't \
-            compared yet.",
+            compared yet. The default semantic threshold is 0.85 (min_similarity: 0.8 to 1); name similarity \
+            of at least 0.6 also qualifies independently.",
         effect: READ,
         schema: schema::<FindDuplicatesArgs>,
     },

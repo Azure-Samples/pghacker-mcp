@@ -11,13 +11,13 @@ import {
 import { execInDatabase } from "./lib/processes.mjs";
 
 // Dumps the local corpus for an Azure deployment to start with
-// (deploy/README.md, "Restore the corpus"):
+// (deploy/README.md, "First deployment", step 6):
 //   npm run corpus:dump [-- --out <dir>]
 // Writes <dir>/<id>/corpus.dump (schema pghacker's rows, without the graph's
 // bookkeeping, which the target rebuilds), manifest.json (migrations, row
 // counts, extensions, embedding model) and the Dockerfile of the seed image
-// that the restore job runs. The database must be running (npm start, or
-// npm run db:up), and better idle: a crawl in progress leaves leases, which
+// that the restore job runs. The database must be running (npm start),
+// and better idle: a crawl in progress leaves leases, which
 // the restore releases.
 const { values: options } = parseArgs({
   options: { out: { type: "string", default: "" } },

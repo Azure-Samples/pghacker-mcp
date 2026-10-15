@@ -1,6 +1,6 @@
 //! Tool calls over HTTP, as crawler sessions make them, while find_duplicates
 //! calls are stuck: ingest_status still answers and the jobs still run, a
-//! stuck call runs no longer than the tool timeout, and one whose client gives
+//! stuck statement runs no longer than the tool timeout, and a call whose client gives
 //! up is cancelled with its statement.
 
 use std::future::Future;

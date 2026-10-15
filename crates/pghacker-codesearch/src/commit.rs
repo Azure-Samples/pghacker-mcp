@@ -24,12 +24,12 @@ pub const MAX_DIFF_LINES: usize = 3_000;
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetCommitArgs {
-    /// The commit: a SHA or a prefix of 7 or more digits, a branch or tag (its newest commit), or a revision such as REL_17_STABLE~2 or master@2024-06-01.
+    /// The commit: a SHA or a prefix of 7 or more hexadecimal digits, a branch or tag (its newest commit), or a revision such as REL_17_STABLE~2 or master@2024-06-01.
     pub commit: String,
     /// Only these files' diffs: paths or folders from the source root, or globs such as *.y.
     #[serde(default)]
     pub paths: Vec<String>,
-    /// Lines of context around each change. Default 3, as git's.
+    /// Lines of context around each change. Default 3, as git's, at most 1000.
     #[serde(default)]
     pub context: Option<u32>,
     /// Include the unified diff. Default true; false gives the message, links and changed files only.

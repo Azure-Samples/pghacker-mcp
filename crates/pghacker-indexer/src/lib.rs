@@ -37,7 +37,7 @@ use crate::slices::Slices;
 /// How long a tool call waits for a connection before it fails as busy.
 const TOOL_CONNECTION_WAIT: Duration = Duration::from_secs(10);
 
-/// find_duplicates calls that may run at once: one per kind.
+/// find_duplicates calls that may run at once, sharing the slots across kinds.
 pub const FIND_DUPLICATES_AT_ONCE: usize = 2;
 
 /// What the workers and tools share. Cheap to clone.

@@ -1,6 +1,7 @@
 //! The public MCP server's `query` tool: one read-only SQL statement, AGE's
 //! `cypher()` included, run as pgh_reader in a read-only transaction that is
-//! always rolled back, with a 10-second timeout, answered as CSV.
+//! always rolled back, with a 10-second statement timeout, answered as CSV.
+//! Connection checkout is bounded at 5 seconds and the whole call at 20.
 //!
 //! The check and the tool ([`check`], [`QueryTool`]) are in `query`, and the
 //! transaction, its text-format reads and the CSV in `execute`, whose
@@ -25,15 +26,18 @@ pub const NAME: &str = "query";
 /// The tool's description for agents.
 pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's PostgreSQL 17 \
     database and returns CSV: a header row, up to max_rows rows, and the row count, with a banner \
-    above when rows are cut. Tables, in schema pghacker: threads, messages, authors, author_names, \
+    above when rows or CSV bytes are cut. max_rows defaults to 100, at most 1000; SQL is at most \
+    65536 bytes (64 KiB), and CSV at most 1048576 bytes (1 MiB), before the banner and row count. \
+    Tables, in schema pghacker: threads, messages, authors, author_names, \
     patches, patch_texts, anchors, message_chunks, features, decisions, positions, citations, \
     feature_threads, feature_files, sources, and the commit history's below. Text keeps the email \
-    addresses written in it; senders' addresses (author_emails) are not readable. \
+    addresses written in it; the sender-address identity mapping (author_emails) is not readable. \
     Query the AGE graph pghacker_graph with SELECT * FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
     SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement, run read-only with a 10-second \
-    timeout. NULL reads as None, an empty string as \"\".";
+    statement timeout, a 5-second connection checkout and a 20-second whole-call backstop. \
+    NULL reads as None, an empty string as \"\".";
 
 /// The commit history's tables, which pghacker-mcp adds to the description.
 pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_commit_files, \
@@ -45,9 +49,9 @@ pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryArgs {
-    /// One SQL statement that reads, such as a SELECT or a cypher() call.
+    /// One SQL statement that reads, such as a SELECT or a cypher() call, at most 65536 bytes (64 KiB).
     pub sql: String,
-    /// Rows to return: 100 by default, at most 1,000. More are cut, with a banner.
+    /// Rows to return: 100 by default, at most 1,000. Rows beyond this or the 1048576-byte CSV cap are cut, with a banner.
     #[serde(default)]
     #[schemars(range(min = 1, max = 1000))]
     pub max_rows: Option<u32>,

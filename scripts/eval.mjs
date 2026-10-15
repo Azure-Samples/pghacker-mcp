@@ -6,7 +6,7 @@ import { callTool } from "./lib/services.mjs";
 import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 import { checkCommits, citedCommits, lastJsonBlock, parseCsv, quoteIn, resultsTable } from "./lib/evalcheck.mjs";
 
-// The wave 1 evaluation (npm start must be running):
+// The mail and commit-history evaluation (npm start must be running):
 //   npm run eval -- [--questions eval/questions.json] [--only q01,q02] [--concurrency 3] [--results eval/RESULTS.md]
 // To evaluate a deployment, start the app with PGHACKER_AGENT_MCP_URL set to
 // its public /mcp, so that the agents use it, and pass the same URL as
@@ -188,7 +188,7 @@ const dir = path.join(config.runtimeDir, "eval");
 mkdirSync(dir, { recursive: true });
 writeFileSync(path.join(dir, `eval-${stamp}.json`), JSON.stringify({ options, results }, null, 2));
 const lines = [
-  "# Wave 1 evaluation",
+  "# pghacker-mcp evaluation",
   "",
   `${passed} of ${results.length} questions passed (judged correct, with valid verbatim citations and, for questions with gold commits, a valid cited gold commit).`,
   ...(withCommits.size && withCommits.size < results.length

@@ -119,7 +119,7 @@ pub struct SearchArgs {
     /// Whole words only (grep -w).
     #[serde(default)]
     pub whole_word: bool,
-    /// Files, folders or globs to search, relative to the source root, e.g. src/backend/parser or src/include/nodes/*.h. Default: everything loaded.
+    /// Files, folders or globs to search, relative to the source root, e.g. src/backend/parser or src/include/nodes/*.h. Default: the selected commit's indexed tree. With history, only files or folders: use include/exclude for globs.
     #[serde(default)]
     pub paths: Strings,
     /// Only files whose names match these globs, e.g. *.c or *.{c,h}; a glob with a slash matches the path from the root.
@@ -149,16 +149,16 @@ pub struct SearchArgs {
     /// Items to skip, for the next page.
     #[serde(default)]
     pub offset: u32,
-    /// `path` (default) or `coverage`: files matching the most query terms first.
+    /// At one commit: `path` (default) or `coverage` (files matching the most query terms first). History results are in path order.
     #[serde(default)]
     pub order: Order,
-    /// Time limit in milliseconds: default 4000, at most 10000; with history, default 10000, at most 15000.
+    /// Time budget in milliseconds: search at one commit (no history), default 4000, at most 10000; search over a range of commits (history), default 10000, at most 15000.
     #[serde(default)]
     pub budget_ms: Option<u32>,
     /// PostgreSQL version: a major version such as 19 (the head of its branch), a release such as 18.3, a ref such as REL_18_3, or a commit SHA. Default: the newest release line.
     #[serde(default)]
     pub version: Option<String>,
-    /// Search the commit history instead of one version: `all`, a branch, tag or commit with its history (REL_17_STABLE), or a range A..B (B's history that isn't A's). Gives each line once per path and text, with the commit that added it, those that removed it, and the branches and releases that have it.
+    /// Search over a range of commits instead of at one commit: `all`, a branch, tag or commit with its ancestors (REL_17_STABLE), or A..B (B's history that isn't A's). Gives each line once per path and text, with the commits that added and removed it and the branch heads and releases that have it. Requires output lines, group_by file, context 0 and paths without globs or virtual roots.
     #[serde(default)]
     pub history: Option<String>,
 }

@@ -1002,7 +1002,7 @@ async fn change(client: &mut Client, rng: &mut Rng, n: u64) {
                 ),
                 1 => format!("DELETE FROM anchors WHERE ctid IN (SELECT ctid FROM anchors ORDER BY id OFFSET {row} LIMIT 1)"),
                 // A commit citation resolved to another's SHA, as
-                // resolve_anchors does with the history on, or unresolved.
+                // resolve_anchors does with a history installed, or unresolved.
                 2 => format!(
                     "UPDATE anchors SET resolved = CASE WHEN resolved IS NULL THEN '{}' END
                      WHERE ctid IN (SELECT ctid FROM anchors WHERE kind = 'commit' ORDER BY id OFFSET {row} LIMIT 1)",

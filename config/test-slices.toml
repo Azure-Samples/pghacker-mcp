@@ -1,6 +1,6 @@
-# The wave 1 test slices: what the indexer retrieves when a source is added.
-# Sources choose mailing lists; this file chooses the parts of them to retrieve
-# until wave 3 retrieves everything. PostgreSQL's code comes from the commit
+# The local test slices: what PGHACKER_SOURCES=test-slices retrieves when a
+# source is added. PGHACKER_SOURCES=open, used in Azure, accepts chosen months,
+# ranges or whole archives instead. PostgreSQL's code comes from the commit
 # history, which holds every branch, tag and commit.
 
 [mail]

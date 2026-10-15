@@ -506,7 +506,7 @@ async fn a_full_sync_projects_the_history() {
 async fn resolved_anchors_name_the_history_commits() {
     let (_db, h, mut client) = installed().await;
     let cited = commit(&h.c2[..9]);
-    // With the history on, resolve_anchors gives the full SHA: the citation
+    // With a history installed, resolve_anchors gives the full SHA: the citation
     // and the history's commit become one vertex.
     assert_eq!(
         anchors::resolve_in_history(&client, "pghacker")
@@ -1125,7 +1125,7 @@ async fn change(
         8 => "DELETE FROM anchors WHERE ctid IN (SELECT ctid FROM anchors WHERE kind = 'commit'
                                                  ORDER BY id DESC LIMIT 1)"
             .to_owned(),
-        // Citations resolved, as resolve_anchors does with the history on,
+        // Citations resolved, as resolve_anchors does with a history installed,
         // or unresolved.
         9 => {
             if rng.below(2) == 0 {

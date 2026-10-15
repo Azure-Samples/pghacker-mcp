@@ -184,7 +184,7 @@ pub struct FeatureIn {
     /// What the thread shows by its last messages (see status_signals). A
     /// reused feature keeps the most advanced status any of its threads showed.
     pub status: FeatureStatus,
-    /// The major version it targeted or shipped in, such as "19".
+    /// The major version it targeted or shipped in, such as "19". On reuse, evidence is dated by the thread's latest message: older evidence cannot replace a newer thread's release.
     #[serde(default)]
     pub release: Option<String>,
     /// Paths of files whose changes implement it, from this thread's patches or file anchors.
@@ -280,7 +280,7 @@ pub struct UndoMergeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindDuplicatesArgs {
     pub kind: DraftKind,
-    /// Minimum semantic similarity, 0.8 to 1. Default 0.85.
+    /// Minimum semantic similarity, 0.8 to 1. Default 0.85. Pairs with name similarity at least 0.6 also qualify independently.
     #[serde(default)]
     pub min_similarity: Option<f64>,
     /// Pairs to list, 1 to 100. Default 20.

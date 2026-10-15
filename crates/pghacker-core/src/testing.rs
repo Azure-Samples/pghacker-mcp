@@ -27,9 +27,7 @@ impl TestDb {
         let maintenance_url = with_database(&admin, "postgres")?;
         let maintenance = db::connect(&maintenance_url, "pghacker-test")
             .await
-            .context(
-                "the tests need the local database: run `npm run setup` and `npm run db:up`",
-            )?;
+            .context("the tests need the local database: run `npm run setup` and `npm start`")?;
         let name = format!("pgh_test_{}", uuid::Uuid::new_v4().simple());
         maintenance
             .batch_execute(&format!("CREATE DATABASE {name}"))

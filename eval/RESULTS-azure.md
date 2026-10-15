@@ -1,4 +1,4 @@
-# Wave 1 evaluation
+# Mail and commit-history evaluation
 
 24 of 30 questions passed (judged correct, with valid verbatim citations and, for questions with gold commits, a valid cited gold commit).
 Questions with gold commits: 7 of 10 passed; the others: 17 of 20.
@@ -39,7 +39,7 @@ pghacker-mcp: the deployment's public `/mcp` endpoint (environment-specific URL 
 | q29: Who reported the problem that led PostgreSQL to reject "=" in the names of reloptions and foreign-data options in June 2025, who wrote and reviewed the fix, and why was "=" a problem? | review | yes | yes | yes | yes | yes | 54 |
 | q30: Who reported the crash in ALTER SUBSCRIPTION ... REFRESH PUBLICATION when a subscribed relation is dropped concurrently, fixed in August 2026? Who wrote and reviewed the fix, and what caused the crash? | review | no | yes | no | yes | no | 58 |
 
-q21 to q30 need the commit history: production reads it (PGHACKER_CODE_HISTORY = "pghacker") since 2026-10-14. Every question with gold commits cited valid commits, and all but q30 cited a gold one.
+q21 to q30 need the commit history: production has read it since 2026-10-14. At this run, `PGHACKER_CODE_HISTORY = "pghacker"` explicitly named the installed schema; it is also the default, not a switch that enables history. Every question with gold commits cited valid commits, and all but q30 cited a gold one.
 
 The failures, by cause:
 - Question problems in the new questions, fixed after this run; rerun alone, all three passed:
