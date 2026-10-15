@@ -143,14 +143,14 @@ const PORTAL_ROUTES = ["/portal/", "/api/v1/health", "/assets/check-public.js", 
 
 /**
  * A deployment's routes as a visitor sees them, read-only. On `origin`, the
- * public one: the home page and its files without sign-in, and pghacker-mcp
+ * public one: the home page and its files without sign-in, the portal's
+ * share links sent on to /portal/ on the portal's host, and pghacker-mcp
  * answering anonymously. On `portal`'s (Front Door's own host name, the same
- * origin without a custom domain): the portal's share links sent on to
- * /portal/; the portal, its files and anything else behind GitHub sign-in,
- * which comes back to that host's callback; the portal's API answering 401;
- * and both, whatever X-Forwarded-Uri a client forges. A separate public
- * origin must answer 404 for the portal's paths. Each check is
- * { name, ok, detail }; nothing signs in or changes anything.
+ * origin without a custom domain): the portal, its files and anything else
+ * behind GitHub sign-in, which comes back to that host's callback; the
+ * portal's API answering 401; and both, whatever X-Forwarded-Uri a client
+ * forges. A separate public origin must answer 404 for the portal's paths.
+ * Each check is { name, ok, detail }; nothing signs in or changes anything.
  */
 export async function checkPublic(origin, {
   portal = origin, timeout = 30_000, fetchImpl = fetch, listToolsImpl = listTools,
@@ -210,6 +210,18 @@ export async function checkPublic(origin, {
       detail: results.map((result) => `HTTP ${result.status} ${result.script}`).join(", "),
     };
   });
+  // A share link can name any of the hosts, such as one made while the
+  // portal was on a custom domain: the home page sends it on to the
+  // portal's own host.
+  for (const route of ["/?session=check-public", "/?canvasShare=check-public"]) {
+    await check(`${route} goes on to the portal's host`, async () => {
+      const response = await get(route);
+      await response.arrayBuffer();
+      const location = response.headers.get("location");
+      const expected = `${portalBase}/portal/${route.slice(1)}`;
+      return { ok: response.status === 302 && location === expected, detail: `HTTP ${response.status} ${location ?? ""}`.trim() };
+    });
+  }
   await check("pghacker-mcp lists its tools anonymously at /mcp", () => tools(base));
   if (portalBase !== base) {
     for (const route of PORTAL_ROUTES) {
@@ -218,12 +230,6 @@ export async function checkPublic(origin, {
     await check("pghacker-mcp answers at the portal's host's /mcp too", () => tools(portalBase));
   }
 
-  await check("a portal share link goes on to /portal/", async () => {
-    const response = await request(portalBase, "/?session=check-public");
-    await response.arrayBuffer();
-    const location = response.headers.get("location");
-    return { ok: response.status === 302 && location === "/portal/?session=check-public", detail: `HTTP ${response.status} ${location ?? ""}`.trim() };
-  });
   for (const route of ["/portal/", "/portal", "/assets/check-public.js", "/check-public"]) {
     await check(`${route} asks for GitHub sign-in`, () => signIn(route));
   }

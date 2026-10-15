@@ -26,7 +26,7 @@ flowchart LR
 - **`https://<front door>/`** is the public home page (`home/`): what pghacker-mcp is, the MCP URL (its own origin's `/mcp`) and how to add it to an agent, and example prompts with their answers. Its files are public; any other path needs sign-in. oauth2-proxy answers `/robots.txt` itself (`Disallow: /`).
 - **`https://<front door>/portal/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
   - Only Front Door's own host name serves it. A [custom domain](#custom-domains) gets the home page and `/mcp`, and Front Door answers 404 for its other paths. Sign-in therefore happens on one host, at one callback.
-  - PilotSwarm 0.8.2 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`) reach the home page, which sends them on to `/portal/`. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
+  - PilotSwarm 0.8.2 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`, `/?canvasShare=...`) reach the home page, which sends them on to `/portal/` on Front Door's host name (`portal_url`), whichever host they name. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door and the ingress pass a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
@@ -47,7 +47,7 @@ flowchart LR
 | Process | User | Gets |
 | --- | --- | --- |
 | oauth2-proxy | `pgh-proxy` | The GitHub OAuth App's ID and secret, and the cookie secret |
-| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page and its port, no secret |
+| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page, its port and the portal's origin (`PGHACKER_PORTAL_URL`), for share links; no secret |
 | pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy |
 | PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus; models through the Foundry proxy |
 
@@ -159,7 +159,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '[.result.tools[].name]'
    ```
 
-   From the repository root, check the routes from outside, read-only. On the public URL: the home page and its files without sign-in, and `/mcp`; with a custom domain, Front Door's 404 for the portal's paths. On the portal's: the portal and its API behind sign-in, whose callback is on that host, even with a forged `X-Forwarded-Uri`:
+   From the repository root, check the routes from outside, read-only. On the public URL: the home page and its files without sign-in, its share links sent on to the portal's host, and `/mcp`; with a custom domain, Front Door's 404 for the portal's paths. On the portal's: the portal and its API behind sign-in, whose callback is on that host, even with a forged `X-Forwarded-Uri`:
 
    ```sh
    npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)" \

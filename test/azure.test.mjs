@@ -151,7 +151,7 @@ test("the extraction order's settings reach the indexer only, and are checked", 
   }
 });
 
-test("the home page's server runs as its own user with the page and its port only", () => {
+test("the home page's server runs as its own user with the page, its port and the portal's origin only", () => {
   const config = readAzureConfig(ENV);
   const { home } = processEnvironments(config);
   // Not oauth2-proxy's user, which could read that process's secrets.
@@ -160,7 +160,9 @@ test("the home page's server runs as its own user with the page and its port onl
   assert.equal(home.HOME, layout(config).home.home);
   assert.equal(home.PORT, String(PORTS.home));
   assert.equal(home.PGHACKER_HOME_DIR, path.join(config.root, "home", "dist"));
-  assert.deepEqual(Object.keys(home).sort(), ["HOME", "LOGNAME", "PATH", "PGHACKER_HOME_DIR", "PORT", "RUST_LOG", "USER"]);
+  // Share links go on to the portal, on Front Door's host name, never the public domain.
+  assert.equal(home.PGHACKER_PORTAL_URL, "https://pghacker-abc.z01.azurefd.net");
+  assert.deepEqual(Object.keys(home).sort(), ["HOME", "LOGNAME", "PATH", "PGHACKER_HOME_DIR", "PGHACKER_PORTAL_URL", "PORT", "RUST_LOG", "USER"]);
   assert.equal(new Set(Object.values(PORTS)).size, Object.keys(PORTS).length);
 });
 

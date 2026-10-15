@@ -367,13 +367,16 @@ export function processEnvironments(config) {
       OAUTH2_PROXY_CLIENT_SECRET: config.github.clientSecret,
       OAUTH2_PROXY_COOKIE_SECRET: config.github.cookieSecret,
     };
-    // The home page's server: the built page and its port, nothing else. It
-    // has a user of its own: a process can read the environment of another
-    // of the same user, and oauth2-proxy's holds its secrets.
+    // The home page's server: the built page, its port and the portal's
+    // origin, Front Door's host name, which its share links go on to;
+    // nothing else. It has a user of its own: a process can read the
+    // environment of another of the same user, and oauth2-proxy's holds its
+    // secrets.
     environments.home = {
       ...base(config, files.home.home, USERS.home),
       PORT: String(PORTS.home),
       PGHACKER_HOME_DIR: path.join(config.root, "home", "dist"),
+      PGHACKER_PORTAL_URL: config.public.portalUrl,
     };
   }
   return environments;

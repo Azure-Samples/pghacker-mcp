@@ -119,6 +119,23 @@ test("the portal's share links go on to the portal, with their query", async (t)
   assert.equal((await fetch(`${base}/?utm_source=mail`)).status, 200);
 });
 
+test("given the portal's origin, as in Azure, share links go on to the portal there, from any host", async (t) => {
+  // A custom domain serves only the home page and /mcp: Front Door's host name serves the portal.
+  const portal = "https://pghacker-example.z01.azurefd.net";
+  const port = await listen(t, http.createServer(createHomeHandler({ root: distFixture(t), portal })));
+  for (const query of ["?session=abc&view=canvas&slot=2", "?canvasShare=token-1"]) {
+    const link = await fetch(`http://127.0.0.1:${port}/${query}`, { redirect: "manual", headers: { host: "mcp.example.org" } });
+    assert.equal(link.status, 302, query);
+    assert.equal(link.headers.get("location"), `${portal}/portal/${query}`);
+  }
+  // The page's own redirect stays on the request's host.
+  const index = await fetch(`http://127.0.0.1:${port}/index.html`, { redirect: "manual" });
+  assert.equal(index.headers.get("location"), "/");
+  for (const bad of [`${portal}/`, `${portal}/portal/`, "pghacker-example.z01.azurefd.net", "file:///tmp"]) {
+    assert.throws(() => createHomeHandler({ portal: bad }), /must be given as an origin/, bad);
+  }
+});
+
 test("anything else is a 404; other methods a 405; the health check answers", async (t) => {
   const { base, port } = await siteFixture(t);
   const missing = await fetch(`${base}/no-such-page`);

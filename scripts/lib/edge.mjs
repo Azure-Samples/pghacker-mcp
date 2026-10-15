@@ -4,10 +4,12 @@
 // browsers must check again on each visit since its asset names change with
 // every build, the fingerprinted /static/* files for a year, and a few
 // files of its own. It also sends the portal's share links, which PilotSwarm
-// builds as /?session=... and /?canvasShare=..., on to the portal. In Azure
-// it serves alone behind oauth2-proxy (scripts/home.mjs); locally, the edge
-// puts it and the services on one origin with the routes of
-// scripts/lib/routes.mjs, as oauth2-proxy does in Azure, without sign-in.
+// builds as /?session=... and /?canvasShare=..., on to the portal: in Azure,
+// on the portal's own host, Front Door's, since a custom domain doesn't
+// serve it (deploy/terraform/frontdoor.tf). In Azure it serves alone behind
+// oauth2-proxy (scripts/home.mjs); locally, the edge puts it and the
+// services on one origin with the routes of scripts/lib/routes.mjs, as
+// oauth2-proxy does in Azure, without sign-in.
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -77,8 +79,16 @@ function parseUrl(url) {
   }
 }
 
-/** A request handler for the home page in `root`, a directory Vite built. */
-export function createHomeHandler({ root = HOME_DIR } = {}) {
+/**
+ * A request handler for the home page in `root`, a directory Vite built.
+ * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
+ * the portal's share links go on to; without it, they stay on the request's
+ * own origin, as on the local edge.
+ */
+export function createHomeHandler({ root = HOME_DIR, portal = "" } = {}) {
+  if (portal && URL.parse(portal)?.origin !== portal) {
+    throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
+  }
   async function file(request, response, name, cacheControl) {
     const full = path.join(root, name);
     // Names are checked before they get here; this is a second guard.
@@ -113,7 +123,7 @@ export function createHomeHandler({ root = HOME_DIR } = {}) {
       if (pathname === "/healthz") {
         send(request, response, 200, { "content-type": TYPES[".txt"], "cache-control": CACHE.none }, "ok\n");
       } else if (pathname === "/" && PORTAL_LINK_PARAMS.some((name) => url.searchParams.has(name))) {
-        send(request, response, 302, { location: `${PORTAL_PATH}${url.search}`, "cache-control": CACHE.none });
+        send(request, response, 302, { location: `${portal}${PORTAL_PATH}${url.search}`, "cache-control": CACHE.none });
       } else if (pathname === "/") {
         await file(request, response, "index.html", CACHE.page);
       } else if (pathname === "/index.html") {

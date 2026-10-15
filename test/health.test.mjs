@@ -181,14 +181,17 @@ function deploymentFetch({ origin = PUBLIC, portal = PORTAL, overrides = {} } = 
       location: `https://github.com/login/oauth/authorize?client_id=example&redirect_uri=${encodeURIComponent(`${portal}/oauth2/callback`)}&state=x`,
     },
   });
+  // The home page sends share links on to the portal's host, from either.
+  const shareLink = (route) => () => new Response(null, { status: 302, headers: { location: `${portal}/portal/${route.slice(1)}` } });
   const site = {
     "/": () => html(HOME_PAGE, { "cache-control": "no-cache", "content-security-policy": "default-src 'self'" }),
     "/static/index-abc.js": () => new Response("export {};", { headers: IMMUTABLE }),
     "/static/theme-boot-def.js": () => new Response("(() => {})();", { headers: IMMUTABLE }),
+    "/?session=check-public": shareLink("/?session=check-public"),
+    "/?canvasShare=check-public": shareLink("/?canvasShare=check-public"),
   };
   const portalRoutes = {
     ...site,
-    "/?session=check-public": () => new Response(null, { status: 302, headers: { location: "/portal/?session=check-public" } }),
     "/portal/": signIn,
     "/portal": signIn,
     "/assets/check-public.js": signIn,
@@ -215,10 +218,11 @@ function deploymentFetch({ origin = PUBLIC, portal = PORTAL, overrides = {} } = 
 const PUBLIC_CHECKS = [
   "the home page, without sign-in",
   "its scripts from /static/, kept a year",
+  "/?session=check-public goes on to the portal's host",
+  "/?canvasShare=check-public goes on to the portal's host",
   "pghacker-mcp lists its tools anonymously at /mcp",
 ];
 const PORTAL_CHECKS = [
-  "a portal share link goes on to /portal/",
   "/portal/ asks for GitHub sign-in",
   "/portal asks for GitHub sign-in",
   "/assets/check-public.js asks for GitHub sign-in",
@@ -269,6 +273,8 @@ test("each failure of a deployment's routes is reported, not thrown", async () =
       overrides: {
         [`${PUBLIC}/`]: portalPage,
         [`${PUBLIC}/static/theme-boot-def.js`]: () => new Response("Not found", { status: 404 }),
+        // A share link sent on to /portal/ on the public domain, which doesn't serve it.
+        [`${PUBLIC}/?session=check-public`]: () => new Response(null, { status: 302, headers: { location: "/portal/?session=check-public" } }),
         [`${PUBLIC}/portal/`]: signInAt(PUBLIC),
         [`${PORTAL}/portal/`]: bypass(signInAt(PUBLIC)),
         [`${PORTAL}/api/v1/health`]: bypass(() => new Response('{"error":"Unauthorized"}', { status: 401 })),
@@ -280,6 +286,7 @@ test("each failure of a deployment's routes is reported, not thrown", async () =
   assert.deepEqual(failed.map((check) => check.name), [
     "the home page, without sign-in",
     "its scripts from /static/, kept a year",
+    "/?session=check-public goes on to the portal's host",
     "pghacker-mcp lists its tools anonymously at /mcp",
     "the public domain answers 404 for /portal/",
     "pghacker-mcp answers at the portal's host's /mcp too",
@@ -289,6 +296,8 @@ test("each failure of a deployment's routes is reported, not thrown", async () =
     "/portal/ asks for GitHub sign-in, claiming X-Forwarded-Uri: /",
     "the portal's API answers 401, claiming X-Forwarded-Uri: /",
   ]);
-  assert.match(failed[2].detail, /HTTP 429/);
-  assert.equal(failed[5].detail, `${PUBLIC}/oauth2/callback`);
+  const detail = (name) => failed.find((check) => check.name === name).detail;
+  assert.equal(detail("/?session=check-public goes on to the portal's host"), "HTTP 302 /portal/?session=check-public");
+  assert.match(detail("pghacker-mcp lists its tools anonymously at /mcp"), /HTTP 429/);
+  assert.equal(detail("sign-in comes back to the portal's host"), `${PUBLIC}/oauth2/callback`);
 });
