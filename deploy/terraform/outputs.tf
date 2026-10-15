@@ -3,8 +3,13 @@
 # --- Public endpoints -------------------------------------------------------------
 
 output "public_url" {
-  description = "The public URL, on Front Door's host name: PGHACKER_PUBLIC_URL, the GitHub OAuth App's homepage URL and the portal's address."
+  description = "The public URL, on Front Door's host name: PGHACKER_PUBLIC_URL, the public home page and the GitHub OAuth App's homepage URL."
   value       = local.public_url
+}
+
+output "portal_url" {
+  description = "The PilotSwarm portal, behind GitHub sign-in."
+  value       = "${local.public_url}/portal/"
 }
 
 output "mcp_url" {

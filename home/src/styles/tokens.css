@@ -1,0 +1,99 @@
+/*
+ * The design tokens, as plain CSS variables: the surfaces, text, borders,
+ * indigo accent, statuses, radii and shadows. The page follows the system's
+ * light or dark preference.
+ */
+:root {
+  color-scheme: light;
+
+  --font-sans: "Inter Variable", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --background: #f4f5f9;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --secondary: #f1f3f8;
+  --muted: #f1f3f8;
+  --accent: #f1f3f8;
+
+  --foreground: #0f172a;
+  --fg-2: #334155;
+  --muted-foreground: #64748b;
+
+  --border: #e3e6ee;
+  --input: #d3d8e3;
+
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-foreground: #ffffff;
+  --primary-text: #4338ca;
+  --primary-soft: rgba(79, 70, 229, 0.09);
+  --ring: #4f46e5;
+  --brand: #4f46e5;
+
+  --success: #16a34a;
+  --success-text: #15803d;
+  --success-soft: #dcfce7;
+  --warning: #d97706;
+  --warning-text: #b45309;
+  --warning-soft: #fef3c7;
+
+  --chart-2: #0d9488;
+  --chart-3: #d97706;
+  --chart-4: #0284c7;
+
+  --sidebar: #f9fafc;
+  --sidebar-accent: #eceff5;
+  --topbar: rgba(255, 255, 255, 0.8);
+
+  --radius: 12px;
+  --surface-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 20px rgba(15, 23, 42, 0.05);
+  --float-shadow: 0 2px 6px rgba(15, 23, 42, 0.07), 0 18px 44px rgba(15, 23, 42, 0.13);
+
+  --topbar-height: 3.5rem;
+  --terminal: #0f172a;
+  --terminal-foreground: #e2e8f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --background: #0a0d15;
+    --card: #11151f;
+    --card-foreground: #e8ebf2;
+    --secondary: #171c29;
+    --muted: #171c29;
+    --accent: #171c29;
+
+    --foreground: #e8ebf2;
+    --fg-2: #c3c9d6;
+    --muted-foreground: #8b93a7;
+
+    --border: #242b3b;
+    --input: #323a4e;
+
+    --primary: #6366f1;
+    --primary-hover: #818cf8;
+    --primary-text: #a5b4fc;
+    --primary-soft: rgba(129, 140, 248, 0.13);
+    --ring: #a5b4fc;
+    --brand: #818cf8;
+
+    --success: #22c55e;
+    --success-text: #4ade80;
+    --success-soft: rgba(34, 197, 94, 0.14);
+    --warning: #f59e0b;
+    --warning-text: #fbbf24;
+    --warning-soft: rgba(245, 158, 11, 0.14);
+
+    --sidebar: #0d1019;
+    --sidebar-accent: #1b2130;
+    --topbar: rgba(10, 13, 21, 0.8);
+
+    --surface-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 20px rgba(0, 0, 0, 0.25);
+    --float-shadow: 0 2px 6px rgba(0, 0, 0, 0.45), 0 18px 44px rgba(0, 0, 0, 0.5);
+    --terminal: #05070c;
+  }
+}

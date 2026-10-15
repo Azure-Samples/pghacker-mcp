@@ -1,0 +1,3 @@
+# oauth2-proxy answers /robots.txt in Azure, the same way.
+User-agent: *
+Disallow: /

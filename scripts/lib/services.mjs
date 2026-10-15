@@ -42,6 +42,15 @@ export async function buildServices(config) {
   });
 }
 
+/** Builds the home page into home/dist, with the dependencies npm run setup installed. */
+export async function buildHome(config) {
+  const home = path.join(config.root, "home");
+  if (!existsSync(path.join(home, "node_modules"))) {
+    throw new Error("The home page's dependencies are missing. Run npm run setup first.");
+  }
+  await run("npm", ["run", "build", "--silent"], { cwd: home, env: platformEnvironment() });
+}
+
 /** Creates or updates the roles, extensions, schema and graph, then migrates. */
 export async function bootstrapDatabase(config) {
   await run(binaryPath(config, SERVICES.indexer.binary), ["bootstrap"], {

@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT, extractionEnvironment } from "./config.mjs";
 import { PLACEHOLDER_KEY } from "./foundry.mjs";
+import { oauth2ProxyRouteArgs } from "./routes.mjs";
 
 export const DATA_DIR = "/var/lib/pghacker";
 
@@ -20,6 +21,7 @@ export const PORTS = {
   indexer: 3101,
   mcp: 3102,
   mcpInternal: 3103,
+  home: 3104,
   foundry: 3110,
 };
 
@@ -31,6 +33,7 @@ export const USERS = {
   agent: "pgh-agent",
   services: "pgh-svc",
   proxy: "pgh-proxy",
+  home: "pgh-home",
 };
 
 /** The embedding model's dimensions, the schema's. */
@@ -238,6 +241,7 @@ export function layout(config) {
       git: path.join(data, "svc", "git"),
     },
     proxy: { home: path.join(data, "proxy", "home") },
+    home: { home: path.join(data, "home-page", "home") },
   };
 }
 
@@ -353,28 +357,45 @@ export function processEnvironments(config) {
       OAUTH2_PROXY_CLIENT_SECRET: config.github.clientSecret,
       OAUTH2_PROXY_COOKIE_SECRET: config.github.cookieSecret,
     };
+    // The home page's server: the built page and its port, nothing else. It
+    // has a user of its own: a process can read the environment of another
+    // of the same user, and oauth2-proxy's holds its secrets.
+    environments.home = {
+      ...base(config, files.home.home, USERS.home),
+      PORT: String(PORTS.home),
+      PGHACKER_HOME_DIR: path.join(config.root, "home", "dist"),
+    };
   }
   return environments;
 }
 
 /**
  * oauth2-proxy's arguments: GitHub sign-in for the portal, restricted to
- * the team (or the listed users); /mcp passes through without it. Secrets
- * come from its environment, never its arguments, which any user can read.
+ * the team (or the listed users); /mcp and the home page pass through
+ * without it. Secrets come from its environment, never its arguments, which
+ * any user can read. `listen` and `origins` (each target's http origin, as
+ * scripts/lib/routes.mjs names them) replace the container's addresses, for
+ * a test.
  */
-export function oauth2ProxyArgs(config) {
+export function oauth2ProxyArgs(config, {
+  listen = `0.0.0.0:${PORTS.ingress}`,
+  origins = {
+    mcp: `http://127.0.0.1:${PORTS.mcp}`,
+    portal: `http://127.0.0.1:${PORTS.portal}`,
+    home: `http://127.0.0.1:${PORTS.home}`,
+  },
+} = {}) {
   const { github } = config;
   return [
-    `--http-address=0.0.0.0:${PORTS.ingress}`,
+    `--http-address=${listen}`,
     "--provider=github",
     ...(github.org ? [`--github-org=${github.org}`] : []),
     ...(github.team ? [`--github-team=${github.team}`] : []),
     ...(github.users.length ? [`--github-user=${github.users.join(",")}`] : []),
     "--email-domain=*",
-    `--upstream=http://127.0.0.1:${PORTS.mcp}/mcp`,
-    `--upstream=http://127.0.0.1:${PORTS.portal}/`,
-    "--skip-auth-route=^/mcp$",
-    "--api-route=^/api/",
+    // /mcp and the home page's files without sign-in; the portal, at /portal
+    // with its /api and /assets, after it (scripts/lib/routes.mjs).
+    ...oauth2ProxyRouteArgs(origins),
     `--redirect-url=${config.public.url}/oauth2/callback`,
     `--whitelist-domain=${new URL(config.public.url).hostname}`,
     "--reverse-proxy=true",

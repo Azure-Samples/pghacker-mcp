@@ -113,11 +113,12 @@ run "front_door_passes_everything_through" {
   assert {
     condition = (
       output.public_url == "https://pghacker-example.mock.azurefd.net"
+      && output.portal_url == "https://pghacker-example.mock.azurefd.net/portal/"
       && output.mcp_url == "https://pghacker-example.mock.azurefd.net/mcp"
       && output.oauth_callback_url == "https://pghacker-example.mock.azurefd.net/oauth2/callback"
       && output.front_door_host_name == "pghacker-example.mock.azurefd.net"
       && output.front_door_id == azurerm_cdn_frontdoor_profile.this.resource_guid
     )
-    error_message = "The outputs must give the public, MCP and OAuth callback URLs on Front Door's host name, and the profile's ID."
+    error_message = "The outputs must give the home page, portal, MCP and OAuth callback URLs on Front Door's host name, and the profile's ID."
   }
 }

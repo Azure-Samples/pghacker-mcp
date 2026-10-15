@@ -102,8 +102,12 @@ export function parseLocalConfig(text, root = APP_ROOT) {
   if (postgresPort === portalPort) throw new Error("PostgreSQL and the portal need different ports.");
   const indexerPort = values.PGHACKER_INDEXER_PORT ? portNumber(values, "PGHACKER_INDEXER_PORT") : 3101;
   const mcpPort = values.PGHACKER_MCP_PORT ? portNumber(values, "PGHACKER_MCP_PORT") : 3102;
-  if (new Set([postgresPort, portalPort, indexerPort, mcpPort]).size !== 4) {
-    throw new Error("PostgreSQL, the portal, pghacker-indexer and pghacker-mcp need different ports.");
+  // PORTAL_PORT is the site's: the home page, the portal and /mcp, through
+  // the edge (scripts/lib/edge.mjs). PilotSwarm's own listener is behind it.
+  const portalInternalPort = values.PGHACKER_PORTAL_INTERNAL_PORT
+    ? portNumber(values, "PGHACKER_PORTAL_INTERNAL_PORT") : 3002;
+  if (new Set([postgresPort, portalPort, portalInternalPort, indexerPort, mcpPort]).size !== 5) {
+    throw new Error("PostgreSQL, the site, PilotSwarm's portal, pghacker-indexer and pghacker-mcp need different ports.");
   }
   for (const name of ["PGH_INDEXER_PASSWORD", "PGH_READER_PASSWORD"]) {
     const value = required(values, name);
@@ -148,6 +152,7 @@ export function parseLocalConfig(text, root = APP_ROOT) {
     databaseUrl,
     postgresPort,
     portalPort,
+    portalInternalPort,
     indexerPort,
     mcpPort,
     values,
@@ -176,7 +181,7 @@ export function portalEnvironment(config, inherited = process.env) {
     ...platformEnvironment(inherited),
     ...LOCAL_SETTINGS,
     DATABASE_URL: config.databaseUrl,
-    PORT: String(config.portalPort),
+    PORT: String(config.portalInternalPort),
     PLUGIN_DIRS: path.join(config.root, "plugin"),
     SESSION_STATE_DIR: path.join(config.runtimeDir, "sessions"),
     ARTIFACT_DIR: path.join(config.runtimeDir, "artifacts"),

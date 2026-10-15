@@ -1,6 +1,6 @@
 # pghacker-mcp's Terraform
 
-[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, and Azure Front Door Standard as the public entry: `/mcp` is the anonymous MCP endpoint, everything else is the portal behind GitHub sign-in.
+[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the home page, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, and Azure Front Door Standard as the public entry: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in.
 
 | Path | Contents |
 |---|---|
@@ -121,7 +121,7 @@ None is secret. `terraform output -raw <name>` prints one.
 
 | Output | Meaning |
 |---|---|
-| `public_url`, `mcp_url`, `oauth_callback_url` | Front Door URLs: the portal, the MCP endpoint, the GitHub OAuth App's callback |
+| `public_url`, `portal_url`, `mcp_url`, `oauth_callback_url` | Front Door URLs: the home page, the portal, the MCP endpoint, the GitHub OAuth App's callback |
 | `front_door_host_name`, `front_door_id` | Front Door's host name and profile ID (`X-Azure-FDID`) |
 | `app_fqdn` | The app's own host name, Front Door's origin |
 | `subscription_id`, `resource_group_name` | Where everything is |

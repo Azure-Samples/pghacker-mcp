@@ -1,7 +1,8 @@
 # The public entry: an Azure Front Door Standard endpoint in front of the app,
 # which keeps the host name, <name>-<hash>.<zone>.azurefd.net, when the
-# Container Apps environment is replaced. Everything passes through as is:
-# /mcp to the anonymous MCP endpoint, the rest to the GitHub-gated portal.
+# Container Apps environment is replaced. Everything passes through as is,
+# and oauth2-proxy routes it: /mcp to the anonymous MCP endpoint, / to the
+# public home page, /portal to the GitHub-gated portal.
 
 locals {
   # The endpoint's ID from known values: azurerm checks the route's reference

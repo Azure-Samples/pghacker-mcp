@@ -9,7 +9,8 @@ flowchart LR
   subgraph VNet
     subgraph CA[Container App: one replica]
       P[oauth2-proxy :8080] -->|/mcp, anonymous| M[pghacker-mcp]
-      P -->|/ after GitHub sign-in| S[PilotSwarm portal and worker]
+      P -->|/, anonymous| H[home page]
+      P -->|/portal after GitHub sign-in| S[PilotSwarm portal and worker]
       S --> I[pghacker-indexer]
       S -->|agents, no rate limit| M2[pghacker-mcp internal]
       C[crawl scheduler] --> S
@@ -22,7 +23,9 @@ flowchart LR
 ```
 
 - **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client (`X-Azure-ClientIP`, IPv6 by /64), and serves only requests that came through this Front Door profile (`X-Azure-FDID`).
-- **`https://<front door>/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
+- **`https://<front door>/`** is the public home page (`home/`): what pghacker-mcp is, the MCP URL (its own origin's `/mcp`) and how to add it to an agent, and example prompts with their answers. Its files are public; any other path needs sign-in. oauth2-proxy answers `/robots.txt` itself (`Disallow: /`).
+- **`https://<front door>/portal/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
+  - PilotSwarm 0.8.2 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`) reach the home page, which sends them on to `/portal/`. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
@@ -42,12 +45,13 @@ flowchart LR
 | Process | User | Gets |
 | --- | --- | --- |
 | oauth2-proxy | `pgh-proxy` | The GitHub OAuth App's ID and secret, and the cookie secret |
+| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page and its port, no secret |
 | pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy |
 | PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus; models through the Foundry proxy |
 
 Only the bootstrap, which runs once before the services start, gets the administrator's password. No process gets the managed identity's endpoint: the proxy, in the supervisor, uses it, and forwards only to the Foundry account. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
 - `/healthz` fails after 15 minutes of failed bootstraps, or when a service keeps exiting.
-- `/readyz` passes when bootstrap is done and oauth2-proxy, pghacker-mcp and the portal answer.
+- `/readyz` passes when bootstrap is done and oauth2-proxy, pghacker-mcp and the portal answer. It reports the home page too, but doesn't wait for it, so that `/mcp` stays up if the page fails.
 
 ## First deployment
 
@@ -130,7 +134,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 7. **The GitHub OAuth App.**
    - Register it under your GitHub organization's **Settings > Developer settings > OAuth Apps** (or under your account), with:
      - homepage `terraform output -raw public_url`
-     - callback `terraform output -raw oauth_callback_url`
+     - callback `terraform output -raw oauth_callback_url` (oauth2-proxy's `/oauth2/callback`, which moving the portal to `/portal/` didn't change)
    - Some organizations restrict OAuth Apps. Until an org owner approves this one, GitHub hides org and team membership from it, and every sign-in fails with a 500 (the logs say `user is missing required organization`).
      - To ask for approval, open `https://github.com/settings/connections/applications/<client ID>` and click **Request** next to your organization.
      - Until then, `github_users` (a list of logins) lets those users in. It doesn't follow the team: once the app is approved, keep only the logins that aren't on the team.
@@ -153,7 +157,13 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '[.result.tools[].name]'
    ```
 
-   Then open `public_url`. GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
+   From the repository root, check the routes from outside, read-only: the home page and its files without sign-in, the portal and its API behind it, and `/mcp`:
+
+   ```sh
+   npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)"
+   ```
+
+   Then open `public_url`, the home page, without signing in, and `portal_url`: GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
 
 10. **The code.** Unless the corpus brought a commit history, build one ([Commit history](#commit-history)): the code tools have no other source.
 
@@ -344,7 +354,7 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 
 ## Operations
 
-- **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[oauth2-proxy]`.
+- **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[home]`, `[oauth2-proxy]`.
 - **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.

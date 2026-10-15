@@ -16,6 +16,7 @@
 node_modules
 **/node_modules
 dist-tarballs
+home/dist
 target
 **/target
 docs

@@ -10,8 +10,9 @@
 //             restarts the container
 //   /readyz   bootstrap is done and the services that serve requests
 //             answer: oauth2-proxy, pghacker-mcp and the portal. The body
-//             also reports the indexer and the crawl scheduler, whose
-//             outages don't stop the endpoint (a crash loop fails /healthz).
+//             also reports the home page, the indexer and the crawl
+//             scheduler, whose outages don't stop the endpoint (a crash loop
+//             fails /healthz).
 import { spawn } from "node:child_process";
 import { chmodSync, chownSync, mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
@@ -37,6 +38,7 @@ const users = {
   agent: lookupUser(USERS.agent),
   services: lookupUser(USERS.services),
   proxy: lookupUser(USERS.proxy),
+  home: lookupUser(USERS.home),
 };
 
 /** Each user's private directories, and the catalog everyone reads. */
@@ -45,6 +47,7 @@ function prepareFiles() {
     [users.agent, Object.values(files.agent)],
     [users.services, Object.values(files.services)],
     [users.proxy, Object.values(files.proxy)],
+    [users.home, Object.values(files.home)],
   ];
   for (const [user, directories] of owned) {
     for (const directory of directories) {
@@ -151,6 +154,14 @@ const services = [
       env: environments.crawl,
     })]
     : []),
+  // The public home page, which oauth2-proxy sends / and its files to.
+  new Service("home", {
+    user: users.home,
+    command: process.execPath,
+    args: [path.join(config.root, "scripts", "home.mjs")],
+    env: environments.home,
+    health: `http://127.0.0.1:${PORTS.home}/healthz`,
+  }),
   new Service("oauth2-proxy", {
     user: users.proxy,
     command: "/usr/local/bin/oauth2-proxy",
@@ -276,6 +287,7 @@ foundryToken().then(
 );
 log(`Health checks on :${PORTS.health}; bootstrapping ${config.db.name} on ${config.db.host}.`);
 if (await bootstrap()) {
+  byName.home.start();
   byName.indexer.start();
   byName.mcp.start();
   await Promise.all([waitHealthy(byName.indexer, 120_000), waitHealthy(byName.mcp, 120_000)]);

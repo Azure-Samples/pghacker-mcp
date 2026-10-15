@@ -14,13 +14,14 @@ You need Node.js 24 or later, Rust (the toolchain in `rust-toolchain.toml`), and
 
 ```bash
 npm run setup   # download PilotSwarm, install dependencies, build, and create .env
-npm start       # start PostgreSQL, both services, and PilotSwarm's worker and portal
+npm start       # start PostgreSQL, both services, PilotSwarm's worker and portal, and the home page
 ```
 
 | What | Address |
 | --- | --- |
-| The portal, to chat with the agents | http://127.0.0.1:3001 |
-| pghacker-mcp, for your MCP client | http://127.0.0.1:3102/mcp |
+| The home page: the MCP URL, how to add it to an agent, and examples | http://127.0.0.1:3001 |
+| The portal, to chat with the agents | http://127.0.0.1:3001/portal/ |
+| pghacker-mcp, for your MCP client | http://127.0.0.1:3102/mcp, or http://127.0.0.1:3001/mcp |
 | pghacker-indexer, for the crawler agents | http://127.0.0.1:3101/mcp |
 | PostgreSQL 17 | 127.0.0.1:55433 |
 
@@ -72,7 +73,7 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 
 ## Deploy to Azure
 
-[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, `/mcp` is public, the portal requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
+[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/`, requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
 
 ## Learn more
 

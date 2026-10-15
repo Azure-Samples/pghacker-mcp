@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import {
   PORTS, USERS, databaseUrl, databaseUrls, embedEnvironment, foundryCatalog, layout, lookupUser, oauth2ProxyArgs,
@@ -56,7 +57,7 @@ const ALLOWED = {
 
 test("each process sees only its own secrets, and none the managed identity", () => {
   const environments = processEnvironments(readAzureConfig(ENV));
-  assert.deepEqual(Object.keys(environments).sort(), ["bootstrap", "crawl", "indexer", "mcp", "proxy", "swarm"]);
+  assert.deepEqual(Object.keys(environments).sort(), ["bootstrap", "crawl", "home", "indexer", "mcp", "proxy", "swarm"]);
   for (const [secret, allowed] of Object.entries(ALLOWED)) {
     const raw = ENV[secret];
     for (const [name, env] of Object.entries(environments)) {
@@ -149,17 +150,36 @@ test("the extraction order's settings reach the indexer only, and are checked", 
   }
 });
 
-test("oauth2-proxy signs in the team for the portal, passes /mcp through, and gets no secret in its arguments", () => {
+test("the home page's server runs as its own user with the page and its port only", () => {
+  const config = readAzureConfig(ENV);
+  const { home } = processEnvironments(config);
+  // Not oauth2-proxy's user, which could read that process's secrets.
+  assert.equal(home.USER, USERS.home);
+  assert.equal(new Set(Object.values(USERS)).size, Object.keys(USERS).length);
+  assert.equal(home.HOME, layout(config).home.home);
+  assert.equal(home.PORT, String(PORTS.home));
+  assert.equal(home.PGHACKER_HOME_DIR, path.join(config.root, "home", "dist"));
+  assert.deepEqual(Object.keys(home).sort(), ["HOME", "LOGNAME", "PATH", "PGHACKER_HOME_DIR", "PORT", "RUST_LOG", "USER"]);
+  assert.equal(new Set(Object.values(PORTS)).size, Object.keys(PORTS).length);
+});
+
+test("oauth2-proxy signs in the team for the portal, passes /mcp and the home page through, and gets no secret in its arguments", () => {
   const args = oauth2ProxyArgs(readAzureConfig(ENV));
   for (const expected of [
     "--http-address=0.0.0.0:8080", "--provider=github", "--github-org=example-org",
-    "--github-team=example-team", "--skip-auth-route=^/mcp$",
-    `--upstream=http://127.0.0.1:${PORTS.mcp}/mcp`, `--upstream=http://127.0.0.1:${PORTS.portal}/`,
+    "--github-team=example-team", "--skip-auth-route=^/mcp$", "--skip-auth-route=GET=^/$",
+    "--skip-auth-route=GET=^/static/", "--api-route=^/api/",
+    `--upstream=http://127.0.0.1:${PORTS.mcp}/mcp`, `--upstream=http://127.0.0.1:${PORTS.portal}/portal`,
+    `--upstream=http://127.0.0.1:${PORTS.portal}/portal/`, `--upstream=http://127.0.0.1:${PORTS.portal}/api/`,
+    `--upstream=http://127.0.0.1:${PORTS.portal}/assets/`, `--upstream=http://127.0.0.1:${PORTS.home}/`,
     "--redirect-url=https://pghacker-abc.z01.azurefd.net/oauth2/callback", "--cookie-secure=true",
     "--pass-user-headers=true",
   ]) {
     assert.ok(args.includes(expected), expected);
   }
+  // The portal no longer takes every path: the home page does.
+  assert.ok(!args.includes(`--upstream=http://127.0.0.1:${PORTS.portal}/`));
+  assert.equal(args.filter((arg) => arg.startsWith("--upstream=")).length, 6);
   assert.ok(!args.some((arg) => arg.startsWith("--github-user")));
   const text = args.join(" ");
   for (const secret of Object.values(SECRETS)) assert.ok(!text.includes(secret));
@@ -212,4 +232,5 @@ test("users come from /etc/passwd and each has its own directories", () => {
   const files = layout(readAzureConfig(ENV));
   assert.ok(files.agent.sessions.startsWith("/var/lib/pghacker/agent/"));
   assert.ok(files.services.git.startsWith("/var/lib/pghacker/svc/"));
+  assert.ok(files.home.home.startsWith("/var/lib/pghacker/home-page/"));
 });

@@ -157,6 +157,15 @@ test("the roles need real passwords and every listener its own port", () => {
   const config = parseLocalConfig(text);
   assert.equal(config.indexerPort, 3101);
   assert.equal(config.mcpPort, 3102);
+  // PORTAL_PORT is the site's; PilotSwarm's own listener is behind it.
+  assert.equal(config.portalPort, 3001);
+  assert.equal(config.portalInternalPort, 3002);
+  assert.equal(portalEnvironment(config).PORT, "3002");
+  assert.equal(parseLocalConfig(`${text}PGHACKER_PORTAL_INTERNAL_PORT=3999\n`).portalInternalPort, 3999);
+  for (const port of ["3001", "3101", "3102", "55433"]) {
+    assert.throws(() => parseLocalConfig(`${text}PGHACKER_PORTAL_INTERNAL_PORT=${port}\n`), /different ports/, port);
+  }
+  assert.throws(() => parseLocalConfig(`${text}PGHACKER_PORTAL_INTERNAL_PORT=0\n`), /integer between/);
 });
 
 test("setup adds role passwords to an .env from before them, once", () => {

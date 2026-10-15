@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # pghacker-mcp for Azure Container Apps (deploy/README.md): the Rust
-# services, PilotSwarm 0.8.2 with the app's agents, oauth2-proxy, and the
-# supervisor that runs each as its own user (scripts/container.mjs).
+# services, PilotSwarm 0.8.2 with the app's agents, the home page,
+# oauth2-proxy, and the supervisor that runs each as its own user
+# (scripts/container.mjs).
 #   docker build -t pghacker-mcp .                                    (local check)
 #   az acr run --registry <acr> --file deploy/acr-build.yaml --set TAG=<tag> .
 # ACR Tasks' classic `az acr build` can't use the cache mounts: use the task.
@@ -35,6 +36,15 @@ RUN node --input-type=module -e "import { restoreRelease } from './scripts/lib/r
     && node --input-type=module -e "import { patchPortalSpa } from './scripts/lib/portal-spa.mjs'; patchPortalSpa('/app/node_modules/pilotswarm');" \
     && npm cache clean --force
 
+# The public home page (home/): its React, Vite and TypeScript stay in this
+# stage, and only the built page reaches the image.
+FROM ${NODE_IMAGE} AS home
+WORKDIR /build
+COPY home/package.json home/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY home/ ./
+RUN npm run build
+
 # oauth2-proxy, checked against its release's checksums.
 FROM ${NODE_IMAGE} AS oauth2-proxy
 ARG TARGETARCH
@@ -60,9 +70,10 @@ FROM ${NODE_IMAGE}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini git ca-certificates postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
-# The services' users: agents and PilotSwarm, the Rust services, the proxy.
+# The services' users: agents and PilotSwarm, the Rust services, the proxy,
+# the home page.
 RUN set -eu; \
-    for spec in pgh-agent:10001 pgh-svc:10002 pgh-proxy:10003; do \
+    for spec in pgh-agent:10001 pgh-svc:10002 pgh-proxy:10003 pgh-home:10004; do \
       name="${spec%%:*}"; id="${spec##*:}"; \
       groupadd --system --gid "${id}" "${name}"; \
       useradd --system --uid "${id}" --gid "${id}" --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "${name}"; \
@@ -73,6 +84,7 @@ COPY package.json package-lock.json ./
 COPY plugin plugin
 COPY config config
 COPY scripts scripts
+COPY --from=home /build/dist home/dist
 COPY --from=rust /out/ /usr/local/bin/
 COPY --from=oauth2-proxy /out/oauth2-proxy /usr/local/bin/oauth2-proxy
 ENV NODE_ENV=production

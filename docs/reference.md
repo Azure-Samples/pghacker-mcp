@@ -10,7 +10,8 @@ Settings, tools and internals, for looking things up. The [README](../README.md)
 | --- | --- |
 | `POSTGRES_USER`, `POSTGRES_DB`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `DATABASE_URL` | The local database (port 55433) and its administrator's URL |
 | `PGH_INDEXER_PASSWORD`, `PGH_READER_PASSWORD` | The passwords of `pgh_indexer`, which writes schema `pghacker` and the graph, and `pgh_reader`, which pghacker-mcp reads them as |
-| `PORTAL_PORT`, `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Ports: 3001, 3101 and 3102. The other `PORTAL_*` settings and `WORKERS` keep their local values |
+| `PORTAL_PORT`, `PGHACKER_INDEXER_PORT`, `PGHACKER_MCP_PORT` | Ports: 3001 for the site (the home page, the portal and `/mcp`), 3101 and 3102. The other `PORTAL_*` settings and `WORKERS` keep their local values |
+| `PGHACKER_PORTAL_INTERNAL_PORT` | PilotSwarm's portal, behind the site: 3002 |
 | `GITHUB_TOKEN` or `GH_TOKEN`* | GitHub Copilot models for the agents, listed in `config/model_providers.json`; `github-copilot:gpt-6-luna` is the default |
 | `HORIZON_EMBED_URL`, `_MODEL`, `_DIM=1536`, `_API_KEY` (or `_API_KEY_HEADER`, `_BEARER`)* | Embeddings, set as for PilotSwarm, such as an Azure OpenAI `text-embedding-3-small` deployment (see [.env.example](../.env.example)). Without them, hybrid search uses full text only, and semantic search is unavailable |
 | `PILOTSWARM_WORKER_CONCURRENCY`, `PILOTSWARM_ORCHESTRATION_CONCURRENCY` | Session turns and orchestrations run at once: 8 each, 1 to 64 |
@@ -37,15 +38,22 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 
 ## Running locally
 
-`npm run setup` downloads and verifies PilotSwarm's release, installs the dependencies, builds the services and creates `.env`. `npm start` then:
+`npm run setup` downloads and verifies PilotSwarm's release, installs the dependencies, the home page's too, builds the services and the home page, and creates `.env`. `npm start` then:
 
 1. starts PostgreSQL 17, whose image (`db/Dockerfile`) adds AGE 1.7, pgvector 0.8 and pg_textsearch 1.5;
-2. rebuilds the services if needed;
+2. rebuilds the services if needed, and builds the home page;
 3. bootstraps the roles, extensions, schema and graph, and migrates;
 4. starts both services, restarting either if it stops, with logs in `.runtime/logs`;
-5. starts PilotSwarm's worker and portal.
+5. starts PilotSwarm's worker and portal;
+6. serves them on one origin, `PORTAL_PORT` (3001), routed as oauth2-proxy routes them in Azure (`scripts/lib/routes.mjs`): the home page at `/`, the portal at `/portal/` and pghacker-mcp at `/mcp`.
+
+PilotSwarm listens behind the site, on `PGHACKER_PORTAL_INTERNAL_PORT` (3002). Version 0.8.2 has no base path ([microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179)), so its page loads at `/portal/` but its files and API stay at `/assets/` and `/api/`, and its share links (`/?session=...`) are sent on to `/portal/`.
 
 Each process gets only its own credentials: the indexer `pgh_indexer`, pghacker-mcp `pgh_reader` (read-only, with a 10-second statement timeout), and the portal only the two MCP URLs. With the app stopped, `npm run db:reset` recreates schema `pghacker` and the graph, and keeps PilotSwarm's data.
+
+## The home page
+
+The home page (`home/`) is a React, Vite and TypeScript page. It gives the MCP URL on its own origin, how to add it to an agent, and example prompts with the answers the tools gave: keep those in line with the tools when changing them. Its files are under `/static/`, not `/assets/`, which is PilotSwarm's. In Azure, a small server (`scripts/home.mjs`) serves them behind oauth2-proxy, without sign-in. `npm --prefix home run dev` serves the page with hot reload on http://localhost:5173, and passes the rest of the site to a running `npm start`.
 
 ## Tools
 
@@ -133,6 +141,8 @@ Extracting a thread again replaces its participants' positions there, except tho
 
 ## Tests and profiling
 
+`npm test` also runs the site's routes, the edge's and the home page's tests; `npm --prefix home test` runs the home page's alone. `npm run test:routes` sends requests through the real oauth2-proxy, with the container's flags, and checks which paths it lets through without sign-in; it downloads oauth2-proxy's release once, checked against its checksum. With the app running, `npm run smoke` checks the site's routes too.
+
 The Rust tests create temporary databases on the local PostgreSQL, with the settings in `.env`, or the environment's first.
 
 `crates/pghacker-replay` checks code search against ripgrep and GNU grep, in a database of its own:
@@ -166,6 +176,7 @@ cargo run --locked -p pghacker-replay --example profile_full
 | `crates/pghacker-replay` | The search replays and the history's parity check |
 | `migrations/`, `db/` | The schema, and the PostgreSQL image |
 | `plugin/` | Branding, agents and the MCP catalog |
-| `scripts/` | The launcher, crawl and evaluation drivers; the container's supervisor, probe and corpus restore |
+| `home/` | The public home page: React, Vite and TypeScript |
+| `scripts/` | The launcher, the site's routes and its edge, crawl and evaluation drivers; the container's supervisor, the home page's server, probe and corpus restore |
 | `Dockerfile`, `deploy/` | The image, and the Azure deployment |
 | `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18, which adds `bind_text` |

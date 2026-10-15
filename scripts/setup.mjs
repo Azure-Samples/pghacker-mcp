@@ -35,6 +35,12 @@ try {
   console.log(`[setup] Verified PilotSwarm ${PILOTSWARM_VERSION} packages and license.`);
   const command = existsSync(path.join(APP_ROOT, "package-lock.json")) ? "ci" : "install";
   execFileSync("npm", [command, "--no-audit", "--no-fund"], { cwd: APP_ROOT, stdio: "inherit" });
+  // The home page is its own package: its React, Vite and TypeScript stay out
+  // of the app's dependencies, and only its build reaches the image.
+  const home = path.join(APP_ROOT, "home");
+  console.log("[setup] Installing and building the home page (home/).");
+  execFileSync("npm", ["ci", "--no-audit", "--no-fund"], { cwd: home, stdio: "inherit" });
+  execFileSync("npm", ["run", "build", "--silent"], { cwd: home, stdio: "inherit" });
   try {
     execFileSync("cargo", ["--version"], { stdio: "ignore" });
   } catch {

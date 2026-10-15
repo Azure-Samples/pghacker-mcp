@@ -6,13 +6,15 @@ import { readLocalConfig, portalEnvironment, LOCAL_HOST } from "./lib/config.mjs
 import {
   assertPortAvailable, preparePortalRecord, writePortalRecord, clearPortalRecord, runDatabase,
 } from "./lib/processes.mjs";
+import { createEdgeServer, createHomeHandler } from "./lib/edge.mjs";
 import { checkPortal } from "./lib/health.mjs";
 import {
-  ServiceSupervisor, bootstrapDatabase, buildServices, checkServices, stopRecordedServices,
+  ServiceSupervisor, bootstrapDatabase, buildHome, buildServices, checkServices, stopRecordedServices,
 } from "./lib/services.mjs";
 import { workerOptions } from "./lib/worker.mjs";
 
 let server;
+let edge;
 let worker;
 let workerStop;
 let services;
@@ -28,13 +30,15 @@ try {
   const config = readLocalConfig();
   preparePortalRecord(config);
   stopRecordedServices(config);
-  for (const port of [config.portalPort, config.indexerPort, config.mcpPort]) {
+  for (const port of [config.portalPort, config.portalInternalPort, config.indexerPort, config.mcpPort]) {
     await assertPortAvailable(port);
   }
   await runDatabase("up", config);
 
   console.log("[pghacker-mcp] Building pghacker-indexer and pghacker-mcp (cargo build --release).");
   await buildServices(config);
+  console.log("[pghacker-mcp] Building the home page (home/dist).");
+  await buildHome(config);
   await bootstrapDatabase(config);
   for (const directory of ["sessions", "artifacts", "exports", "logs", "cache", "git"]) {
     mkdirSync(path.join(config.runtimeDir, directory), { recursive: true });
@@ -86,12 +90,31 @@ try {
   await worker.start();
 
   const { startServer } = await import("pilotswarm/web");
-  server = await startServer({ port: config.portalPort, host: LOCAL_HOST, workers: 0 });
+  server = await startServer({ port: config.portalInternalPort, host: LOCAL_HOST, workers: 0 });
   if (server.address()?.address !== LOCAL_HOST) {
     throw new Error("The portal is not bound exclusively to 127.0.0.1.");
   }
+  // The site, as oauth2-proxy routes it in Azure: the home page at /, the
+  // portal at /portal/ (with its /api and /assets), pghacker-mcp at /mcp.
+  edge = createEdgeServer({
+    home: createHomeHandler(),
+    targets: {
+      portal: { host: LOCAL_HOST, port: config.portalInternalPort },
+      mcp: { host: LOCAL_HOST, port: config.mcpPort },
+    },
+  });
+  await new Promise((resolve, reject) => {
+    edge.once("error", reject);
+    edge.listen(config.portalPort, LOCAL_HOST, () => {
+      edge.off("error", reject);
+      resolve();
+    });
+  });
+  if (edge.address()?.address !== LOCAL_HOST) {
+    throw new Error("The site is not bound exclusively to 127.0.0.1.");
+  }
   const { base } = await checkPortal(config);
-  console.log(`[pghacker-mcp] Ready at ${base}`);
+  console.log(`[pghacker-mcp] Ready: the home page at ${base}/, the portal at ${base}/portal/ and pghacker-mcp at ${base}/mcp.`);
   console.log("[pghacker-mcp] Local-only, no sign-in. Stop with Ctrl+C or npm run stop.");
   if (!env.GITHUB_TOKEN) {
     console.warn("[pghacker-mcp] No bootstrap token supplied. Configure a provider in Admin Console -> Model Providers before running agents.");
@@ -101,6 +124,10 @@ try {
   process.exitCode = 1;
   const deadline = setTimeout(() => process.exit(1), 30_000);
   deadline.unref();
+  if (edge) {
+    edge.close();
+    edge.closeAllConnections();
+  }
   if (server) {
     try {
       await server.stopPortal();
