@@ -33,18 +33,13 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     a banner above when rows are cut. Tables, in schema pghacker: threads, messages, authors, \
     author_names, patches, patch_texts, anchors, message_chunks, features, decisions, positions, \
     citations, feature_threads, feature_files, sources (the mailing lists retrieved), and the \
-    commit history's below. Text keeps the email addresses written in it; the table of senders' \
-    addresses (author_emails) is not readable. Query the AGE graph pghacker_graph with SELECT * \
+    commit history's below. Text keeps the email addresses written in it. \
+    Query the AGE graph pghacker_graph with SELECT * \
     FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
     SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement of at most 64 KiB, run read-only with \
-    a 10-second timeout. Rejects writes (including writable WITH, SELECT INTO and Cypher updates), \
-    row-locking clauses, session/system/role changes and known side-effecting or administrative \
-    functions, including set_config(), advisory locks, backend control, pg_sleep(), nextval() \
-    and dynamic SQL execution. Read settings with SHOW or current_setting(); pass literal Cypher \
-    text. EXPLAIN ANALYZE is allowed only for an accepted read. NULL reads as None, \
-    an empty string as \"\".";
+    a 10-second timeout. NULL reads as None, an empty string as \"\".";
 
 /// The commit history's tables, which pghacker-mcp adds to the description.
 pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_commit_files, \
@@ -104,11 +99,6 @@ mod tests {
             "Text keeps the email addresses written in it",
             "NULL reads as None",
             "sources (the mailing lists retrieved)",
-            "session/system/role changes",
-            "set_config()",
-            "advisory locks",
-            "literal Cypher",
-            "EXPLAIN ANALYZE",
         ] {
             assert!(DESCRIPTION.contains(needed), "{needed}");
         }
@@ -119,5 +109,28 @@ mod tests {
         assert!(HISTORY_NOTE.contains("code_line_instances"));
         assert!(HISTORY_NOTE.contains("code_history (the git repository it comes from"));
         assert!(HISTORY_NOTE.contains("PostgreSQL's code isn't in sources"));
+    }
+
+    #[test]
+    fn the_description_covers_usage_without_exposing_enforcement_details() {
+        for internal in [
+            "Rejects writes",
+            "writable WITH",
+            "SELECT INTO",
+            "row-locking",
+            "session/system/role",
+            "side-effecting",
+            "set_config",
+            "advisory",
+            "backend control",
+            "pg_sleep",
+            "nextval",
+            "dynamic SQL",
+            "literal Cypher",
+            "accepted read",
+            "author_emails",
+        ] {
+            assert!(!DESCRIPTION.contains(internal), "{internal}");
+        }
     }
 }
