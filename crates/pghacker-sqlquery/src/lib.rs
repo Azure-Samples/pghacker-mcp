@@ -39,7 +39,7 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
     SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement of at most 64 KiB, run read-only with \
-    a 10-second timeout. NULL reads as None, an empty string as \"\".";
+    a 10-second timeout. Rejects writes. NULL reads as None, an empty string as \"\".";
 
 /// The commit history's tables, which pghacker-mcp adds to the description.
 pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_commit_files, \
@@ -95,6 +95,7 @@ mod tests {
             "get_ontology",
             "one SELECT",
             "10-second",
+            "Rejects writes.",
             "banner",
             "Text keeps the email addresses written in it",
             "NULL reads as None",
@@ -114,7 +115,6 @@ mod tests {
     #[test]
     fn the_description_covers_usage_without_exposing_enforcement_details() {
         for internal in [
-            "Rejects writes",
             "writable WITH",
             "SELECT INTO",
             "row-locking",
