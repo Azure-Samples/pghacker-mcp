@@ -1700,10 +1700,60 @@ async fn names_stay_counted_through_a_restore_then_a_merge() {
     assert_restored(&client).await;
 }
 
-#[tokio::test]
-async fn migrating_to_text_versions_parses_every_patch_again() {
+/// Runs the jobs, as the leading indexer does, until every patch_series job
+/// is done; their keys and results.
+async fn run_patch_series(
+    indexer: &Indexer,
+    client: &tokio_postgres::Client,
+) -> Vec<(String, Value)> {
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
+    let shutdown = CancellationToken::new();
+    let workers = tokio::spawn(jobs::run(indexer.clone(), 2, shutdown.clone()));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let results = loop {
+        let rows = client
+            .query(
+                "SELECT key, state, result FROM jobs WHERE kind = 'patch_series' ORDER BY key",
+                &[],
+            )
+            .await
+            .unwrap();
+        let states: Vec<String> = rows.iter().map(|r| r.get(1)).collect();
+        assert!(!states.iter().any(|s| s == "failed"), "{states:?}");
+        if !states.is_empty() && states.iter().all(|s| s == "done") {
+            break rows.iter().map(|r| (r.get(0), r.get(2))).collect();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the patch_series jobs didn't finish: {states:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(30), workers)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    results
+}
+
+async fn series(client: &tokio_postgres::Client) -> Vec<(String, Option<String>, Option<i32>)> {
+    client
+        .query(
+            "SELECT filename, series_version, part FROM patches ORDER BY filename",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect()
+}
+
+#[tokio::test]
+async fn migrating_to_text_versions_parses_every_patch_again() {
     let db = TestDb::create().await.unwrap();
     let indexer = indexer(&db).await;
     let client = db.indexer().await.unwrap();
@@ -1738,50 +1788,25 @@ async fn migrating_to_text_versions_parses_every_patch_again() {
         )
         .await
         .unwrap();
-    let shutdown = CancellationToken::new();
-    let workers = tokio::spawn(jobs::run(indexer.clone(), 2, shutdown.clone()));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let result: Value = loop {
-        let row = client
-            .query_one(
-                "SELECT state, result FROM jobs WHERE kind = 'patch_series' AND key = 'reparse'",
-                &[],
-            )
-            .await
-            .unwrap();
-        let state: String = row.get(0);
-        assert_ne!(state, "failed");
-        if state == "done" {
-            break row.get(1);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the patch_series job didn't finish"
+    // The leading indexer queues a run for the current rules too. Each
+    // parses every patch; between them, they change each once.
+    let results = run_patch_series(&indexer, &client).await;
+    let rules = format!("rules-{}", pghacker_mail::series::RULES);
+    let keys: Vec<&str> = results.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys, ["reparse", rules.as_str()]);
+    for (_, result) in &results {
+        assert_eq!(
+            (&result["threads"], &result["patches"]),
+            (&json!(2), &json!(4))
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
-    shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(30), workers)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        (&result["threads"], &result["patches"], &result["changed"]),
-        (&json!(2), &json!(4), &json!(4))
-    );
-    let series: Vec<(String, Option<String>, Option<i32>)> = client
-        .query(
-            "SELECT filename, series_version, part FROM patches ORDER BY filename",
-            &[],
-        )
-        .await
-        .unwrap()
+    }
+    let changed: u64 = results
         .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
-        .collect();
+        .map(|(_, result)| result["changed"].as_u64().unwrap())
+        .sum();
+    assert_eq!(changed, 4);
     assert_eq!(
-        series,
+        series(&client).await,
         [
             ("inline-1".to_owned(), Some("4".to_owned()), None),
             ("psql-dp-3.patch".to_owned(), Some("3".to_owned()), None),
@@ -1793,4 +1818,71 @@ async fn migrating_to_text_versions_parses_every_patch_again() {
             ),
         ]
     );
+}
+
+#[tokio::test]
+async fn new_rules_parse_the_stored_patches_again_once() {
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let client = db.indexer().await.unwrap();
+    // Without patches, there's nothing to parse again.
+    assert!(!jobs::queue_series_rules(&client).await.unwrap());
+    // Stored by older rules: a date after the version, and a slug as one.
+    client
+        .batch_execute(
+            "INSERT INTO threads (id, list, root_message_id, subject) VALUES
+                 (1, 'pgsql-hackers', 'a@x', 'A'), (2, 'pgsql-hackers', 'b@x', 'B');
+             INSERT INTO messages (id, message_id, list, thread_id, subject, sent_at, has_patch, from_name) VALUES
+                 (10, 'a@x', 'pgsql-hackers', 1, 'Upsert', '2013-09-11', true, 'A'),
+                 (20, 'b@x', 'pgsql-hackers', 2, 'Opclass', '2019-10-28', true, 'B');
+             INSERT INTO patches (message_id, filename, series_version, part, content) VALUES
+                 (10, 'insert_on_dup.v3.2013_09_10.patch', '3.2013', NULL, 'x'),
+                 (20, 'v2-Opclass-bitwise-equality-0002.patch', '2-Opclass-bitwise-equality', 2, 'x'),
+                 (20, 'v2-0001-Fix.patch', '2', 1, 'x');",
+        )
+        .await
+        .unwrap();
+    let results = run_patch_series(&indexer, &client).await;
+    let rules = format!("rules-{}", pghacker_mail::series::RULES);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, rules);
+    assert_eq!(
+        (
+            &results[0].1["threads"],
+            &results[0].1["patches"],
+            &results[0].1["changed"]
+        ),
+        (&json!(2), &json!(3), &json!(2))
+    );
+    assert_eq!(
+        series(&client).await,
+        [
+            (
+                "insert_on_dup.v3.2013_09_10.patch".to_owned(),
+                Some("3".to_owned()),
+                None
+            ),
+            (
+                "v2-0001-Fix.patch".to_owned(),
+                Some("2".to_owned()),
+                Some(1)
+            ),
+            (
+                "v2-Opclass-bitwise-equality-0002.patch".to_owned(),
+                Some("2".to_owned()),
+                Some(2)
+            ),
+        ]
+    );
+    // Once: the next start doesn't queue it again.
+    assert!(!jobs::queue_series_rules(&client).await.unwrap());
+    let runs: i64 = client
+        .query_one(
+            "SELECT count(*) FROM jobs WHERE kind = 'patch_series' AND state = 'done'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(runs, 1);
 }

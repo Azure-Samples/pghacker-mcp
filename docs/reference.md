@@ -115,14 +115,14 @@ A patch's series version is the label it was posted under, as its file name or i
 
 The rules (`crates/pghacker-mail/src/series.rs`) keep only the forms names use reliably and leave the rest out:
 
-- a label before a part number (`v3-0001-…`, `v20220130-2-0001-…`, `vpg18-0001-…`);
-- a version first, last or inside a name someone wrote (`fix-v3`, `fix_v3.1`, `brin-inclusion-v05-…`);
+- a label before a part number (`v3-0001-…`, `v20220130-2-0001-…`, `vpg18-0001-…`); of a label over 24 characters, a slug, the first token (2 for `v2-Opclass-bitwise-equality-0001`);
+- a version first, last or inside a name someone wrote (`fix-v3`, `fix_v3.1`, `brin-inclusion-v05-…`), with decimals of up to three digits (3 for `insert_on_dup.v3.2013_09_10`);
 - a date (`fix-20251114`);
 - a `0.x` decimal;
 - a bare number where the thread's posts of that name rise with it (`psql-dp-3` … `psql-dp-5`);
 - else the subject's `[PATCH v3]` tag, unless the message is a reply.
 
-A release current when the patch was posted (`v9.6` in 2016) isn't a version, nor is `vN` glued to a word (`uuidv7`). `cargo run -p pghacker-mail --example patch_series -- <export.jsonl>` reports how every patch of an export parses, by rule. The one-time `patch_series` job parses every stored patch again ([upgrading](../deploy/README.md#patch-series)).
+A release current when the patch was posted (`v9.6` in 2016) isn't a version, nor is `vN` glued to a word (`uuidv7`). `cargo run -p pghacker-mail --example patch_series -- <export.jsonl>` reports how every patch of an export parses, by rule. When the rules change, the `patch_series` job parses every stored patch again, once ([upgrading](../deploy/README.md#patch-series)).
 
 ## Commit history
 

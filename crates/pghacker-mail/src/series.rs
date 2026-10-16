@@ -13,18 +13,22 @@
 //! none.
 //!
 //! - A label before a part number, as `git format-patch -v` writes it:
-//!   `v3-0001-…`, after a prefix (`nocfbot-v3-0001-…`), with any label
-//!   (`v20220130-2-0001-…`, `v12-pg13-0001-…`, `vpg18-0001-…`), or with a
-//!   two-digit part (`brin-inclusion-v07-01-…`).
+//!   `v3-0001-…`, after a prefix (`nocfbot-v3-0001-…`), with any label of up
+//!   to 24 characters (`v20220130-2-0001-…`, `v12-pg13-0001-…`,
+//!   `vpg18-0001-…`), or with a two-digit part (`brin-inclusion-v07-01-…`).
+//!   A longer label is a slug the part number ends, and its first token the
+//!   version: 2 for `v2-Opclass-bitwise-equality-0001`.
 //! - A part number, then `v1`–`v9` or a label with a leading zero:
 //!   `0002-v4-feat-…`.
 //! - A version first (`v0-backend-size`) or last (`fix-v3`, `fix_v3.1`,
 //!   `fix.v1`, `fix-v6-heikki`: up to two words, numbers or a branch after
 //!   it, only `wip`, `fix` and the like after a commit subject), or after the
 //!   extension (`fix.patch.v2`), or the one version inside a name someone
-//!   wrote (`brin-inclusion-v05-remove-assert-checking`). Not a release
-//!   current when the patch was posted (`v9.6` in 2016, `for-v13` in 2021),
-//!   nor glued to a word (`uuidv7`).
+//!   wrote (`brin-inclusion-v05-remove-assert-checking`). A decimal part has
+//!   at most three digits, so a date after a version stays out of it (3 for
+//!   `insert_on_dup.v3.2013_09_10`). Not a release current when the patch
+//!   was posted (`v9.6` in 2016, `for-v13` in 2021), nor glued to a word
+//!   (`uuidv7`).
 //! - A date, first or last: `fix-20251114`, `0001-2021-11-17`,
 //!   `20110218_fix`; a `yymmdd` last only within two weeks of the post.
 //! - A `0.x` decimal last: `trgm_wildcard-0.4`.
@@ -36,6 +40,9 @@
 //! A part comes from file names only: the part after a label, or a leading
 //! number with a leading zero (`0001-…`, `07_readme`), or `0NNN` after up to
 //! three words (`nocfbot-0001-…`, `REL_16_0002-…`).
+//!
+//! When the rules change, [`RULES`] goes up, and the indexer parses every
+//! stored patch again once.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
@@ -45,6 +52,11 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use regex::{Captures, Regex};
 use tokio_postgres::GenericClient;
 use tokio_postgres::types::Type;
+
+/// The rules' version. Bump it when the rules change: the leading indexer
+/// then parses every stored patch again, once (the `patch_series` job, key
+/// `rules-<N>`).
+pub const RULES: u32 = 2;
 
 /// A patch's series version and part.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -94,8 +106,10 @@ const EXTENSIONS: &[&str] = &[
 ];
 /// Labels without a digit that `git format-patch -v` is given.
 const WORD_LABELS: &[&str] = &["final", "wip", "draft", "rc", "x", "xx", "xxx"];
-/// The longest label taken before a part number.
-const MAX_LABEL: usize = 40;
+/// The longest label taken whole before a part number. A longer one is a
+/// slug the part number ends (`v2-Opclass-bitwise-equality-0001`): its
+/// first token is the version.
+const MAX_LABEL: usize = 24;
 /// PostgreSQL's releases before 10 (and the development names 8.5 and 9.7)
 /// with the year each came out. From 10 on, release N came out in 2007 + N.
 const RELEASES: &[(&str, i32)] = &[
@@ -145,6 +159,10 @@ static LABEL_PART_35: LazyLock<Regex> = LazyLock::new(|| {
 static LABEL_PART_2: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[-_.])v([0-9][0-9a-z]*)[-_.](0[0-9])(?:[-_.]|$)").unwrap()
 });
+/// A label's first token: the version of a label that is a slug.
+static LEADING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^[0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*").unwrap()
+});
 /// `v-<N>-<0NNN>-`: `-v` given a negative-looking number.
 static LABEL_PART_DASH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[-_.])v-([0-9]{1,3})[-_.](0[0-9]{3})(?:[-_.]|$)").unwrap()
@@ -154,13 +172,13 @@ static PART_LABEL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(0[0-9]{2,3})[-_]v([0-9][0-9a-z]*)[-_]").unwrap());
 /// `v<label>` starting the name.
 static FIRST: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^v([0-9][0-9a-z]*(?:\.[0-9]+[0-9a-z]*)*)(?:[-_. ]|$)").unwrap()
+    Regex::new(r"(?i)^v([0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*)(?:[-_. ]|$)").unwrap()
 });
 /// `v<label>` ending the name, with up to two words, numbers, dates or
 /// branches after it.
 static LAST: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)(?:^|[-_. +]|[0-9])v([0-9][0-9a-z]*(?:\.[0-9]+[0-9a-z]*)*)",
+        r"(?i)(?:^|[-_. +]|[0-9])v([0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*)",
         r"((?:[-_. ](?:rel_?[0-9]+(?:_[0-9]+)?(?:_stable)?|pg_?[0-9]+",
         r"|(?:19|20)[0-9]{2}[-_.]?[0-9]{2}[-_.]?[0-9]{2}|[0-9]{1,2}",
         r"|[a-uw-z][a-z0-9]*|v[a-z][a-z0-9]*)){0,2})$",
@@ -180,9 +198,12 @@ static SUBJECT_QUALIFIER: LazyLock<Regex> = LazyLock::new(|| {
 static V_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[-_. +]|[0-9])v([0-9][0-9a-z]*(?:\.[0-9]+[0-9a-z]*)*)").unwrap()
 });
+/// A decimal of four digits or more, which isn't a version's.
+static LONG_DECIMAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\.[0-9]{4}").unwrap());
 /// `fix.patch.v2`: a version after the extension.
 static AFTER_EXTENSION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\.(?:patch|diff)\.v([0-9][0-9a-z]*(?:\.[0-9]+[0-9a-z]*)*)$").unwrap()
+    Regex::new(r"(?i)\.(?:patch|diff)\.v([0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*)$")
+        .unwrap()
 });
 /// Words after which `v<N>` may name a release: `since-v13`.
 static REFERENCE: LazyLock<Regex> = LazyLock::new(|| {
@@ -225,7 +246,10 @@ static REPLY: LazyLock<Regex> = LazyLock::new(|| {
 static SUBJECT_TAG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\[([^\]]*\bpatch(?:es)?\b[^\]]*)\]").unwrap());
 static SUBJECT_VERSION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:^|[\s,])v\.?([0-9][0-9a-z]*(?:\.[0-9]+[0-9a-z]*)*)(?:$|[\s,])").unwrap()
+    Regex::new(
+        r"(?i)(?:^|[\s,])v\.?([0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*)(?:$|[\s,])",
+    )
+    .unwrap()
 });
 
 /// What a patch file's name says: its version and part, and a number that
@@ -459,13 +483,19 @@ fn stem(name: &str) -> &str {
     stem.trim_end_matches(['-', '_', '.', ' '])
 }
 
-/// The label and part of `v<label>-<part>-`, the first that is one.
+/// The label and part of `v<label>-<part>-`, the first that is one; of a
+/// label longer than [`MAX_LABEL`], its first token.
 fn labelled(stem: &str) -> Option<(String, i32)> {
     let take = |caps: Captures<'_>| -> Option<(String, i32)> {
         let label = caps.get(1)?.as_str();
-        if label.len() > MAX_LABEL || !label_ok(label) {
+        if !label_ok(label) {
             return None;
         }
+        let label = if label.len() > MAX_LABEL {
+            LEADING.find(label)?.as_str()
+        } else {
+            label
+        };
         Some((label.to_owned(), caps[2].parse().ok()?))
     };
     LABEL_PART
@@ -559,17 +589,21 @@ fn versions(
     sent_at: Option<DateTime<Utc>>,
 ) -> impl Iterator<Item = (&str, &str, &str)> {
     V_TOKEN.captures_iter(stem).filter_map(move |caps| {
-        let label = caps.get(1)?;
+        let token = caps.get(1)?;
+        // Up to a decimal of four digits: 3 of `v3.2013_09_10`.
+        let len = LONG_DECIMAL
+            .find(token.as_str())
+            .map_or(token.len(), |m| m.start());
+        let (label, after) = stem[token.start()..].split_at(len);
         let before = &stem[..caps.get(0)?.start()];
-        let after = &stem[label.end()..];
-        let release = release(label.as_str(), sent_at)
-            || (REFERENCE.is_match(before) && numbered_release(label.as_str(), sent_at));
+        let release = release(label, sent_at)
+            || (REFERENCE.is_match(before) && numbered_release(label, sent_at));
         (after
             .chars()
             .next()
             .is_none_or(|c| matches!(c, '-' | '_' | '.' | ' '))
             && !release)
-            .then_some((label.as_str(), before, after))
+            .then_some((label, before, after))
     })
 }
 

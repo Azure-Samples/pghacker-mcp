@@ -183,6 +183,26 @@ fn labels_before_a_part() {
         // A label doesn't run into the slug, nor start a word.
         ("v4-fix-the-bad-thing-0015-foo.patch", any, Some("4"), None),
         ("help-variables-0001-foo.patch", any, None, Some(1)),
+        // Up to 24 characters, a label is the version; a longer one is a
+        // slug the part ends, and its first token the version.
+        (
+            "v20241231-single-spill-0001-Hash-join-with-a-single-spill.patch",
+            on(2024, 12, 31),
+            Some("20241231-single-spill"),
+            Some(1),
+        ),
+        (
+            "v2-Opclass-bitwise-equality-0002.patch",
+            on(2019, 10, 28),
+            Some("2"),
+            Some(2),
+        ),
+        (
+            "v8_indexlist_contains_partitioned_indexes-0001-v8.patch",
+            on(2022, 10, 1),
+            Some("8"),
+            Some(1),
+        ),
     ]);
 }
 
@@ -255,6 +275,25 @@ fn versions_first_last_and_inside() {
         ("atomic_subxids.v3a.patch", any, Some("3a"), None),
         ("temporal_pks_v0004.patch", any, Some("0004"), None),
         ("walwriter_latch_v1_2012_05_02.patch", any, Some("1"), None),
+        // A decimal has up to three digits: a date after the version isn't one.
+        (
+            "insert_on_dup.v3.2013_09_10.patch",
+            on(2013, 9, 11),
+            Some("3"),
+            None,
+        ),
+        (
+            "pg_stat_statements_ext_text.v5.2013_12_09.patch",
+            on(2013, 12, 10),
+            Some("5"),
+            None,
+        ),
+        (
+            "insert_on_dup.v3.2013_09_10-review-notes.patch",
+            on(2013, 9, 11),
+            Some("3"),
+            None,
+        ),
         ("amcheck-gist-v6-heikki.patch", any, Some("6"), None),
         ("fix_pg_dump_ordering_v2-96.patch", any, Some("2"), None),
         (

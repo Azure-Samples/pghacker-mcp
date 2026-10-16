@@ -30,7 +30,8 @@ pub mod kind {
     /// back: a month, or messages from thread pages ([`crate::addresses`]).
     pub const RESTORE_ADDRESSES: &str = "restore_addresses";
     /// Parses every patch's series version and part again, a batch of
-    /// threads at a time; queued once by migration 0019.
+    /// threads at a time: queued once by migration 0019 (key `reparse`), and
+    /// by [`super::queue_series_rules`] once per version of the rules.
     pub const PATCH_SERIES: &str = "patch_series";
 }
 
@@ -128,6 +129,22 @@ pub async fn ensure_recurring(client: &impl GenericClient) -> Result<()> {
             .await?;
     }
     Ok(())
+}
+
+/// Queues a [`kind::PATCH_SERIES`] job for the current version of the rules
+/// ([`pghacker_mail::series::RULES`], key `rules-<N>`) unless one has been:
+/// the patches stored before may have been parsed with older rules. Not
+/// without patches. Returns whether it queued.
+pub async fn queue_series_rules(client: &impl GenericClient) -> Result<bool> {
+    let key = format!("rules-{}", pghacker_mail::series::RULES);
+    let queued = client
+        .execute(
+            "INSERT INTO jobs (kind, key) SELECT $1, $2 WHERE EXISTS (SELECT FROM patches)
+             ON CONFLICT (kind, key) DO NOTHING",
+            &[&kind::PATCH_SERIES, &key],
+        )
+        .await?;
+    Ok(queued > 0)
 }
 
 /// Wakes a recurring job now, such as the graph sync after an ingest.
@@ -513,6 +530,12 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
             tracing::info!(orphans, "requeued jobs left running");
         }
         ensure_recurring(&**client).await?;
+        if queue_series_rules(&**client).await? {
+            tracing::info!(
+                rules = pghacker_mail::series::RULES,
+                "queued parsing every patch's series again"
+            );
+        }
     }
     let node = format!("pghacker-indexer-{}", std::process::id());
     let mut handles = Vec::new();
