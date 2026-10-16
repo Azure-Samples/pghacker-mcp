@@ -6,6 +6,7 @@
 //! records.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::http::HeaderName;
@@ -276,8 +277,8 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
     assert_eq!(usage.lost(), 0);
 }
 
-/// The JSON-RPC response to `method` from a 2026-07-28 client that can show
-/// a form, with `headers`.
+/// The JSON-RPC response to `method` from a 2026-07-28 Copilot CLI that can
+/// show a form, with `headers`.
 async fn ask_2026(
     client: &reqwest::Client,
     base: &str,
@@ -288,6 +289,7 @@ async fn ask_2026(
     let mut params = params;
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "copilot-cli", "version": "1.0.95" },
         "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } },
     });
     let mut request = client
@@ -325,10 +327,14 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
         instance: None,
     })
     .unwrap();
+    // Every hour armed, no warm-up, and questions apart after 100 ms.
     let feedback = Feedback::new(
         FeedbackSettings {
             rate: 1.0,
-            comments: false,
+            question_gap: Duration::from_millis(100),
+            session_gap: Duration::from_secs(30),
+            min_questions: 0,
+            ..FeedbackSettings::default()
         },
         b"test-usage-id-key-0123456789abcdef",
     )
@@ -359,10 +365,13 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
             .collect()
     };
     let echo = json!({ "name": "echo", "arguments": { "text": "hi" } });
+    let pause = || tokio::time::sleep(Duration::from_millis(250));
 
+    // The tools are the same on both listeners.
     let listed = ask_2026(&client, &base, &through_front_door, "tools/list", json!({})).await;
-    assert_eq!(names(&listed), ["echo", "user_feedback"]);
-    // The client the Front Door names is asked: the note follows the answer.
+    assert_eq!(names(&listed), ["echo"]);
+    // The client the Front Door names: its first question runs; the next
+    // one's first call is held for the form.
     let answered = ask_2026(
         &client,
         &base,
@@ -371,40 +380,39 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
         echo.clone(),
     )
     .await;
-    let content = answered["result"]["content"].as_array().unwrap();
-    assert_eq!(content.len(), 2, "{answered}");
-    let note = content[1]["text"].as_str().unwrap();
-    let id = note
-        .split_whitespace()
-        .find(|word| word.starts_with("fb1."))
-        .unwrap();
-    let asked = ask_2026(
-        &client,
-        &base,
-        &through_front_door,
-        "tools/call",
-        json!({ "name": "user_feedback", "arguments": { "feedback_id": id } }),
-    )
-    .await;
-    assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
-
-    // The internal listener's agents: no tool, no note.
-    let agent = [("x-azure-socketip", "203.0.113.10")];
-    let listed = ask_2026(&client, &internal_base, &agent, "tools/list", json!({})).await;
-    assert_eq!(names(&listed), ["echo"]);
-    let answered = ask_2026(&client, &internal_base, &agent, "tools/call", echo).await;
+    assert_eq!(answered["result"]["resultType"], "complete", "{answered}");
     assert_eq!(
         answered["result"]["content"].as_array().map(Vec::len),
         Some(1),
         "{answered}"
     );
+    pause().await;
+    let asked = ask_2026(
+        &client,
+        &base,
+        &through_front_door,
+        "tools/call",
+        echo.clone(),
+    )
+    .await;
+    assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
+
+    // The internal listener's agents: never held.
+    let agent = [("x-azure-socketip", "203.0.113.10")];
+    let listed = ask_2026(&client, &internal_base, &agent, "tools/list", json!({})).await;
+    assert_eq!(names(&listed), ["echo"]);
+    for _ in 0..3 {
+        let answered = ask_2026(&client, &internal_base, &agent, "tools/call", echo.clone()).await;
+        assert_eq!(answered["result"]["resultType"], "complete", "{answered}");
+        pause().await;
+    }
 
     usage.flush().await;
-    let offers: Vec<Value> = ingestion
+    let asks: Vec<Value> = ingestion
         .received()
         .into_iter()
-        .filter(|event| properties(event)["action"] == "McpFeedbackOffered")
+        .filter(|event| properties(event)["action"] == "McpFeedbackAsked")
         .collect();
-    assert_eq!(offers.len(), 1);
-    assert_eq!(properties(&offers[0])["endpoint"], "public");
+    assert_eq!(asks.len(), 1);
+    assert_eq!(properties(&asks[0])["endpoint"], "public");
 }

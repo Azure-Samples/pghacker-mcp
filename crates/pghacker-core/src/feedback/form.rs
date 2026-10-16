@@ -1,23 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! The `user_feedback` tool: its arguments and description, the form its
-//! first call answers with (an `elicitation/create` request in an MRTR
-//! `input_required` result), and what the client's retry says the user chose.
+//! The feedback form, an `elicitation/create` request in an MRTR
+//! `input_required` result that answers the call it holds, and what the
+//! client's retry of that call says the user chose.
 
 use rmcp::model::{
-    ElicitRequest, ElicitRequestParams, ElicitationSchema, InputRequest, InputRequiredResult, Tool,
-    ToolAnnotations,
+    ElicitRequest, ElicitRequestParams, ElicitationSchema, InputRequest, InputRequiredResult,
 };
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::text;
-use crate::mcp::schema;
 
-/// The tool's name.
-pub const TOOL: &str = "user_feedback";
 /// The form's key in `inputRequests` and in the retry's `inputResponses`.
 pub(super) const KEY: &str = "feedback";
 /// A comment's characters at most.
@@ -27,45 +21,20 @@ const COMMENT_CHARS: usize = 500;
 /// sorts after `rating`, so the comment comes after the rating.
 const REMARKS: &str = "remarks";
 
-/// `user_feedback`'s arguments: the id, and nothing else. The rating comes
-/// only from the client's form, never from the model.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Args {
-    /// The feedback_id from a pghacker-mcp result, exactly as given.
-    #[schemars(length(max = 200))]
-    pub feedback_id: String,
-}
-
-/// The tool as tools/list describes it. It records the user's choice in
-/// telemetry, so it isn't read-only; a second call with the same id records
-/// nothing more.
-pub(super) fn spec() -> Tool {
-    Tool::new(TOOL, text::DESCRIPTION, schema::<Args>()).with_annotations(
-        ToolAnnotations::new()
-            .read_only(false)
-            .destructive(false)
-            .idempotent(true)
-            .open_world(false),
-    )
-}
-
-/// The form: a rating whose default is Skip, and with comments on, an
-/// optional comment after it.
-pub(super) fn form(comments: bool) -> InputRequiredResult {
+/// The form, with `state` for the retry to echo: a rating to choose, with
+/// no default, and with comments on, an optional comment after it.
+pub(super) fn form(comments: bool, state: String) -> InputRequiredResult {
     let mut properties = Map::new();
     properties.insert(
         "rating".into(),
         json!({
             "type": "string",
             "title": text::RATING_TITLE,
-            "description": text::RATING_HELP,
             "oneOf": [
                 { "const": "up", "title": text::HELPFUL },
                 { "const": "down", "title": text::NOT_HELPFUL },
                 { "const": "skip", "title": text::SKIP },
             ],
-            "default": "skip",
         }),
     );
     if comments {
@@ -92,13 +61,16 @@ pub(super) fn form(comments: bool) -> InputRequiredResult {
             requested_schema: schema,
         },
     ));
-    InputRequiredResult::from_input_requests([(KEY.to_owned(), request)].into_iter().collect())
+    InputRequiredResult::new(
+        Some([(KEY.to_owned(), request)].into_iter().collect()),
+        Some(state),
+    )
 }
 
 /// What the user chose.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Answer {
-    /// `rated`, `declined` or `dismissed`.
+    /// `rated`, `skipped`, `declined` or `dismissed`.
     pub outcome: &'static str,
     /// `up` or `down`, when rated.
     pub rating: Option<&'static str>,
@@ -106,21 +78,9 @@ pub(super) struct Answer {
     pub comment: Option<String>,
 }
 
-impl Answer {
-    /// What `user_feedback` answers.
-    pub(super) fn text(&self) -> &'static str {
-        if self.rating.is_some() {
-            text::RECORDED
-        } else {
-            text::NO_RATING
-        }
-    }
-}
-
 /// The user's choice in the client's `response` to the form: 👍 or 👎 is a
-/// rating; a decline, a decline; Skip, a cancel, or a response that's
-/// missing or malformed, a dismissal. Feedback is optional, so nothing asks
-/// again.
+/// rating; Skip, a skip; a decline, a decline; a cancel, or a response
+/// that's missing or malformed, a dismissal.
 pub(super) fn answer(response: Option<&Value>, comments: bool) -> Answer {
     let action = response
         .and_then(|r| r.get("action"))
@@ -133,13 +93,14 @@ pub(super) fn answer(response: Option<&Value>, comments: bool) -> Answer {
     };
     match action {
         Some("accept") => {
-            let rating = match content
+            let choice = content
                 .and_then(|c| c.get("rating"))
-                .and_then(Value::as_str)
-            {
-                Some("up") => Some("up"),
-                Some("down") => Some("down"),
-                _ => None,
+                .and_then(Value::as_str);
+            let (outcome, rating) = match choice {
+                Some("up") => ("rated", Some("up")),
+                Some("down") => ("rated", Some("down")),
+                Some("skip") => ("skipped", None),
+                _ => ("dismissed", None),
             };
             let comment = content
                 .filter(|_| comments)
@@ -148,11 +109,7 @@ pub(super) fn answer(response: Option<&Value>, comments: bool) -> Answer {
                 .map(clean)
                 .filter(|comment| !comment.is_empty());
             Answer {
-                outcome: if rating.is_some() {
-                    "rated"
-                } else {
-                    "dismissed"
-                },
+                outcome,
                 rating,
                 comment,
             }
@@ -182,56 +139,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tool_takes_only_the_id_and_says_what_it_does() {
-        let tool = serde_json::to_value(spec()).unwrap();
-        assert_eq!(tool["name"], TOOL);
-        let schema = &tool["inputSchema"];
-        assert_eq!(schema["required"], json!(["feedback_id"]), "{schema}");
-        assert_eq!(schema["additionalProperties"], json!(false), "{schema}");
-        assert_eq!(
-            schema["properties"]["feedback_id"]["maxLength"],
-            json!(super::super::token::MAX_ID),
-            "{schema}"
-        );
-        assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
-        assert_eq!(
-            tool["annotations"],
-            json!({ "readOnlyHint": false, "destructiveHint": false,
-                    "idempotentHint": true, "openWorldHint": false })
-        );
-    }
-
-    #[test]
-    fn the_form_asks_for_a_rating_whose_default_is_skip() {
-        let form = serde_json::to_value(form(false)).unwrap();
+    fn the_form_asks_for_a_rating_with_no_default() {
+        let form = serde_json::to_value(form(false, "fb2.state".into())).unwrap();
         assert_eq!(form["resultType"], "input_required");
-        assert!(form.get("requestState").is_none(), "{form}");
+        assert_eq!(form["requestState"], "fb2.state");
         let request = &form["inputRequests"][KEY];
         assert_eq!(request["method"], "elicitation/create");
         let params = &request["params"];
         assert_eq!(params["mode"], "form");
-        assert_eq!(params["message"], text::PROMPT);
+        assert_eq!(
+            params["message"],
+            "pghacker-mcp asks: was the last answer that used it helpful?"
+        );
         let schema = &params["requestedSchema"];
         assert_eq!(schema["required"], json!(["rating"]));
         assert_eq!(
             schema["properties"],
             json!({ "rating": {
                 "type": "string",
-                "title": text::RATING_TITLE,
-                "description": text::RATING_HELP,
+                "title": "Was the last answer helpful?",
                 "oneOf": [
                     { "const": "up", "title": "👍 Helpful" },
                     { "const": "down", "title": "👎 Not helpful" },
                     { "const": "skip", "title": "Skip" },
                 ],
-                "default": "skip",
             } })
         );
     }
 
     #[test]
     fn with_comments_the_form_adds_one_after_the_rating() {
-        let form = form(true);
+        let form = form(true, "fb2.state".into());
         let schema = &serde_json::to_value(&form).unwrap()["inputRequests"][KEY]["params"]["requestedSchema"];
         assert_eq!(schema["properties"][REMARKS]["maxLength"], 500);
         assert_eq!(schema["required"], json!(["rating"]));
@@ -246,14 +184,12 @@ mod tests {
     fn the_answer_is_the_users_choice() {
         let accept = |content: Value| json!({ "action": "accept", "content": content });
         let up = answer(Some(&accept(json!({ "rating": "up" }))), false);
-        assert_eq!(
-            (up.outcome, up.rating, up.text()),
-            ("rated", Some("up"), text::RECORDED)
-        );
+        assert_eq!((up.outcome, up.rating), ("rated", Some("up")));
         let down = answer(Some(&accept(json!({ "rating": "down" }))), false);
         assert_eq!((down.outcome, down.rating), ("rated", Some("down")));
-        for skipped in [
-            accept(json!({ "rating": "skip" })),
+        let skipped = answer(Some(&accept(json!({ "rating": "skip" }))), false);
+        assert_eq!((skipped.outcome, skipped.rating), ("skipped", None));
+        for dismissed in [
             accept(json!({ "rating": "meh" })),
             accept(json!({})),
             json!({ "action": "accept" }),
@@ -261,20 +197,16 @@ mod tests {
             json!({ "action": "bogus" }),
             json!("garbage"),
         ] {
-            let dismissed = answer(Some(&skipped), false);
+            let answer = answer(Some(&dismissed), false);
             assert_eq!(
-                (dismissed.outcome, dismissed.rating),
+                (answer.outcome, answer.rating),
                 ("dismissed", None),
-                "{skipped}"
+                "{dismissed}"
             );
-            assert_eq!(dismissed.text(), text::NO_RATING);
         }
         assert_eq!(answer(None, false).outcome, "dismissed");
         let declined = answer(Some(&json!({ "action": "decline" })), false);
-        assert_eq!(
-            (declined.outcome, declined.text()),
-            ("declined", text::NO_RATING)
-        );
+        assert_eq!((declined.outcome, declined.rating), ("declined", None));
     }
 
     #[test]

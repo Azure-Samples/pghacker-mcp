@@ -7,7 +7,8 @@
 //! agents in the same deployment, serves loopback clients without the limit.
 //! With PGHACKER_USAGE_ENDPOINT set, both listeners record usage
 //! (`pghacker_core::usage`), and with PGHACKER_FEEDBACK_RATE above 0 too, the
-//! public one now and then asks whether an answer helped
+//! public one now and then asks an interactive client's user, as their next
+//! question starts, whether the last answer helped
 //! (`pghacker_core::feedback`).
 
 mod ratelimit;

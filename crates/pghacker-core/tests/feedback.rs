@@ -1,15 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Feedback over HTTP, as clients meet it: a note after a sampled answer for
-//! a client that declares form elicitation, `user_feedback`'s form
-//! (`input_required`) and the retry that records the user's choice, the
-//! clients never asked, ids bound to their client, `?feedback=off`, and the
-//! usage events of each step. One test drives rmcp's own client through the
-//! round trip.
+//! Feedback over HTTP, as clients meet it: an interactive client that can
+//! show a form is followed by the pauses between its calls, and the call
+//! that starts its next question is answered with the form
+//! (`input_required`); the retry carries the user's answer, which is
+//! recorded, and runs. Also the clients never asked, the warm-up and the
+//! session gap, states bound to their client, `?feedback=off`, and the usage
+//! events of each step. One test drives rmcp's own client through the round
+//! trip.
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::middleware;
 use pghacker_core::feedback::{Feedback, Settings as FeedbackSettings};
@@ -76,14 +79,26 @@ impl Tools for Echo {
 const ID_KEY: &[u8] = b"test-usage-id-key-0123456789abcdef";
 /// The address of a client that names none, such as rmcp's.
 const CLIENT: &str = "203.0.113.9";
-const FORM: &str = "pghacker-mcp asks: was the last answer helpful?";
+const PROMPT: &str = "pghacker-mcp asks: was the last answer that used it helpful?";
+/// A gap that starts a question: over the tests' question gap, and under
+/// their session gap.
+const PAUSE: Duration = Duration::from_millis(250);
 
-fn feedback(rate: f64, comments: bool) -> Feedback {
-    Feedback::new(FeedbackSettings { rate, comments }, ID_KEY).unwrap()
+/// Feedback in every hour, questions apart after 100 ms, sessions active
+/// for 3 s, and asks from the question after `min_questions`.
+fn settings(min_questions: u32) -> FeedbackSettings {
+    FeedbackSettings {
+        rate: 1.0,
+        question_gap: Duration::from_millis(100),
+        session_gap: Duration::from_secs(3),
+        min_questions,
+        ..FeedbackSettings::default()
+    }
 }
 
-fn server(feedback: Feedback) -> McpServer<Echo> {
-    McpServer::new(Echo, "echo", "1", "Echo tools.").with_feedback(feedback)
+fn server(settings: FeedbackSettings) -> McpServer<Echo> {
+    McpServer::new(Echo, "echo", "1", "Echo tools.")
+        .with_feedback(Feedback::new(settings, ID_KEY).unwrap())
 }
 
 /// A listener for `server`, recording usage to `ingestion` unless that's
@@ -126,25 +141,40 @@ async fn listen(server: McpServer<Echo>, ingestion: Option<&Ingestion>) -> (Stri
     (format!("http://{addr}"), usage)
 }
 
-/// A 2026-07-28 client at `address`, declaring `capabilities`, that posts to
-/// `path`.
+/// A 2026-07-28 client at `address`, an app named `app` that declares
+/// `capabilities`, which posts to `path`.
 struct Client {
     http: reqwest::Client,
     base: String,
     address: &'static str,
+    app: Option<&'static str>,
     capabilities: Value,
     path: &'static str,
+    id: std::sync::atomic::AtomicU64,
 }
 
 impl Client {
-    fn new(base: &str, address: &'static str, capabilities: Value) -> Self {
+    /// Copilot CLI, which can show a form.
+    fn new(base: &str, address: &'static str) -> Self {
         Self {
             http: reqwest::Client::new(),
             base: base.to_owned(),
             address,
-            capabilities,
+            app: Some("copilot-cli"),
+            capabilities: json!({ "elicitation": { "form": {} } }),
             path: "/mcp",
+            id: 0.into(),
         }
+    }
+
+    fn named(mut self, app: Option<&'static str>) -> Self {
+        self.app = app;
+        self
+    }
+
+    fn declaring(mut self, capabilities: Value) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 
     fn at(mut self, path: &'static str) -> Self {
@@ -153,13 +183,17 @@ impl Client {
     }
 
     /// The JSON-RPC response to `method` with `params`.
-    async fn request(&self, id: u64, method: &str, params: Value) -> Value {
+    async fn request(&self, method: &str, params: Value) -> Value {
         let mut params = params;
         params["_meta"] = json!({
             "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientInfo": { "name": "test-client", "version": "1.0" },
             "io.modelcontextprotocol/clientCapabilities": self.capabilities,
         });
+        if let Some(app) = self.app {
+            params["_meta"]["io.modelcontextprotocol/clientInfo"] =
+                json!({ "name": app, "version": "1.0" });
+        }
+        let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut request = self
             .http
             .post(format!("{}{}", self.base, self.path))
@@ -180,41 +214,60 @@ impl Client {
         serde_json::from_str(&text).unwrap_or(Value::String(text))
     }
 
-    /// A tool call, with `responses` to a form on a retry.
-    async fn call(&self, id: u64, name: &str, arguments: Value, responses: Option<Value>) -> Value {
+    /// A call of `echo` with `text`.
+    async fn echo(&self, text: &str) -> Value {
+        self.call("echo", json!({ "text": text }), None, None).await
+    }
+
+    /// A tool call; on a retry, with `responses` to the form and its `state`.
+    async fn call(
+        &self,
+        name: &str,
+        arguments: Value,
+        responses: Option<Value>,
+        state: Option<&str>,
+    ) -> Value {
         let mut params = json!({ "name": name, "arguments": arguments });
         if let Some(responses) = responses {
             params["inputResponses"] = responses;
         }
-        self.request(id, "tools/call", params).await
+        if let Some(state) = state {
+            params["requestState"] = json!(state);
+        }
+        self.request("tools/call", params).await
+    }
+
+    /// `n` questions of one call of `echo` each, a pause apart, none held;
+    /// then a pause.
+    async fn questions(&self, n: u32) {
+        for question in 0..n {
+            let answered = self.echo(&format!("q{question}")).await;
+            assert_eq!(
+                answered["result"]["resultType"], "complete",
+                "question {question}: {answered}"
+            );
+            tokio::time::sleep(PAUSE).await;
+        }
+    }
+
+    /// The next question's first call, held for the form: the form.
+    async fn held(&self) -> Value {
+        let asked = self.echo("next").await;
+        assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
+        asked["result"].clone()
     }
 }
 
-/// The capabilities of a client that can show a form.
-fn form_capable() -> Value {
-    json!({ "elicitation": { "form": {} } })
-}
-
-/// The feedback id in a result's note, if it has one.
-fn note(response: &Value) -> Option<String> {
-    response["result"]["content"]
-        .as_array()?
-        .iter()
-        .find_map(|block| {
-            let text = block["text"].as_str()?;
-            let start = text.find("feedback_id: ")? + "feedback_id: ".len();
-            Some(text[start..].split_whitespace().next()?.to_owned())
-        })
-}
-
-fn text_of(response: &Value) -> &str {
-    response["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
+fn state_of(form: &Value) -> &str {
+    form["requestState"].as_str().unwrap()
 }
 
 fn properties(envelope: &Value) -> &Value {
     &envelope["data"]["baseData"]["properties"]
+}
+
+fn measurements(envelope: &Value) -> &Value {
+    &envelope["data"]["baseData"]["measurements"]
 }
 
 fn action(envelope: &Value) -> &str {
@@ -234,90 +287,81 @@ fn answer(rating: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_client_that_can_show_a_form_is_asked_after_an_answer_and_its_choice_recorded() {
+async fn an_interactive_client_is_asked_as_its_next_question_starts_and_its_retry_runs() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
-    let client = Client::new(&base, CLIENT, form_capable());
+    let (base, usage) = listen(server(settings(1)), Some(&ingestion)).await;
+    let client = Client::new(&base, CLIENT);
 
-    // The answer, as it was, then the note for the model.
-    let answered = client.call(1, "echo", json!({ "text": "hi" }), None).await;
-    let result = &answered["result"];
-    let content = result["content"].as_array().unwrap();
-    assert_eq!(content.len(), 2, "{answered}");
-    assert_eq!(result["structuredContent"], json!({ "echo": "hi" }));
-    let first: Value = serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(first, json!({ "echo": "hi" }));
-    assert_eq!(content[1]["annotations"]["audience"], json!(["assistant"]));
-    let id = note(&answered).expect("a note");
-    // An hour has one: the next answer has none.
-    let again = client
-        .call(2, "lines", json!({ "text": "again" }), None)
-        .await;
+    // The first question: two calls, as an answer takes, never held.
+    let first = client.echo("hi").await;
+    assert_eq!(first["result"]["resultType"], "complete", "{first}");
     assert_eq!(
-        again["result"]["content"].as_array().unwrap().len(),
-        1,
-        "{again}"
+        first["result"]["structuredContent"],
+        json!({ "echo": "hi" })
     );
-
-    // The first call answers with the form.
-    let asked = client
-        .call(3, "user_feedback", json!({ "feedback_id": id }), None)
-        .await;
-    let result = &asked["result"];
-    assert_eq!(result["resultType"], "input_required", "{asked}");
-    assert!(result.get("requestState").is_none());
-    let form = &result["inputRequests"]["feedback"];
-    assert_eq!(form["method"], "elicitation/create");
-    assert_eq!(form["params"]["mode"], "form");
-    assert!(
-        form["params"]["message"]
-            .as_str()
-            .unwrap()
-            .starts_with(FORM)
-    );
-    let schema = &form["params"]["requestedSchema"];
-    assert_eq!(schema["required"], json!(["rating"]));
     assert_eq!(
-        schema["properties"].as_object().unwrap().len(),
-        1,
-        "{schema}"
+        first["result"]["content"].as_array().map(Vec::len),
+        Some(1),
+        "nothing for the model: {first}"
     );
-    let rating = &schema["properties"]["rating"];
-    assert_eq!(rating["default"], "skip");
-    let choices: Vec<&str> = rating["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|choice| choice["const"].as_str().unwrap())
-        .collect();
-    assert_eq!(choices, ["up", "down", "skip"]);
+    let second = client
+        .call("lines", json!({ "text": "more" }), None, None)
+        .await;
+    assert_eq!(second["result"]["resultType"], "complete", "{second}");
+    tokio::time::sleep(PAUSE).await;
 
-    // The retry carries the user's choice, recorded once.
-    let recorded = client
+    // The second question's first call is held: the form, which the tool
+    // hasn't run for.
+    let form = client.held().await;
+    let request = &form["inputRequests"]["feedback"];
+    assert_eq!(request["method"], "elicitation/create");
+    assert_eq!(
+        request["params"],
+        json!({
+            "mode": "form",
+            "message": PROMPT,
+            "requestedSchema": {
+                "type": "object",
+                "properties": { "rating": {
+                    "type": "string",
+                    "title": "Was the last answer helpful?",
+                    "oneOf": [
+                        { "const": "up", "title": "👍 Helpful" },
+                        { "const": "down", "title": "👎 Not helpful" },
+                        { "const": "skip", "title": "Skip" },
+                    ],
+                } },
+                "required": ["rating"],
+            },
+        })
+    );
+    let state = state_of(&form);
+    assert!(state.starts_with("fb2."), "{state}");
+
+    // The retry carries the answer and the state, and gets the tool's result.
+    let ran = client
         .call(
-            4,
-            "user_feedback",
-            json!({ "feedback_id": id }),
+            "echo",
+            json!({ "text": "next" }),
             Some(answer("up")),
+            Some(state),
         )
         .await;
-    assert_eq!(recorded["result"]["resultType"], "complete", "{recorded}");
-    assert_eq!(text_of(&recorded), "Thanks: your rating was recorded.");
-    let repeated = client
-        .call(
-            5,
-            "user_feedback",
-            json!({ "feedback_id": id }),
-            Some(answer("down")),
-        )
-        .await;
-    assert_eq!(text_of(&repeated), "Nothing more to record.", "{repeated}");
+    assert_eq!(ran["result"]["resultType"], "complete", "{ran}");
+    assert_eq!(
+        ran["result"]["structuredContent"],
+        json!({ "echo": "next" })
+    );
+    // Asked once this hour: the next question runs.
+    tokio::time::sleep(PAUSE).await;
+    let later = client.echo("later").await;
+    assert_eq!(later["result"]["resultType"], "complete", "{later}");
 
     usage.flush().await;
     let received = ingestion.received();
     let seen: Vec<(&str, &str, &str)> = events(
         &received,
-        &["McpToolCall", "McpFeedbackOffered", "McpFeedback"],
+        &["McpToolCall", "McpFeedbackAsked", "McpFeedback"],
     )
     .into_iter()
     .map(|event| {
@@ -336,81 +380,83 @@ async fn a_client_that_can_show_a_form_is_asked_after_an_answer_and_its_choice_r
         seen,
         [
             ("McpToolCall", "echo", "Succeeded"),
-            ("McpFeedbackOffered", "echo", ""),
             ("McpToolCall", "lines", "Succeeded"),
-            ("McpToolCall", "user_feedback", "InputRequired"),
-            ("McpToolCall", "user_feedback", "Succeeded"),
-            ("McpFeedback", "", "rated"),
-            ("McpToolCall", "user_feedback", "Succeeded"),
+            ("McpToolCall", "echo", "InputRequired"),
+            ("McpFeedbackAsked", "echo", ""),
+            ("McpFeedback", "echo", "rated"),
+            ("McpToolCall", "echo", "Succeeded"),
+            ("McpToolCall", "echo", "Succeeded"),
         ],
         "{received:#?}"
     );
     let calls = events(&received, &["McpToolCall"]);
-    let offered = events(&received, &["McpFeedbackOffered"])[0];
+    let asked = events(&received, &["McpFeedbackAsked"])[0];
     let rated = events(&received, &["McpFeedback"])[0];
-    // The offer shares its answer's operation, and names the id the outcome names.
+    // The ask shares the held call's operation, and says what it rates: the
+    // first question, its two calls, and the pause after it.
     assert_eq!(
-        offered["tags"]["ai.operation.id"],
-        calls[0]["tags"]["ai.operation.id"]
+        asked["tags"]["ai.operation.id"],
+        calls[2]["tags"]["ai.operation.id"]
     );
-    let feedback_id = properties(offered)["feedbackId"].as_str().unwrap();
-    assert_eq!(feedback_id.len(), 32);
-    assert_eq!(properties(rated)["feedbackId"], feedback_id);
+    assert_eq!(measurements(asked)["question"], 1.0);
+    assert_eq!(measurements(asked)["questionCalls"], 2.0);
+    assert_eq!(measurements(asked)["questionFailed"], 0.0);
+    let gap = measurements(asked)["gapSeconds"].as_f64().unwrap();
+    assert!((0.1..3.0).contains(&gap), "{gap}");
+    let start = properties(asked)["questionStart"].as_str().unwrap();
+    let end = properties(asked)["questionEnd"].as_str().unwrap();
+    assert!(start.ends_with('Z') && start <= end, "{start} {end}");
+    // The rated question's calls are the client's within those times.
+    assert!(calls[0]["time"].as_str().unwrap() >= start);
+    assert!(calls[1]["time"].as_str().unwrap() <= end);
+    let ask_id = properties(asked)["askId"].as_str().unwrap();
+    assert_eq!(ask_id.len(), 32);
+    assert_eq!(properties(rated)["askId"], ask_id);
     assert_eq!(properties(rated)["rating"], "up");
     assert!(properties(rated).get("comment").is_none());
-    assert_eq!(properties(rated)["clientName"], "test-client");
-    assert!(
-        rated["tags"]["ai.user.id"]
-            .as_str()
-            .is_some_and(|user| user.len() == 32)
-    );
-    // The call records the id it was given, and no rating.
-    assert_eq!(properties(calls[2])["arg.feedback_id"], id.as_str());
+    assert_eq!(properties(rated)["clientName"], "copilot-cli");
+    assert_eq!(rated["tags"]["ai.user.id"], asked["tags"]["ai.user.id"]);
+    // The retry records its arguments, and never the answer.
+    assert_eq!(properties(calls[3])["arg.text"], "next");
     assert!(properties(calls[3]).get("arg.rating").is_none());
 }
 
 #[tokio::test]
-async fn each_answer_is_recorded_as_what_the_user_chose() {
+async fn whatever_the_answer_it_is_recorded_and_the_request_runs() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
-    let cases: [(&'static str, Value, &str); 6] = [
-        (
-            "198.51.100.1",
-            answer("down"),
-            "Thanks: your rating was recorded.",
-        ),
-        ("198.51.100.2", answer("skip"), "Okay: no rating was given."),
-        (
-            "198.51.100.3",
-            json!({ "feedback": { "action": "decline" } }),
-            "Okay: no rating was given.",
-        ),
+    let (base, usage) = listen(server(settings(1)), Some(&ingestion)).await;
+    let answers = [
+        ("198.51.100.1", answer("up")),
+        ("198.51.100.2", answer("down")),
+        ("198.51.100.3", answer("skip")),
         (
             "198.51.100.4",
-            json!({ "feedback": { "action": "cancel" } }),
-            "Okay: no rating was given.",
+            json!({ "feedback": { "action": "decline" } }),
         ),
-        ("198.51.100.5", json!({}), "Okay: no rating was given."),
         (
-            "198.51.100.6",
-            json!({ "feedback": "garbage" }),
-            "Okay: no rating was given.",
+            "198.51.100.5",
+            json!({ "feedback": { "action": "cancel" } }),
         ),
+        ("198.51.100.6", answer("meh")),
     ];
-    for (n, (address, responses, expected)) in cases.into_iter().enumerate() {
-        let client = Client::new(&base, address, form_capable());
-        let id = note(&client.call(1, "lines", json!({ "text": "x" }), None).await)
-            .unwrap_or_else(|| panic!("a note for case {n}"));
-        let answered = client
+    for (address, response) in answers {
+        let client = Client::new(&base, address);
+        client.questions(1).await;
+        let form = client.held().await;
+        let ran = client
             .call(
-                2,
-                "user_feedback",
-                json!({ "feedback_id": id }),
-                Some(responses),
+                "echo",
+                json!({ "text": "next" }),
+                Some(response),
+                Some(state_of(&form)),
             )
             .await;
-        assert_eq!(text_of(&answered), expected, "case {n}: {answered}");
+        assert_eq!(
+            ran["result"]["structuredContent"],
+            json!({ "echo": "next" })
+        );
     }
+
     usage.flush().await;
     let received = ingestion.received();
     let outcomes: Vec<(&str, &str)> = events(&received, &["McpFeedback"])
@@ -426,10 +472,10 @@ async fn each_answer_is_recorded_as_what_the_user_chose() {
     assert_eq!(
         outcomes,
         [
+            ("rated", "up"),
             ("rated", "down"),
-            ("dismissed", ""),
+            ("skipped", ""),
             ("declined", ""),
-            ("dismissed", ""),
             ("dismissed", ""),
             ("dismissed", ""),
         ]
@@ -437,261 +483,201 @@ async fn each_answer_is_recorded_as_what_the_user_chose() {
 }
 
 #[tokio::test]
-async fn clients_that_cannot_show_a_form_are_never_asked() {
+async fn only_interactive_clients_that_can_show_a_form_are_asked() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
-    for capabilities in [json!({}), json!({ "elicitation": { "url": {} } })] {
-        let client = Client::new(&base, CLIENT, capabilities.clone());
-        let answered = client.call(1, "echo", json!({ "text": "x" }), None).await;
-        assert_eq!(note(&answered), None, "{capabilities}: {answered}");
+    let (base, usage) = listen(server(settings(0)), Some(&ingestion)).await;
+    let never = [
+        // A script with the Python SDK's default name, or none.
+        Client::new(&base, "198.51.100.1").named(Some("mcp")),
+        Client::new(&base, "198.51.100.2").named(None),
+        // An interactive app that can't show a form.
+        Client::new(&base, "198.51.100.3").declaring(json!({})),
+        Client::new(&base, "198.51.100.4").declaring(json!({ "elicitation": { "url": {} } })),
+    ];
+    for client in &never {
+        client.questions(3).await;
     }
-    // An earlier client declares elicitation in initialize, which nothing
-    // keeps, and sends no capabilities with a call.
+    // An app on the list is matched ignoring case.
+    let codex = Client::new(&base, "198.51.100.5").named(Some("Codex-MCP-Client"));
+    codex.questions(1).await;
+    codex.held().await;
+
+    // A client of an earlier protocol sends no capabilities: never held.
     let http = reqwest::Client::new();
-    let legacy = |body: Value| {
-        http.post(format!("{base}/mcp"))
+    for n in 0..3 {
+        let answered: Value = http
+            .post(format!("{base}/mcp"))
             .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json")
-            .header("mcp-protocol-version", "2025-06-18")
-            .header("x-test-client", "198.51.100.9")
-            .json(&body)
+            .header("mcp-protocol-version", "2025-11-25")
+            .header("x-test-client", "198.51.100.6")
+            .json(&json!({ "jsonrpc": "2.0", "id": n, "method": "tools/call",
+                "params": { "name": "echo", "arguments": { "text": "hi" } } }))
             .send()
-    };
-    let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": { "elicitation": {} },
-        "clientInfo": { "name": "legacy", "version": "1.0" } } });
-    assert_eq!(legacy(initialize).await.unwrap().status(), 200);
-    let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": { "name": "echo", "arguments": { "text": "x" } } });
-    let called: Value = legacy(call).await.unwrap().json().await.unwrap();
-    assert_eq!(
-        called["result"]["content"].as_array().map(Vec::len),
-        Some(1),
-        "{called}"
-    );
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            answered["result"].get("inputRequests").is_none(),
+            "{answered}"
+        );
+        tokio::time::sleep(PAUSE).await;
+    }
 
-    // `elicitation: {}` is form mode: asked. Its id, on a request that can't
-    // show the form, records nothing.
-    let client = Client::new(&base, CLIENT, json!({ "elicitation": {} }));
-    let id = note(&client.call(3, "echo", json!({ "text": "x" }), None).await).expect("a note");
-    let cannot = Client::new(&base, CLIENT, json!({}));
-    let answered = cannot
-        .call(4, "user_feedback", json!({ "feedback_id": id }), None)
-        .await;
-    assert_eq!(
-        text_of(&answered),
-        "This client can't show the prompt, so no feedback was recorded.",
-        "{answered}"
-    );
-    // A failed call gets no note.
-    let other = Client::new(&base, "198.51.100.10", form_capable());
-    let failed = other.call(5, "fail", json!({ "text": "x" }), None).await;
-    assert_eq!(failed["result"]["isError"], true, "{failed}");
-    assert_eq!(note(&failed), None);
     usage.flush().await;
-    assert!(events(&ingestion.received(), &["McpFeedback"]).is_empty());
+    assert_eq!(
+        events(&ingestion.received(), &["McpFeedbackAsked"]).len(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn ids_are_bound_to_their_client_and_cannot_be_forged() {
-    let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
-    let owner = Client::new(&base, CLIENT, form_capable());
-    let id = note(&owner.call(1, "echo", json!({ "text": "x" }), None).await).expect("a note");
-    let stranger = Client::new(&base, "198.51.100.20", form_capable());
+async fn the_warm_up_and_the_session_gap_hold_asks_back() {
+    let (base, _usage) = listen(
+        server(FeedbackSettings {
+            session_gap: Duration::from_millis(600),
+            ..settings(2)
+        }),
+        Some(&Ingestion::start().await),
+    )
+    .await;
+    // Questions 1 and 2 are the warm-up; question 3 is asked about 2.
+    let client = Client::new(&base, "198.51.100.1");
+    client.questions(2).await;
+    client.held().await;
 
-    let invalid = "This feedback id isn't valid (it may have expired).";
-    let long = format!("{id}{}", "A".repeat(200));
-    for (n, attempt) in [id.as_str(), "fb1.forged", long.as_str()]
-        .into_iter()
-        .enumerate()
-    {
-        let refused = stranger
-            .call(
-                2 + n as u64,
-                "user_feedback",
-                json!({ "feedback_id": attempt }),
-                Some(answer("up")),
-            )
-            .await;
-        assert_eq!(refused["result"]["isError"], true, "{refused}");
-        assert_eq!(text_of(&refused), invalid);
-    }
-    // Arguments other than the id are the caller's mistake.
-    for bad in [json!({}), json!({ "feedback_id": id, "rating": "up" })] {
-        let error = stranger.call(9, "user_feedback", bad, None).await;
-        assert_eq!(error["error"]["code"], -32602, "{error}");
-    }
-    // The owner still can.
-    let asked = owner
-        .call(10, "user_feedback", json!({ "feedback_id": id }), None)
+    // Back after the session gap, a question isn't asked; the next one is.
+    let back = Client::new(&base, "198.51.100.2");
+    back.questions(2).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    back.questions(1).await;
+    back.held().await;
+}
+
+/// A retry of `echo` by `client`, with 👎 and `state`: the call runs,
+/// whatever happens to the answer.
+async fn retry(client: &Client, state: Option<&str>) {
+    let ran = client
+        .call(
+            "echo",
+            json!({ "text": "next" }),
+            Some(answer("down")),
+            state,
+        )
         .await;
-    assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
+    assert_eq!(
+        ran["result"]["structuredContent"],
+        json!({ "echo": "next" })
+    );
+}
+
+#[tokio::test]
+async fn a_state_is_its_clients_and_answers_once() {
+    let ingestion = Ingestion::start().await;
+    let (base, usage) = listen(server(settings(1)), Some(&ingestion)).await;
+    let client = Client::new(&base, CLIENT);
+    client.questions(1).await;
+    let form = client.held().await;
+    let state = state_of(&form);
+    // Another client's retry, or one without the state, records nothing.
+    let other = Client::new(&base, "198.51.100.7");
+    retry(&other, Some(state)).await;
+    retry(&client, None).await;
+    // Another tool's retry neither.
+    let ran = client
+        .call(
+            "lines",
+            json!({ "text": "x" }),
+            Some(answer("down")),
+            Some(state),
+        )
+        .await;
+    assert_eq!(ran["result"]["content"][0]["text"], "x\n");
+    // Its own records it, once.
+    retry(&client, Some(state)).await;
+    retry(&client, Some(state)).await;
 
     usage.flush().await;
     let received = ingestion.received();
-    // One rejection a minute per client.
-    let rejected = events(&received, &["McpFeedbackRejected"]);
-    assert_eq!(rejected.len(), 1, "{received:#?}");
-    assert_eq!(properties(rejected[0])["reason"], "invalid");
-    assert_eq!(
-        rejected[0]["data"]["baseData"]["name"],
-        pghacker_core::usage::ERROR
-    );
-    assert!(events(&received, &["McpFeedback"]).is_empty());
+    assert_eq!(events(&received, &["McpFeedback"]).len(), 1);
+    let rejected: Vec<&str> = events(&received, &["McpFeedbackRejected"])
+        .into_iter()
+        .map(|event| properties(event)["reason"].as_str().unwrap())
+        .collect();
+    // One rejection a minute per address: the other client's, and this
+    // client's first.
+    assert_eq!(rejected, ["invalid", "invalid"]);
 }
 
 #[tokio::test]
-async fn feedback_off_in_the_url_stops_offers_and_answers() {
+async fn feedback_off_in_the_url_is_never_asked_nor_recorded() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
-    let off = Client::new(&base, CLIENT, form_capable()).at("/mcp?feedback=off");
-    let answered = off.call(1, "echo", json!({ "text": "x" }), None).await;
-    assert_eq!(
-        answered["result"]["structuredContent"],
-        json!({ "echo": "x" })
-    );
-    assert_eq!(note(&answered), None, "{answered}");
+    let (base, usage) = listen(server(settings(0)), Some(&ingestion)).await;
+    let client = Client::new(&base, CLIENT).at("/mcp?feedback=off");
+    client.questions(3).await;
+    // A forged retry records nothing either.
+    client
+        .call(
+            "echo",
+            json!({ "text": "hi" }),
+            Some(answer("up")),
+            Some("fb2.forged"),
+        )
+        .await;
 
-    // An id from the plain URL records nothing through the opted-out one.
-    let on = Client::new(&base, CLIENT, form_capable());
-    let id = note(&on.call(2, "echo", json!({ "text": "x" }), None).await).expect("a note");
-    for responses in [None, Some(answer("up"))] {
-        let answered = off
-            .call(3, "user_feedback", json!({ "feedback_id": id }), responses)
-            .await;
-        assert_eq!(
-            text_of(&answered),
-            "Feedback is off for this connection; no feedback was recorded.",
-            "{answered}"
-        );
-    }
     usage.flush().await;
-    assert!(events(&ingestion.received(), &["McpFeedback"]).is_empty());
-}
-
-#[tokio::test]
-async fn the_tool_and_its_instructions_come_only_with_feedback_on() {
-    let ingestion = Ingestion::start().await;
-    let plain = McpServer::new(Echo, "echo", "1", "Echo tools.");
-    // As main serves the internal listener: the same server, without feedback.
-    let (internal, _) = listen(plain.clone(), Some(&ingestion)).await;
-    let (public, _) = listen(plain.with_feedback(feedback(0.1, false)), Some(&ingestion)).await;
-
-    let tools = |listed: &Value| -> Vec<String> {
-        listed["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap().to_owned())
-            .collect()
-    };
-    let client = Client::new(&public, CLIENT, form_capable());
-    let listed = client.request(1, "tools/list", json!({})).await;
-    assert_eq!(tools(&listed), ["echo", "lines", "fail", "user_feedback"]);
-    let tool = &listed["result"]["tools"][3];
-    assert_eq!(
-        tool["annotations"],
-        json!({ "readOnlyHint": false, "destructiveHint": false,
-                "idempotentHint": true, "openWorldHint": false })
-    );
-    assert_eq!(tool["inputSchema"]["required"], json!(["feedback_id"]));
-    let discovered = client.request(2, "server/discover", json!({})).await;
-    let instructions = discovered.to_string();
-    assert!(instructions.contains("Echo tools."), "{discovered}");
+    let received = ingestion.received();
     assert!(
-        instructions.contains("call user_feedback once"),
-        "{discovered}"
+        events(
+            &received,
+            &["McpFeedbackAsked", "McpFeedback", "McpFeedbackRejected"]
+        )
+        .is_empty(),
+        "{received:#?}"
     );
-
-    let inside = Client::new(&internal, CLIENT, form_capable());
-    let listed = inside.request(3, "tools/list", json!({})).await;
-    assert_eq!(tools(&listed), ["echo", "lines", "fail"]);
-    let discovered = inside.request(4, "server/discover", json!({})).await;
-    assert!(
-        !discovered.to_string().contains("user_feedback"),
-        "{discovered}"
-    );
-    // Without feedback, the tool is unknown, and answers have no note.
-    let unknown = inside
-        .call(5, "user_feedback", json!({ "feedback_id": "fb1.x" }), None)
-        .await;
-    assert!(
-        unknown.to_string().contains("unknown tool user_feedback"),
-        "{unknown}"
-    );
-    let (base, _) = listen(server(Feedback::off()), Some(&ingestion)).await;
-    let answered = Client::new(&base, CLIENT, form_capable())
-        .call(6, "echo", json!({ "text": "x" }), None)
-        .await;
-    assert_eq!(note(&answered), None);
 }
 
 #[tokio::test]
 async fn requests_without_an_identity_are_never_asked() {
-    let (base, _) = listen(server(feedback(1.0, false)), None).await;
-    let client = Client::new(&base, CLIENT, form_capable());
-    let answered = client.call(1, "echo", json!({ "text": "x" }), None).await;
-    assert_eq!(note(&answered), None, "{answered}");
-    let refused = client
-        .call(2, "user_feedback", json!({ "feedback_id": "fb1.x" }), None)
-        .await;
-    assert_eq!(refused["result"]["isError"], true, "{refused}");
-    assert_eq!(text_of(&refused), "Feedback isn't available here.");
+    let (base, _usage) = listen(server(settings(0)), None).await;
+    Client::new(&base, CLIENT).questions(3).await;
 }
 
 #[tokio::test]
 async fn with_comments_on_the_form_takes_one_after_the_rating() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, true)), Some(&ingestion)).await;
-    let client = Client::new(&base, CLIENT, form_capable());
-    let id = note(&client.call(1, "echo", json!({ "text": "x" }), None).await).expect("a note");
-    let response = client
-        .http
-        .post(format!("{base}/mcp"))
-        .header("accept", "application/json, text/event-stream")
-        .header("content-type", "application/json")
-        .header("mcp-protocol-version", "2026-07-28")
-        .header("mcp-method", "tools/call")
-        .header("mcp-name", "user_feedback")
-        .header("x-test-client", CLIENT)
-        .json(
-            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "user_feedback", "arguments": { "feedback_id": id },
-            "_meta": {
-                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": form_capable(),
-            } } }),
-        )
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    // Clients show fields in the order they arrive: the rating first.
-    let rating = response.find("\"rating\":").expect("a rating field");
-    let remarks = response.find("\"remarks\":").expect("a comment field");
-    assert!(rating < remarks, "{response}");
-
-    let answered = client
+    let (base, usage) = listen(
+        server(FeedbackSettings {
+            comments: true,
+            ..settings(1)
+        }),
+        Some(&ingestion),
+    )
+    .await;
+    let client = Client::new(&base, CLIENT);
+    client.questions(1).await;
+    let form = client.held().await;
+    let schema = &form["inputRequests"]["feedback"]["params"]["requestedSchema"];
+    assert_eq!(schema["required"], json!(["rating"]));
+    assert_eq!(schema["properties"]["remarks"]["maxLength"], 500);
+    let response = json!({ "feedback": { "action": "accept", "content": {
+        "rating": "down", "remarks": "cited the wrong thread" } } });
+    client
         .call(
-            3,
-            "user_feedback",
-            json!({ "feedback_id": id }),
-            Some(json!({ "feedback": { "action": "accept", "content": {
-                "rating": "down", "remarks": "cited the wrong\nthread " } } })),
+            "echo",
+            json!({ "text": "next" }),
+            Some(response),
+            Some(state_of(&form)),
         )
         .await;
-    assert_eq!(text_of(&answered), "Thanks: your rating was recorded.");
+
     usage.flush().await;
     let received = ingestion.received();
     let rated = events(&received, &["McpFeedback"]);
     assert_eq!(properties(rated[0])["comment"], "cited the wrong thread");
-    assert_eq!(
-        rated[0]["data"]["baseData"]["measurements"]["commentLength"],
-        22.0
-    );
+    assert_eq!(measurements(rated[0])["commentLength"], 22.0);
     // The comment comes from the form, never from the call's arguments.
     for call in events(&received, &["McpToolCall"]) {
         assert!(properties(call).get("arg.remarks").is_none());
@@ -727,7 +713,14 @@ impl ClientHandler for Person {
 #[tokio::test]
 async fn rmcps_own_client_completes_the_round_trip() {
     let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(server(feedback(1.0, false)), Some(&ingestion)).await;
+    let (base, usage) = listen(
+        server(FeedbackSettings {
+            clients: vec!["person".into()],
+            ..settings(1)
+        }),
+        Some(&ingestion),
+    )
+    .await;
     let person = Person::default();
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(format!("{base}/mcp")),
@@ -742,36 +735,18 @@ async fn rmcps_own_client_completes_the_round_trip() {
         )
         .await
         .expect("the client starts");
-    let arguments = |value: Value| value.as_object().unwrap().clone();
-    let answered = client
-        .call_tool(
-            CallToolRequestParams::new("echo").with_arguments(arguments(json!({ "text": "hi" }))),
-        )
-        .await
-        .unwrap();
-    let id = answered
-        .content
-        .iter()
-        .find_map(|block| {
-            let text = &block.as_text()?.text;
-            let start = text.find("feedback_id: ")? + "feedback_id: ".len();
-            Some(text[start..].split_whitespace().next()?.to_owned())
-        })
-        .expect("a note");
-    let rated = client
-        .call_tool(
-            CallToolRequestParams::new("user_feedback")
-                .with_arguments(arguments(json!({ "feedback_id": id }))),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        rated.content[0].as_text().unwrap().text,
-        "Thanks: your rating was recorded."
-    );
+    let echo = |text: &str| {
+        CallToolRequestParams::new("echo")
+            .with_arguments(json!({ "text": text }).as_object().unwrap().clone())
+    };
+    client.call_tool(echo("first")).await.unwrap();
+    tokio::time::sleep(PAUSE).await;
+    // rmcp's client shows the form, retries with the answer and the state,
+    // and gets the result.
+    let ran = client.call_tool(echo("second")).await.unwrap();
+    assert_eq!(ran.structured_content, Some(json!({ "echo": "second" })));
     let asked = person.asked.lock().unwrap().clone();
-    assert_eq!(asked.len(), 1);
-    assert!(asked[0].starts_with(FORM), "{asked:?}");
+    assert_eq!(asked, [PROMPT]);
     client.cancel().await.unwrap();
 
     usage.flush().await;
