@@ -177,11 +177,17 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
 ## Updates
 
-Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap briefly: the new indexer serves its tools at once, but runs jobs only once the old one has stopped.
+Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap: the old revision serves until the new one has applied its migrations and is ready ([Schema upgrades](#schema-upgrades)). The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped.
 
 ### Schema upgrades
 
-Startup applies the migrations a database lacks, and refuses one that changed after it was applied.
+Startup applies the migrations a database lacks, in name order and each in its own transaction, and refuses one that changed after it was applied.
+
+- A migration waits at most 5 s for a lock, unless it sets its own `lock_timeout`, as most do (10 s). Meanwhile, other sessions' requests for the table queue behind it.
+- One that fails rolls back alone, and those before it stay applied. Bootstrap exits, the supervisor runs it again 5 s to 60 s later, and the next attempt starts with the failed migration. After 15 minutes of failed bootstraps, `/healthz` fails ([The container](#the-container)).
+- The log says when each migration is applied, and how long it took. When one times out waiting for a lock, or deadlocks, its error lists the sessions that hold locks on the schema's tables, oldest transaction first: their pid, role, application, how long they have been connected and in their transaction, their state, their query and their locks. Only this log shows them: the `query` tool can't see other roles' sessions.
+- Until every migration is applied, the new revision isn't ready, and the old one serves on the partly migrated schema. So each migration must work with the previous image by itself. One that the previous image can't run on, such as `0019`, which changed the type of a column that images before it read, goes last in its deployment: otherwise, while a later migration waits for a lock, the old revision serves on a schema it can't read. Changes that must commit together go in one file.
+- A migration can't hold statements that can't run in a transaction, such as `CREATE INDEX CONCURRENTLY`. An index on a populated table is built before the deployment, from a reviewed runbook, as [Graph index preparation](#graph-index-preparation) does for the graph's.
 
 | Migration | Adds |
 | --- | --- |

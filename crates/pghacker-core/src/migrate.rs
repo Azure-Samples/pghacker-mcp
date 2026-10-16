@@ -5,6 +5,7 @@
 //! pgh_indexer runs: both on every start, both idempotent.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use include_dir::{Dir, include_dir};
@@ -238,20 +239,81 @@ pub fn migrations() -> Vec<Migration> {
     list
 }
 
-/// Applies the migrations that haven't been, as pgh_indexer, in one
-/// transaction. Returns the versions applied. A migration that changed after
-/// it was applied is an error.
+/// How long a migration waits for a lock, unless it sets its own
+/// `lock_timeout`. While it waits, later requests for the table queue behind
+/// it, and pgh_reader's queries time out after 10 s.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Serializes migrators, such as two deployments' bootstraps.
+const MIGRATOR_LOCK: &str = "SELECT pg_advisory_xact_lock(hashtext('pghacker.migrate'))";
+
+const SEARCH_PATH: &str = "SET LOCAL search_path = pghacker, ag_catalog, public";
+
+/// Applies the migrations that haven't been, as pgh_indexer: in name order,
+/// each in its own transaction. Returns the versions applied.
+///
+/// A migration that changed after it was applied is an error before any
+/// other is applied. A failed migration rolls back alone and stops the run:
+/// those applied before it stay applied, and the next run starts with it.
+/// One that waits longer than its `lock_timeout` for a lock, or deadlocks,
+/// fails at once, and the error lists the sessions that hold locks.
 pub async fn migrate(indexer: &mut Client) -> Result<Vec<String>> {
+    migrate_with(indexer, &migrations(), LOCK_TIMEOUT).await
+}
+
+async fn migrate_with(
+    indexer: &mut Client,
+    migrations: &[Migration],
+    lock_timeout: Duration,
+) -> Result<Vec<String>> {
+    let applied = prepare(indexer, migrations).await?;
+    let mut done = Vec::new();
+    for migration in migrations
+        .iter()
+        .filter(|m| !applied.contains_key(&m.version))
+    {
+        let started = Instant::now();
+        match apply(indexer, migration, lock_timeout).await {
+            Ok(true) => {
+                tracing::info!(
+                    version = %migration.version,
+                    ms = started.elapsed().as_millis() as u64,
+                    "applied a migration"
+                );
+                done.push(migration.version.clone());
+            }
+            // A concurrent migrator applied it first.
+            Ok(false) => {}
+            Err(error) => return Err(failure(indexer, migration, &done, error).await),
+        }
+    }
     let tx = indexer.transaction().await?;
-    tx.batch_execute(
-        "SELECT pg_advisory_xact_lock(hashtext('pghacker.migrate'));
-         SET LOCAL search_path = pghacker, ag_catalog, public;
+    tx.batch_execute(SEARCH_PATH).await?;
+    crate::graph_indexes::check(&tx).await.with_context(|| {
+        format!(
+            "graph indexes are not ready after migrations{}",
+            kept(&done)
+        )
+    })?;
+    tx.commit().await?;
+    Ok(done)
+}
+
+/// Creates the ledger if needed and returns it, after checking that no
+/// applied migration has changed.
+async fn prepare(
+    indexer: &mut Client,
+    migrations: &[Migration],
+) -> Result<HashMap<String, String>> {
+    let tx = indexer.transaction().await?;
+    tx.batch_execute(&format!(
+        "{MIGRATOR_LOCK}; {SEARCH_PATH};
          CREATE TABLE IF NOT EXISTS schema_migrations (
              version    text PRIMARY KEY,
              sha256     text NOT NULL,
              applied_at timestamptz NOT NULL DEFAULT now()
-         );",
-    )
+         );"
+    ))
     .await
     .context("cannot prepare the migrations")?;
     let applied: HashMap<String, String> = tx
@@ -260,33 +322,177 @@ pub async fn migrate(indexer: &mut Client) -> Result<Vec<String>> {
         .into_iter()
         .map(|row| (row.get(0), row.get(1)))
         .collect();
-    let mut done = Vec::new();
-    for migration in migrations() {
-        match applied.get(&migration.version) {
-            Some(sha) if *sha == migration.sha256 => continue,
-            Some(_) => bail!(
-                "migration {} changed after it was applied; reset the local database with \
-                 `npm run db:reset`",
-                migration.version
-            ),
-            None => {
-                tx.batch_execute(migration.sql)
-                    .await
-                    .with_context(|| format!("migration {} failed", migration.version))?;
-                tx.execute(
-                    "INSERT INTO schema_migrations (version, sha256) VALUES ($1, $2)",
-                    &[&migration.version, &migration.sha256],
-                )
-                .await?;
-                done.push(migration.version);
-            }
+    tx.commit().await?;
+    for migration in migrations {
+        if applied
+            .get(&migration.version)
+            .is_some_and(|sha| *sha != migration.sha256)
+        {
+            bail!(changed(migration));
         }
     }
-    crate::graph_indexes::check(&tx)
-        .await
-        .context("graph indexes are not ready after migrations")?;
+    Ok(applied)
+}
+
+/// Applies `migration` in a transaction of its own. False when a concurrent
+/// migrator applied it first.
+async fn apply(
+    indexer: &mut Client,
+    migration: &Migration,
+    lock_timeout: Duration,
+) -> Result<bool> {
+    let tx = indexer.transaction().await?;
+    // The migrator lock first: waiting for another migrator isn't a lock
+    // timeout. The migration may set its own lock_timeout.
+    tx.batch_execute(&format!(
+        "{MIGRATOR_LOCK}; {SEARCH_PATH}; SET LOCAL lock_timeout = {};",
+        lock_timeout.as_millis()
+    ))
+    .await?;
+    let recorded: Option<String> = tx
+        .query_opt(
+            "SELECT sha256 FROM schema_migrations WHERE version = $1",
+            &[&migration.version],
+        )
+        .await?
+        .map(|row| row.get(0));
+    match recorded {
+        Some(sha) if sha == migration.sha256 => return Ok(false),
+        Some(_) => bail!(changed(migration)),
+        None => {}
+    }
+    tx.batch_execute(migration.sql).await?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, sha256) VALUES ($1, $2)",
+        &[&migration.version, &migration.sha256],
+    )
+    .await?;
     tx.commit().await?;
-    Ok(done)
+    Ok(true)
+}
+
+fn changed(migration: &Migration) -> String {
+    format!(
+        "migration {} changed after it was applied; reset the local database with \
+         `npm run db:reset`",
+        migration.version
+    )
+}
+
+/// What a failure leaves applied: the migrations this run applied first.
+fn kept(done: &[String]) -> String {
+    match done {
+        [] => String::new(),
+        [one] => format!("; this run applied {one}, which stays applied"),
+        [first @ .., last] => format!(
+            "; this run applied {} and {last}, which stay applied",
+            first.join(", ")
+        ),
+    }
+}
+
+/// The error of `migration`, which failed after this run applied `done`.
+/// When it waited too long for a lock or deadlocked, the error and the log
+/// name the sessions that hold locks on the schema's tables, oldest first:
+/// the query tool can't see other roles' sessions.
+async fn failure(
+    indexer: &Client,
+    migration: &Migration,
+    done: &[String],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let failed = format!("migration {} failed{}", migration.version, kept(done));
+    let Some(cause) = lock_failure(&error) else {
+        return error.context(failed);
+    };
+    // The failed transaction's rollback is queued ahead of this query.
+    let holders = match lock_holders(indexer).await {
+        Ok(holders) if holders.is_empty() => {
+            "no other session holds a lock on the schema's tables now".to_owned()
+        }
+        Ok(holders) => format!(
+            "sessions holding locks on the schema's tables, oldest transaction first: {}",
+            holders.join("; ")
+        ),
+        Err(snapshot) => format!("cannot list the sessions holding locks: {snapshot:#}"),
+    };
+    tracing::warn!(version = %migration.version, cause, %holders, "a migration failed on a lock");
+    error
+        .context(format!("it {cause}; {holders}"))
+        .context(failed)
+}
+
+/// What kind of lock failure `error` is, if it is one.
+fn lock_failure(error: &anyhow::Error) -> Option<&'static str> {
+    let code = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<tokio_postgres::Error>())
+        .and_then(tokio_postgres::Error::code)?;
+    if *code == SqlState::LOCK_NOT_AVAILABLE {
+        Some("timed out waiting for a lock")
+    } else if *code == SqlState::T_R_DEADLOCK_DETECTED {
+        Some("deadlocked")
+    } else {
+        None
+    }
+}
+
+/// The other sessions that hold locks on tables of the schemas migrations
+/// change, oldest transaction first, at most 10. pgh_indexer sees all of its
+/// own role's sessions; of other roles', only their pid, role, application
+/// and locks.
+async fn lock_holders(client: &Client) -> Result<Vec<String>> {
+    let rows = client
+        .query(
+            "SELECT a.pid, a.usename::text, nullif(a.application_name, ''),
+                    date_trunc('second', now() - a.backend_start)::text,
+                    date_trunc('second', now() - a.xact_start)::text,
+                    a.state, a.wait_event_type || ':' || a.wait_event,
+                    left(regexp_replace(a.query, '\\s+', ' ', 'g'), 200),
+                    string_agg(format('%I.%I %s', n.nspname, c.relname, l.mode), ', '
+                               ORDER BY n.nspname, c.relname, l.mode)
+             FROM pg_locks l
+             JOIN pg_class c ON c.oid = l.relation
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_stat_activity a ON a.pid = l.pid
+             WHERE l.locktype = 'relation' AND l.granted AND l.pid <> pg_backend_pid()
+               AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND c.relkind IN ('r', 'p', 'm')
+               AND n.nspname IN ('pghacker', 'pghacker_graph', 'ag_catalog', 'public')
+             GROUP BY a.pid, a.usename, a.application_name, a.backend_start, a.xact_start,
+                      a.state, a.wait_event_type, a.wait_event, a.query
+             ORDER BY a.xact_start NULLS LAST, a.pid
+             LIMIT 10",
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let field = |index: usize, label: &str| {
+                row.get::<_, Option<String>>(index)
+                    .map(|value| format!("{label}{value}"))
+            };
+            let about: Vec<String> = [
+                field(1, ""),
+                field(2, ""),
+                field(3, "connected for "),
+                field(4, "in its transaction for "),
+                field(5, ""),
+                field(6, "waiting on "),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            let pid: i32 = row.get(0);
+            let mut holder = format!("pid {pid} ({})", about.join(", "));
+            if let Some(query) = row.get::<_, Option<String>>(7) {
+                holder.push_str(&format!(", running {query:?}"));
+            }
+            let locks: String = row.get(8);
+            format!("{holder}, holds {locks}")
+        })
+        .collect())
 }
 
 /// Drops schema pghacker and the graph, for a fresh local start. The
@@ -309,6 +515,11 @@ pub async fn reset(admin: &Client) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{Migration, checksum, migrate_with};
+    use crate::{db, testing::TestDb};
+
     #[tokio::test]
     async fn a_new_registry_label_is_indexed_atomically() {
         let db = crate::testing::TestDb::create().await.unwrap();
@@ -382,5 +593,258 @@ mod tests {
             // Only a header at the start is left out.
             assert_ne!(super::checksum(&format!("{body}{header}")), plain);
         }
+    }
+
+    /// The lock timeout of most tests: short, as nothing should wait.
+    const SHORT: Duration = Duration::from_millis(200);
+
+    fn migration(version: &str, sql: &'static str) -> Migration {
+        Migration {
+            version: version.to_owned(),
+            sql,
+            sha256: checksum(sql),
+        }
+    }
+
+    /// The test migrations applied, which the real ones' names sort before.
+    async fn applied(client: &tokio_postgres::Client) -> Vec<String> {
+        client
+            .query(
+                "SELECT version FROM schema_migrations WHERE version LIKE '9%' ORDER BY version",
+                &[],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_failed_migration_keeps_those_before_it() {
+        let db = TestDb::create().await.unwrap();
+        let mut indexer = db.indexer().await.unwrap();
+        let failing = [
+            migration("9001_test_first", "CREATE TABLE test_first (id int)"),
+            migration("9002_test_second", "SELECT 1 / 0"),
+            migration("9003_test_third", "CREATE TABLE test_third (id int)"),
+        ];
+        let error = migrate_with(&mut indexer, &failing, SHORT)
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.starts_with(
+                "migration 9002_test_second failed; this run applied 9001_test_first, \
+                 which stays applied: "
+            ),
+            "{message}"
+        );
+        assert!(message.contains("division by zero"), "{message}");
+        assert_eq!(applied(&indexer).await, ["9001_test_first"]);
+        let third: Option<String> = indexer
+            .query_one("SELECT to_regclass('test_third')::text", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(third, None);
+
+        let fixed = [
+            migration("9001_test_first", "CREATE TABLE test_first (id int)"),
+            migration("9002_test_second", "CREATE TABLE test_second (id int)"),
+            migration("9003_test_third", "CREATE TABLE test_third (id int)"),
+        ];
+        assert_eq!(
+            migrate_with(&mut indexer, &fixed, SHORT).await.unwrap(),
+            ["9002_test_second", "9003_test_third"]
+        );
+    }
+
+    /// Two tables, and a session that holds the second in ACCESS SHARE until
+    /// its transaction ends: as an old revision's long query would.
+    async fn blocked(db: &TestDb) -> tokio_postgres::Client {
+        db.indexer()
+            .await
+            .unwrap()
+            .batch_execute("CREATE TABLE test_one (id int); CREATE TABLE test_two (id int);")
+            .await
+            .unwrap();
+        let blocker = db::connect(&db.indexer_url, "pghacker-test blocker")
+            .await
+            .unwrap();
+        blocker
+            .batch_execute("BEGIN; LOCK TABLE test_two IN ACCESS SHARE MODE;")
+            .await
+            .unwrap();
+        blocker
+    }
+
+    fn alter_both() -> [Migration; 2] {
+        [
+            migration("9001_test_one", "ALTER TABLE test_one ADD COLUMN x int"),
+            migration("9002_test_two", "ALTER TABLE test_two ADD COLUMN x int"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_lock_timeout_fails_at_once_and_names_the_holders() {
+        let db = TestDb::create().await.unwrap();
+        let blocker = blocked(&db).await;
+        let mut indexer = db.indexer().await.unwrap();
+        let started = Instant::now();
+        let error = migrate_with(&mut indexer, &alter_both(), SHORT)
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let message = format!("{error:#}");
+        for expected in [
+            "migration 9002_test_two failed; this run applied 9001_test_one, which stays applied: ",
+            "it timed out waiting for a lock; sessions holding locks",
+            "(pgh_indexer, pghacker-test blocker, connected for ",
+            "idle in transaction",
+            "LOCK TABLE test_two IN ACCESS SHARE MODE",
+            "holds pghacker.test_two AccessShareLock",
+            "lock timeout",
+        ] {
+            assert!(message.contains(expected), "{expected}: {message}");
+        }
+        assert_eq!(applied(&indexer).await, ["9001_test_one"]);
+        blocker.batch_execute("ROLLBACK").await.unwrap();
+        assert_eq!(
+            migrate_with(&mut indexer, &alter_both(), SHORT)
+                .await
+                .unwrap(),
+            ["9002_test_two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waiting_migration_holds_only_its_own_locks() {
+        let db = TestDb::create().await.unwrap();
+        let blocker = blocked(&db).await;
+        let mut indexer = db.indexer().await.unwrap();
+        let migrating = tokio::spawn(async move {
+            migrate_with(&mut indexer, &alter_both(), Duration::from_secs(30)).await
+        });
+        let observer = db.indexer().await.unwrap();
+        let mut waiting = false;
+        for _ in 0..200 {
+            waiting = observer
+                .query_one(
+                    "SELECT EXISTS (SELECT FROM pg_locks
+                                    WHERE NOT granted AND relation = 'test_two'::regclass)",
+                    &[],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(waiting, "9002 never waited for test_two");
+        assert_eq!(applied(&observer).await, ["9001_test_one"]);
+        // 9001 committed, so test_one is free while 9002 waits.
+        observer
+            .batch_execute("BEGIN; LOCK TABLE test_one IN ACCESS EXCLUSIVE MODE NOWAIT; ROLLBACK;")
+            .await
+            .unwrap();
+        blocker.batch_execute("ROLLBACK").await.unwrap();
+        assert_eq!(
+            migrating.await.unwrap().unwrap(),
+            ["9001_test_one", "9002_test_two"]
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_migrators_apply_each_migration_once() {
+        const SQL: [&str; 6] = [
+            "CREATE TABLE test_c1 (id int)",
+            "CREATE TABLE test_c2 (id int)",
+            "CREATE TABLE test_c3 (id int)",
+            "CREATE TABLE test_c4 (id int)",
+            "CREATE TABLE test_c5 (id int)",
+            "CREATE TABLE test_c6 (id int)",
+        ];
+        let list = || -> Vec<Migration> {
+            SQL.into_iter()
+                .enumerate()
+                .map(|(n, sql)| migration(&format!("900{}_test_concurrent", n + 1), sql))
+                .collect()
+        };
+        let db = TestDb::create().await.unwrap();
+        let (mut a, mut b) = (db.indexer().await.unwrap(), db.indexer().await.unwrap());
+        let (list_a, list_b) = (list(), list());
+        let (by_a, by_b) = tokio::join!(
+            migrate_with(&mut a, &list_a, SHORT),
+            migrate_with(&mut b, &list_b, SHORT)
+        );
+        let mut both = by_a.unwrap();
+        both.extend(by_b.unwrap());
+        both.sort();
+        let all: Vec<String> = list_a.into_iter().map(|m| m.version).collect();
+        assert_eq!(both, all);
+        assert_eq!(applied(&a).await, all);
+    }
+
+    #[tokio::test]
+    async fn a_changed_migration_is_refused_before_any_is_applied() {
+        let db = TestDb::create().await.unwrap();
+        let mut indexer = db.indexer().await.unwrap();
+        migrate_with(
+            &mut indexer,
+            &[migration(
+                "9002_test_changed",
+                "CREATE TABLE test_changed (id int)",
+            )],
+            SHORT,
+        )
+        .await
+        .unwrap();
+        let changed = [
+            migration("9001_test_pending", "CREATE TABLE test_pending (id int)"),
+            migration("9002_test_changed", "CREATE TABLE test_changed (id bigint)"),
+        ];
+        let error = migrate_with(&mut indexer, &changed, SHORT)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("migration 9002_test_changed changed after it was applied"),
+            "{error:#}"
+        );
+        assert_eq!(applied(&indexer).await, ["9002_test_changed"]);
+    }
+
+    #[tokio::test]
+    async fn unready_graph_indexes_fail_the_run_but_keep_its_migrations() {
+        let db = TestDb::create().await.unwrap();
+        db.admin()
+            .await
+            .unwrap()
+            .batch_execute("DROP INDEX pghacker_graph.\"MENTIONS_id_idx\"")
+            .await
+            .unwrap();
+        let mut indexer = db.indexer().await.unwrap();
+        let error = migrate_with(
+            &mut indexer,
+            &[migration(
+                "9001_test_kept",
+                "CREATE TABLE test_kept (id int)",
+            )],
+            SHORT,
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.starts_with(
+                "graph indexes are not ready after migrations; this run applied 9001_test_kept, \
+                 which stays applied: "
+            ),
+            "{message}"
+        );
+        assert_eq!(applied(&indexer).await, ["9001_test_kept"]);
     }
 }
