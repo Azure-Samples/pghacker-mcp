@@ -79,7 +79,8 @@ impl Tools for Echo {
 const ID_KEY: &[u8] = b"test-usage-id-key-0123456789abcdef";
 /// The address of a client that names none, such as rmcp's.
 const CLIENT: &str = "203.0.113.9";
-const PROMPT: &str = "pghacker-mcp asks: was the last answer that used it helpful?";
+/// The form's message: none, as the rating's title asks the question.
+const PROMPT: &str = "";
 /// A gap that starts a question: over the tests' question gap, and under
 /// their session gap.
 const PAUSE: Duration = Duration::from_millis(250);

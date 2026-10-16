@@ -7,8 +7,9 @@
 //! hold every text to a few rules: no pressure, and nothing that reads as an
 //! instruction.
 
-/// The form's message.
-pub const PROMPT: &str = "pghacker-mcp asks: was the last answer that used it helpful?";
+/// The form's message: none. The rating's title asks the question, and the
+/// client names the server.
+pub const PROMPT: &str = "";
 
 /// The rating's field: its title, and its choices.
 pub const RATING_TITLE: &str = "Was the last answer helpful?";
@@ -78,11 +79,8 @@ mod tests {
     }
 
     #[test]
-    fn the_form_names_the_server_and_asks_one_question() {
-        assert_eq!(
-            PROMPT,
-            "pghacker-mcp asks: was the last answer that used it helpful?"
-        );
+    fn the_form_asks_one_question() {
+        assert_eq!(PROMPT, "");
         assert_eq!(RATING_TITLE, "Was the last answer helpful?");
         assert_eq!(
             [HELPFUL, NOT_HELPFUL, SKIP],

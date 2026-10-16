@@ -147,10 +147,7 @@ mod tests {
         assert_eq!(request["method"], "elicitation/create");
         let params = &request["params"];
         assert_eq!(params["mode"], "form");
-        assert_eq!(
-            params["message"],
-            "pghacker-mcp asks: was the last answer that used it helpful?"
-        );
+        assert_eq!(params["message"], "");
         let schema = &params["requestedSchema"];
         assert_eq!(schema["required"], json!(["rating"]));
         assert_eq!(
