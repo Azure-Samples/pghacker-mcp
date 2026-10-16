@@ -126,8 +126,12 @@ locals {
     var.usage_enabled ? { APPLICATIONINSIGHTS_CONNECTION_STRING = nonsensitive(azurerm_application_insights.usage[0].connection_string) } : {},
     # Feedback records with usage telemetry, so it goes with it.
     var.usage_enabled ? {
-      PGHACKER_FEEDBACK_RATE     = tostring(var.feedback_rate_per_hour)
-      PGHACKER_FEEDBACK_COMMENTS = tostring(var.feedback_comments_enabled)
+      PGHACKER_FEEDBACK_RATE          = tostring(var.feedback_rate_per_hour)
+      PGHACKER_FEEDBACK_COMMENTS      = tostring(var.feedback_comments_enabled)
+      PGHACKER_FEEDBACK_QUESTION_GAP  = tostring(var.feedback_question_gap_seconds)
+      PGHACKER_FEEDBACK_SESSION_GAP   = tostring(var.feedback_session_gap_seconds)
+      PGHACKER_FEEDBACK_MIN_QUESTIONS = tostring(var.feedback_min_questions)
+      PGHACKER_FEEDBACK_CLIENTS       = join(",", var.feedback_clients)
     } : {},
     var.app_env,
   )

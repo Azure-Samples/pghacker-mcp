@@ -116,8 +116,12 @@ run "usage_is_recorded_by_default" {
       {
         for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
         } == {
-        PGHACKER_FEEDBACK_RATE     = "0.1"
-        PGHACKER_FEEDBACK_COMMENTS = "false"
+        PGHACKER_FEEDBACK_RATE          = "0.1"
+        PGHACKER_FEEDBACK_COMMENTS      = "false"
+        PGHACKER_FEEDBACK_QUESTION_GAP  = "180"
+        PGHACKER_FEEDBACK_SESSION_GAP   = "600"
+        PGHACKER_FEEDBACK_MIN_QUESTIONS = "5"
+        PGHACKER_FEEDBACK_CLIENTS       = "copilot-cli,codex-mcp-client,Visual Studio Code,Visual Studio Code - Insiders,claude-code,claude-ai,cursor-vscode"
       }
       && !anytrue(flatten([
         for job in azurerm_container_app_job.this : [
@@ -125,24 +129,32 @@ run "usage_is_recorded_by_default" {
         ]
       ]))
     )
-    error_message = "By default the app, and not the jobs, must ask for feedback in one client-hour in ten, without comments."
+    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after five questions, at a question 3 to 10 minutes after the last call, without comments."
   }
 }
 
 run "feedback_is_set_with_its_variables" {
   variables {
-    feedback_rate_per_hour    = 0
-    feedback_comments_enabled = true
+    feedback_rate_per_hour        = 0
+    feedback_comments_enabled     = true
+    feedback_question_gap_seconds = 120
+    feedback_session_gap_seconds  = 900
+    feedback_min_questions        = 0
+    feedback_clients              = ["copilot-cli"]
   }
 
   assert {
     condition = {
       for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
       } == {
-      PGHACKER_FEEDBACK_RATE     = "0"
-      PGHACKER_FEEDBACK_COMMENTS = "true"
+      PGHACKER_FEEDBACK_RATE          = "0"
+      PGHACKER_FEEDBACK_COMMENTS      = "true"
+      PGHACKER_FEEDBACK_QUESTION_GAP  = "120"
+      PGHACKER_FEEDBACK_SESSION_GAP   = "900"
+      PGHACKER_FEEDBACK_MIN_QUESTIONS = "0"
+      PGHACKER_FEEDBACK_CLIENTS       = "copilot-cli"
     }
-    error_message = "The app must get the feedback rate and comments setting as configured; a rate of 0 turns feedback off."
+    error_message = "The app must get the feedback settings as configured; a rate of 0 turns feedback off."
   }
 }
 
@@ -165,7 +177,7 @@ run "usage_can_be_turned_off" {
 
   assert {
     condition = (
-      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_FEEDBACK_RATE", "PGHACKER_FEEDBACK_COMMENTS"], env.name)])
+      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
       && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
     )
     error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."
@@ -213,11 +225,72 @@ run "feedback_rate_is_a_chance" {
   expect_failures = [var.feedback_rate_per_hour]
 }
 
+run "feedback_question_gap_is_whole_seconds_from_one" {
+  command = plan
+
+  variables {
+    feedback_question_gap_seconds = 0
+  }
+
+  expect_failures = [var.feedback_question_gap_seconds]
+}
+
+run "feedback_session_gap_is_longer_than_the_question_gap" {
+  command = plan
+
+  variables {
+    feedback_question_gap_seconds = 300
+    feedback_session_gap_seconds  = 300
+  }
+
+  expect_failures = [var.feedback_session_gap_seconds]
+}
+
+run "feedback_min_questions_is_at_most_a_hundred" {
+  command = plan
+
+  variables {
+    feedback_min_questions = 101
+  }
+
+  expect_failures = [var.feedback_min_questions]
+}
+
+run "feedback_clients_name_at_least_one_app" {
+  command = plan
+
+  variables {
+    feedback_clients = []
+  }
+
+  expect_failures = [var.feedback_clients]
+}
+
+run "feedback_clients_have_no_commas" {
+  command = plan
+
+  variables {
+    feedback_clients = ["copilot-cli,codex-mcp-client"]
+  }
+
+  expect_failures = [var.feedback_clients]
+}
+
 run "app_env_cannot_replace_the_feedback_settings" {
   command = plan
 
   variables {
     app_env = { PGHACKER_FEEDBACK_RATE = "1" }
+  }
+
+  expect_failures = [var.app_env]
+}
+
+run "app_env_cannot_replace_the_feedback_clients" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_FEEDBACK_CLIENTS = "mcp" }
   }
 
   expect_failures = [var.app_env]

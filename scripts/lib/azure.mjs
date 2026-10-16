@@ -100,6 +100,30 @@ function list(env, name) {
   return (value(env, name) ?? "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+/**
+ * Feedback's settings: the chance that an address's hour of use brings a
+ * request for it, whether the form takes a comment, the pauses (seconds) over
+ * which a call starts a question and under which a session stays active, the
+ * questions before the first ask, and the apps asked, pghacker-mcp's own list
+ * when unset.
+ */
+function feedbackSettings(env) {
+  const questionGap = integer(env, "PGHACKER_FEEDBACK_QUESTION_GAP", 180, { min: 1, max: 3600 });
+  const sessionGap = integer(env, "PGHACKER_FEEDBACK_SESSION_GAP", 600, { min: 2, max: 86_400 });
+  if (sessionGap <= questionGap) {
+    throw new Error("PGHACKER_FEEDBACK_SESSION_GAP must be more than PGHACKER_FEEDBACK_QUESTION_GAP.");
+  }
+  const clients = list(env, "PGHACKER_FEEDBACK_CLIENTS");
+  return {
+    rate: fraction(env, "PGHACKER_FEEDBACK_RATE", 0),
+    comments: flag(env, "PGHACKER_FEEDBACK_COMMENTS", false),
+    questionGap,
+    sessionGap,
+    minQuestions: integer(env, "PGHACKER_FEEDBACK_MIN_QUESTIONS", 5, { min: 0, max: 100 }),
+    ...(clients.length > 0 ? { clients } : {}),
+  };
+}
+
 function httpsOrigin(env, name) {
   const url = new URL(value(env, name));
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search) {
@@ -158,12 +182,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     }
     usage = { ...parseConnectionString(connectionString), idKey, revision: value(env, "CONTAINER_APP_REVISION") };
   }
-  // Feedback, which records with usage telemetry, so only with it: the
-  // chance that a client's hour of use brings a request for it, and whether
-  // the form takes a comment.
-  const feedback = usage
-    ? { rate: fraction(env, "PGHACKER_FEEDBACK_RATE", 0), comments: flag(env, "PGHACKER_FEEDBACK_COMMENTS", false) }
-    : undefined;
+  // Feedback, which records with usage telemetry, so only with it.
+  const feedback = usage ? feedbackSettings(env) : undefined;
   return {
     root,
     dataDir,
@@ -423,6 +443,10 @@ export function processEnvironments(config) {
         ? {
           PGHACKER_FEEDBACK_RATE: String(config.feedback.rate),
           PGHACKER_FEEDBACK_COMMENTS: String(config.feedback.comments),
+          PGHACKER_FEEDBACK_QUESTION_GAP: String(config.feedback.questionGap),
+          PGHACKER_FEEDBACK_SESSION_GAP: String(config.feedback.sessionGap),
+          PGHACKER_FEEDBACK_MIN_QUESTIONS: String(config.feedback.minQuestions),
+          ...(config.feedback.clients ? { PGHACKER_FEEDBACK_CLIENTS: config.feedback.clients.join(",") } : {}),
         }
         : {}),
     };

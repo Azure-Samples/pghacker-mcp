@@ -232,13 +232,40 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     const environments = processEnvironments(readAzureConfig(env));
     return Object.entries(environments)
       .filter(([, processEnv]) => Object.keys(processEnv).some((key) => key.startsWith("PGHACKER_FEEDBACK_")))
-      .map(([name, processEnv]) => [name, processEnv.PGHACKER_FEEDBACK_RATE, processEnv.PGHACKER_FEEDBACK_COMMENTS]);
+      .map(([name, processEnv]) => [
+        name,
+        Object.fromEntries(Object.entries(processEnv).filter(([key]) => key.startsWith("PGHACKER_FEEDBACK_"))),
+      ]);
+  };
+  const defaults = {
+    PGHACKER_FEEDBACK_COMMENTS: "false",
+    PGHACKER_FEEDBACK_QUESTION_GAP: "180",
+    PGHACKER_FEEDBACK_SESSION_GAP: "600",
+    PGHACKER_FEEDBACK_MIN_QUESTIONS: "5",
   };
   const withFeedback = { ...USAGE_ENV, PGHACKER_FEEDBACK_RATE: "0.1", PGHACKER_FEEDBACK_COMMENTS: "false" };
-  assert.deepEqual(settings(withFeedback), [["mcp", "0.1", "false"]]);
-  assert.deepEqual(readAzureConfig(withFeedback).feedback, { rate: 0.1, comments: false });
+  assert.deepEqual(settings(withFeedback), [["mcp", { PGHACKER_FEEDBACK_RATE: "0.1", ...defaults }]]);
+  assert.deepEqual(readAzureConfig(withFeedback).feedback, {
+    rate: 0.1, comments: false, questionGap: 180, sessionGap: 600, minQuestions: 5,
+  });
+  // As Terraform sets them all.
+  const all = {
+    ...withFeedback,
+    PGHACKER_FEEDBACK_QUESTION_GAP: "120",
+    PGHACKER_FEEDBACK_SESSION_GAP: "900",
+    PGHACKER_FEEDBACK_MIN_QUESTIONS: "0",
+    PGHACKER_FEEDBACK_CLIENTS: "copilot-cli,Visual Studio Code",
+  };
+  assert.deepEqual(settings(all), [["mcp", {
+    PGHACKER_FEEDBACK_RATE: "0.1",
+    PGHACKER_FEEDBACK_COMMENTS: "false",
+    PGHACKER_FEEDBACK_QUESTION_GAP: "120",
+    PGHACKER_FEEDBACK_SESSION_GAP: "900",
+    PGHACKER_FEEDBACK_MIN_QUESTIONS: "0",
+    PGHACKER_FEEDBACK_CLIENTS: "copilot-cli,Visual Studio Code",
+  }]]);
   // Unset, off; without usage telemetry, nothing at all.
-  assert.deepEqual(settings(USAGE_ENV), [["mcp", "0", "false"]]);
+  assert.deepEqual(settings(USAGE_ENV), [["mcp", { PGHACKER_FEEDBACK_RATE: "0", ...defaults }]]);
   assert.deepEqual(settings({ ...ENV, PGHACKER_FEEDBACK_RATE: "0.1" }), []);
   assert.equal(readAzureConfig({ ...ENV, PGHACKER_FEEDBACK_RATE: "0.1" }).feedback, undefined);
   for (const rate of ["1.5", "-0.1", "ten percent"]) {
@@ -248,6 +275,14 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     () => readAzureConfig({ ...USAGE_ENV, PGHACKER_FEEDBACK_COMMENTS: "yes" }),
     /PGHACKER_FEEDBACK_COMMENTS must be true or false/,
   );
+  for (const [name, bad, error] of [
+    ["PGHACKER_FEEDBACK_QUESTION_GAP", "0", /PGHACKER_FEEDBACK_QUESTION_GAP must be an integer from 1 to 3600/],
+    ["PGHACKER_FEEDBACK_SESSION_GAP", "180", /PGHACKER_FEEDBACK_SESSION_GAP must be more than PGHACKER_FEEDBACK_QUESTION_GAP/],
+    ["PGHACKER_FEEDBACK_MIN_QUESTIONS", "101", /PGHACKER_FEEDBACK_MIN_QUESTIONS must be an integer from 0 to 100/],
+    ["PGHACKER_FEEDBACK_MIN_QUESTIONS", "2.5", /PGHACKER_FEEDBACK_MIN_QUESTIONS must be an integer/],
+  ]) {
+    assert.throws(() => readAzureConfig({ ...USAGE_ENV, [name]: bad }), error, `${name}=${bad}`);
+  }
 });
 
 test("oauth2-proxy signs in the team for the portal, passes /mcp and the home page through, and gets no secret in its arguments", () => {

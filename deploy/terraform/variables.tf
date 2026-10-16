@@ -588,8 +588,12 @@ variable "app_env" {
       "PGHACKER_DB_PORT",
       "PGHACKER_DB_SSLMODE",
       "PGHACKER_DEPLOYMENT",
+      "PGHACKER_FEEDBACK_CLIENTS",
       "PGHACKER_FEEDBACK_COMMENTS",
+      "PGHACKER_FEEDBACK_MIN_QUESTIONS",
+      "PGHACKER_FEEDBACK_QUESTION_GAP",
       "PGHACKER_FEEDBACK_RATE",
+      "PGHACKER_FEEDBACK_SESSION_GAP",
       "PGHACKER_FOUNDRY_EMBEDDING",
       "PGHACKER_FOUNDRY_ENDPOINT",
       "PGHACKER_FOUNDRY_LUNA",
@@ -684,7 +688,7 @@ variable "usage_total_retention_days" {
 }
 
 variable "feedback_rate_per_hour" {
-  description = "The chance, from 0 to 1, that a client's hour of use of the public MCP endpoint brings one request for feedback, \"Was this answer helpful?\", which the client's own prompt shows after an answer (PGHACKER_FEEDBACK_RATE; PRIVACY.md). Only clients that declare form elicitation, under MCP 2026-07-28, are asked. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
+  description = "The chance, from 0 to 1, that an address's hour of use of the public MCP endpoint brings one request for feedback, \"Was the last answer helpful?\", which an interactive client's own form shows as the user's next question starts (PGHACKER_FEEDBACK_RATE; PRIVACY.md). Only the apps in feedback_clients that declare form elicitation, under MCP 2026-07-28, are asked, after feedback_min_questions questions and only in an active session. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
   type        = number
   default     = 0.1
   nullable    = false
@@ -696,8 +700,56 @@ variable "feedback_rate_per_hour" {
 }
 
 variable "feedback_comments_enabled" {
-  description = "Whether the feedback prompt also takes an optional comment of up to 500 characters, recorded with the rating (PGHACKER_FEEDBACK_COMMENTS). Off by default: a comment is free text, which can hold personal data; update PRIVACY.md before turning it on."
+  description = "Whether the feedback form also takes an optional comment of up to 500 characters, recorded with the rating (PGHACKER_FEEDBACK_COMMENTS). Off by default: a comment is free text, which can hold personal data; update PRIVACY.md before turning it on."
   type        = bool
   default     = false
   nullable    = false
+}
+
+variable "feedback_question_gap_seconds" {
+  description = "A pause between a client's tool calls longer than this, in seconds, starts a new question, whose first call feedback may hold for its form (PGHACKER_FEEDBACK_QUESTION_GAP)."
+  type        = number
+  default     = 180
+  nullable    = false
+
+  validation {
+    condition     = var.feedback_question_gap_seconds >= 1 && var.feedback_question_gap_seconds <= 3600 && floor(var.feedback_question_gap_seconds) == var.feedback_question_gap_seconds
+    error_message = "feedback_question_gap_seconds must be a whole number from 1 to 3600."
+  }
+}
+
+variable "feedback_session_gap_seconds" {
+  description = "A pause between a client's tool calls shorter than this, in seconds, keeps its session active. Feedback asks only as a question starts in an active session (PGHACKER_FEEDBACK_SESSION_GAP)."
+  type        = number
+  default     = 600
+  nullable    = false
+
+  validation {
+    condition     = var.feedback_session_gap_seconds > var.feedback_question_gap_seconds && var.feedback_session_gap_seconds <= 86400 && floor(var.feedback_session_gap_seconds) == var.feedback_session_gap_seconds
+    error_message = "feedback_session_gap_seconds must be a whole number more than feedback_question_gap_seconds and at most 86400."
+  }
+}
+
+variable "feedback_min_questions" {
+  description = "The questions a client asks before feedback can ask it, 0 to 100 (PGHACKER_FEEDBACK_MIN_QUESTIONS): the first ask can come as the next question starts."
+  type        = number
+  default     = 5
+  nullable    = false
+
+  validation {
+    condition     = var.feedback_min_questions >= 0 && var.feedback_min_questions <= 100 && floor(var.feedback_min_questions) == var.feedback_min_questions
+    error_message = "feedback_min_questions must be a whole number from 0 to 100."
+  }
+}
+
+variable "feedback_clients" {
+  description = "The interactive apps feedback can ask, by the name their MCP requests give (clientInfo.name), matched ignoring case (PGHACKER_FEEDBACK_CLIENTS): Copilot CLI and the GitHub Copilot app, Codex CLI, VS Code, Claude Code, the Claude app and Cursor. Scripts, agents and other apps are never asked."
+  type        = list(string)
+  default     = ["copilot-cli", "codex-mcp-client", "Visual Studio Code", "Visual Studio Code - Insiders", "claude-code", "claude-ai", "cursor-vscode"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.feedback_clients) > 0 && alltrue([for name in var.feedback_clients : trimspace(name) != "" && !strcontains(name, ",")])
+    error_message = "feedback_clients must name at least one app, with no blank name and no comma in a name; to ask none, set feedback_rate_per_hour = 0."
+  }
 }
