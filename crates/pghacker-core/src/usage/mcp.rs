@@ -89,6 +89,12 @@ pub(crate) fn succeeded(event: &mut Event, output: &Output) {
     shape(event, output);
 }
 
+/// A call answered with a request for the user's input (MCP's multi
+/// round-trip requests): the client asks the user and calls again.
+pub(crate) fn input_required(event: &mut Event) {
+    event.property("activityStatus", "InputRequired");
+}
+
 /// A call that failed: `error_type`, such as `ToolError`, and its message.
 pub(crate) fn failed(event: &mut Event, error_type: &str, message: &str) {
     event

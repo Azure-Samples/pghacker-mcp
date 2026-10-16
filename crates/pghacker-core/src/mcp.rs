@@ -13,11 +13,13 @@
 //! A request that the endpoint's usage middleware gave a [`Scope`]
 //! (`crate::usage`) is recorded: its initialize, discover, tools/list or
 //! tool call, with the call's arguments, outcome and result's shape, and its
-//! reads of the skills ([`McpServer::with_skills`]).
+//! reads of the skills ([`McpServer::with_skills`]). With feedback
+//! ([`McpServer::with_feedback`]), a sampled result gets a note, and
+//! `user_feedback` asks the user through the client's prompt.
 
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -31,9 +33,9 @@ use rmcp::handler::server::common::schema_for_type;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
     CustomResult, DiscoverResult, ErrorCode, Implementation, InitializeRequestParams,
-    InitializeResult, JsonObject, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    ResourceContents, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
+    InitializeResult, InputResponses, JsonObject, ListResourcesResult, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ResourceContents, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -45,6 +47,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::calls::abandonable;
+use crate::feedback::{self, Caller, Feedback, Reply};
 use crate::skills::{self, Skills};
 use crate::usage::{self, Scope};
 
@@ -138,6 +141,7 @@ pub struct McpServer<T> {
     list: Arc<Vec<Tool>>,
     info: Arc<ServerConfig>,
     skills: Skills,
+    feedback: Feedback,
     cancel_on_disconnect: bool,
 }
 
@@ -152,8 +156,31 @@ impl<T: Tools> McpServer<T> {
             list: Arc::new(list),
             info: Arc::new(info),
             skills: Skills::default(),
+            feedback: Feedback::off(),
             cancel_on_disconnect: false,
         }
+    }
+
+    /// Asks for feedback now and then ([`crate::feedback`]): tools/list adds
+    /// `user_feedback`, the instructions say how to use it, and a sampled
+    /// result gets a note with a feedback id. With feedback off, nothing
+    /// changes. Only for a listener whose answers people read: not the
+    /// internal one, whose clients are agents.
+    pub fn with_feedback(mut self, feedback: Feedback) -> Self {
+        let Some(tool) = feedback.tool() else {
+            return self;
+        };
+        let mut list = (*self.list).clone();
+        list.push(tool);
+        self.list = Arc::new(list);
+        let mut info = (*self.info).clone();
+        info.instructions = Some(match info.instructions.take() {
+            Some(instructions) => format!("{instructions}\n\n{}", feedback::INSTRUCTIONS),
+            None => feedback::INSTRUCTIONS.to_owned(),
+        });
+        self.info = Arc::new(info);
+        self.feedback = feedback;
+        self
     }
 
     /// Serves `skills` as the skills extension (SEP-2640) defines: the
@@ -260,14 +287,23 @@ impl<T: Tools> ServerHandler for McpServer<T> {
     ) -> Result<CallToolResponse, ErrorData> {
         let name = request.name.to_string();
         let arguments = request.arguments.unwrap_or_default();
+        let scope = usage_scope(&context);
         // The call's usage event, if the endpoint records usage.
-        let usage = usage_scope(&context).map(|scope| {
+        let usage = scope.clone().map(|scope| {
             let mut event = scope.event("McpToolCall", &name);
             event.property("toolName", &name);
             request_client(&mut event, &context);
             usage::mcp::arguments(&mut event, &arguments);
             (scope, event)
         });
+        if name == feedback::TOOL && self.feedback.is_on() {
+            return self.answer_feedback(
+                arguments,
+                request.input_responses.as_ref(),
+                &context,
+                usage,
+            );
+        }
         if !self.tools.specs().iter().any(|spec| spec.name == name) {
             let error = ErrorData::invalid_params(format!("unknown tool {name}"), None);
             if let Some((scope, mut event)) = usage {
@@ -320,7 +356,7 @@ impl<T: Tools> ServerHandler for McpServer<T> {
             }
             scope.record(event);
         }
-        let result = match outcome {
+        let mut result = match outcome {
             Ok(Output::Json(value)) => {
                 tracing::info!(tool = %name, ms, "tool call");
                 CallToolResult::structured(value)
@@ -338,6 +374,9 @@ impl<T: Tools> ServerHandler for McpServer<T> {
                 return Err(error);
             }
         };
+        if result.is_error != Some(true) {
+            self.offer_feedback(&mut result, &name, &context, scope.as_ref());
+        }
         Ok(result.into())
     }
 
@@ -442,6 +481,119 @@ impl<T: Tools> ServerHandler for McpServer<T> {
 const URI_CHARS: usize = 1024;
 
 impl<T> McpServer<T> {
+    /// After a successful result, now and then, the note asking for
+    /// feedback, and its event.
+    fn offer_feedback(
+        &self,
+        result: &mut CallToolResult,
+        tool: &str,
+        context: &RequestContext<RoleServer>,
+        scope: Option<&Scope>,
+    ) {
+        if !self.feedback.is_on() {
+            return;
+        }
+        let caller = caller(context, scope);
+        let Some(offer) = self.feedback.offer(&caller, SystemTime::now()) else {
+            return;
+        };
+        result.content.push(offer.note);
+        if let Some(scope) = scope {
+            let mut event = scope.event("McpFeedbackOffered", tool);
+            event
+                .property("toolName", tool)
+                .property("feedbackId", &offer.feedback_id);
+            request_client(&mut event, context);
+            scope.record(event);
+        }
+        tracing::info!(tool, "feedback offered");
+    }
+
+    /// `user_feedback`: the form, the user's choice, or why not, with the
+    /// call's usage event and, for a choice or a rejection, its own.
+    fn answer_feedback(
+        &self,
+        arguments: JsonObject,
+        responses: Option<&InputResponses>,
+        context: &RequestContext<RoleServer>,
+        usage: Option<(Scope, usage::Event)>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let started = Instant::now();
+        let scope = usage.as_ref().map(|(scope, _)| scope.clone());
+        let caller = caller(context, scope.as_ref());
+        let reply = self
+            .feedback
+            .reply(&caller, arguments, responses, SystemTime::now());
+        let (mut call, scope) = match usage {
+            Some((scope, mut event)) => {
+                usage::mcp::duration(&mut event, started.elapsed());
+                (Some(event), Some(scope))
+            }
+            None => (None, None),
+        };
+        let mut extra = None;
+        let response = match reply {
+            Err(error) => {
+                if let (Some(scope), Some(mut event)) = (&scope, call) {
+                    usage::mcp::failed(&mut event, "InvalidParams", &error.message);
+                    scope.record(event);
+                }
+                return Err(error);
+            }
+            Ok(Reply::Ask(form)) => {
+                if let Some(event) = &mut call {
+                    usage::mcp::input_required(event);
+                }
+                tracing::info!(tool = feedback::TOOL, "feedback asked");
+                CallToolResponse::InputRequired(form)
+            }
+            Ok(Reply::Done { text, outcome }) => {
+                if let Some(event) = &mut call {
+                    usage::mcp::succeeded(event, &Output::Text(text.to_owned()));
+                }
+                if let (Some(scope), Some(outcome)) = (&scope, outcome) {
+                    let mut event = scope.event("McpFeedback", feedback::TOOL);
+                    event
+                        .property("feedbackId", &outcome.feedback_id)
+                        .property("outcome", outcome.outcome);
+                    if let Some(rating) = outcome.rating {
+                        event.property("rating", rating);
+                    }
+                    if let Some(comment) = &outcome.comment {
+                        event
+                            .property("comment", comment)
+                            .measure("commentLength", comment.chars().count() as f64);
+                    }
+                    request_client(&mut event, context);
+                    tracing::info!(outcome = outcome.outcome, "feedback recorded");
+                    extra = Some(event);
+                }
+                CallToolResult::success(vec![ContentBlock::text(text)]).into()
+            }
+            Ok(Reply::Refused { text, rejection }) => {
+                if let Some(event) = &mut call {
+                    usage::mcp::shape(event, &Output::Failed(text.to_owned()));
+                    usage::mcp::failed(event, "ToolError", text);
+                }
+                if let (Some(scope), Some(reason)) = (&scope, rejection) {
+                    let mut event = scope.event("McpFeedbackRejected", feedback::TOOL);
+                    event.fail().property("reason", reason);
+                    request_client(&mut event, context);
+                    extra = Some(event);
+                }
+                CallToolResult::error(vec![ContentBlock::text(text)]).into()
+            }
+        };
+        if let Some(scope) = &scope {
+            if let Some(event) = call {
+                scope.record(event);
+            }
+            if let Some(event) = extra {
+                scope.record(event);
+            }
+        }
+        Ok(response)
+    }
     /// The answer to `skills/list` or `skills/get`. One page holds every
     /// skill, so a listing's cursor is one this server never gave.
     fn skills_request(&self, method: &str, params: &Value) -> Result<Value, ErrorData> {
@@ -492,6 +644,46 @@ fn request_client(event: &mut usage::Event, context: &RequestContext<RoleServer>
         protocol.as_deref(),
         meta.client_capabilities().as_ref(),
     );
+}
+
+/// What a request tells feedback about its client: its identity, whether it
+/// can show a form, and whether its URL turns feedback off.
+fn caller<'a>(context: &RequestContext<RoleServer>, scope: Option<&'a Scope>) -> Caller<'a> {
+    Caller {
+        user: scope
+            .and_then(Scope::identity)
+            .map(|identity| identity.user.as_str()),
+        elicits: elicits_form(context),
+        opted_out: feedback_off(context),
+    }
+}
+
+/// Whether the request is a 2026-07-28 one that declares form elicitation:
+/// `elicitation` with `form`, or without `url` (`{}` means form). Earlier
+/// requests carry no capabilities, and only 2026-07-28 ones may be answered
+/// `input_required`.
+fn elicits_form(context: &RequestContext<RoleServer>) -> bool {
+    let current = context
+        .protocol_version()
+        .is_some_and(|version| version.as_str() >= ProtocolVersion::V_2026_07_28.as_str());
+    current
+        && context
+            .meta
+            .client_capabilities()
+            .and_then(|capabilities| capabilities.elicitation)
+            .is_some_and(|elicitation| elicitation.form.is_some() || elicitation.url.is_none())
+}
+
+/// Whether the request's URL has `feedback=off`, as in `/mcp?feedback=off`.
+fn feedback_off(context: &RequestContext<RoleServer>) -> bool {
+    context
+        .extensions
+        .get::<http::request::Parts>()
+        .and_then(|parts| parts.uri.query())
+        .is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .any(|(name, value)| name == "feedback" && value.eq_ignore_ascii_case("off"))
+        })
 }
 
 /// The streamable HTTP service for `server`. `allowed_hosts` lists the Host

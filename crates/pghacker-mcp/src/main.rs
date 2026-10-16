@@ -6,7 +6,9 @@
 //! the repository's skills too (`skills/`). An optional second listener, for
 //! agents in the same deployment, serves loopback clients without the limit.
 //! With PGHACKER_USAGE_ENDPOINT set, both listeners record usage
-//! (`pghacker_core::usage`).
+//! (`pghacker_core::usage`), and with PGHACKER_FEEDBACK_RATE above 0 too, the
+//! public one now and then asks whether an answer helped
+//! (`pghacker_core::feedback`).
 
 mod ratelimit;
 mod tools;
@@ -20,6 +22,7 @@ use axum::middleware;
 
 use pghacker_core::config::Env;
 use pghacker_core::embed::Embedder;
+use pghacker_core::feedback::Feedback;
 use pghacker_core::mcp::{McpServer, router, serve};
 use pghacker_core::usage::{self, Endpoint, Recorder, Usage};
 use pghacker_core::{db, telemetry};
@@ -53,6 +56,7 @@ async fn main() -> Result<()> {
         env.parse_or("PGHACKER_QUERY_POOL", 8usize)?,
     )?;
     let usage = Usage::from_env(&env, "pghacker-mcp", env!("CARGO_PKG_VERSION"))?;
+    let feedback = Feedback::from_env(&env, &usage)?;
     // The client's address: a header the proxy in front sets
     // (PGHACKER_CLIENT_IP_HEADER, such as x-azure-socketip), the first
     // X-Forwarded-For address (PGHACKER_TRUST_FORWARDED), or the peer.
@@ -86,8 +90,10 @@ async fn main() -> Result<()> {
     let front_door = env
         .get("PGHACKER_FRONT_DOOR_ID")
         .map(|id| FrontDoor(Arc::from(id.trim())));
+    // Feedback on the public listener only: no person reads the answers of
+    // the internal one's agents.
     let app = public(
-        router(server.clone(), allowed_hosts),
+        router(server.clone().with_feedback(feedback), allowed_hosts),
         limit,
         &usage,
         client_ip,

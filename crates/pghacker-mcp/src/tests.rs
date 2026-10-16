@@ -2,12 +2,14 @@
 // Licensed under the MIT license.
 
 //! The listeners as `main` assembles them: the public one's Front Door
-//! check, usage records and rate limit, and the internal one's records.
+//! check, usage records, rate limit and feedback, and the internal one's
+//! records.
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::http::HeaderName;
+use pghacker_core::feedback::{Feedback, Settings as FeedbackSettings};
 use pghacker_core::mcp::{Effect, McpServer, Output, ToolSpec, Tools, parse, router, schema};
 use pghacker_core::usage::testing::Ingestion;
 use pghacker_core::usage::{ACTION, ERROR, Settings, Usage};
@@ -272,4 +274,137 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
     );
     assert_eq!(events[0]["tags"]["ai.operation.name"], "skills/list");
     assert_eq!(usage.lost(), 0);
+}
+
+/// The JSON-RPC response to `method` from a 2026-07-28 client that can show
+/// a form, with `headers`.
+async fn ask_2026(
+    client: &reqwest::Client,
+    base: &str,
+    headers: &[(&str, &str)],
+    method: &str,
+    params: Value,
+) -> Value {
+    let mut params = params;
+    params["_meta"] = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": { "elicitation": { "form": {} } },
+    });
+    let mut request = client
+        .post(format!("{base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", method);
+    if let Some(name) = params["name"].as_str() {
+        request = request.header("mcp-name", name);
+    }
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    request
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does() {
+    let ingestion = Ingestion::start().await;
+    let usage = Usage::new(Settings {
+        endpoint: ingestion.url.clone(),
+        instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+        id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+        role: "pghacker-mcp".into(),
+        version: "0.1.0".into(),
+        instance: None,
+    })
+    .unwrap();
+    let feedback = Feedback::new(
+        FeedbackSettings {
+            rate: 1.0,
+            comments: false,
+        },
+        b"test-usage-id-key-0123456789abcdef",
+    )
+    .unwrap();
+    // As main assembles them.
+    let server = McpServer::new(Echo, "echo", "1", "Echo.");
+    let socket_ip = ClientIp::Header(HeaderName::from_static("x-azure-socketip"));
+    let base = listen(public(
+        router(server.clone().with_feedback(feedback), None),
+        RateLimit::new(600, 100, socket_ip.clone()),
+        &usage,
+        socket_ip,
+        Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
+    ))
+    .await;
+    let internal_base = listen(internal(router(server, None), &usage)).await;
+    let client = reqwest::Client::new();
+    let through_front_door = [
+        ("x-azure-fdid", FRONT_DOOR_ID),
+        ("x-azure-socketip", "203.0.113.9"),
+    ];
+    let names = |listed: &Value| -> Vec<String> {
+        listed["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let echo = json!({ "name": "echo", "arguments": { "text": "hi" } });
+
+    let listed = ask_2026(&client, &base, &through_front_door, "tools/list", json!({})).await;
+    assert_eq!(names(&listed), ["echo", "user_feedback"]);
+    // The client the Front Door names is asked: the note follows the answer.
+    let answered = ask_2026(
+        &client,
+        &base,
+        &through_front_door,
+        "tools/call",
+        echo.clone(),
+    )
+    .await;
+    let content = answered["result"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2, "{answered}");
+    let note = content[1]["text"].as_str().unwrap();
+    let id = note
+        .split_whitespace()
+        .find(|word| word.starts_with("fb1."))
+        .unwrap();
+    let asked = ask_2026(
+        &client,
+        &base,
+        &through_front_door,
+        "tools/call",
+        json!({ "name": "user_feedback", "arguments": { "feedback_id": id } }),
+    )
+    .await;
+    assert_eq!(asked["result"]["resultType"], "input_required", "{asked}");
+
+    // The internal listener's agents: no tool, no note.
+    let agent = [("x-azure-socketip", "203.0.113.10")];
+    let listed = ask_2026(&client, &internal_base, &agent, "tools/list", json!({})).await;
+    assert_eq!(names(&listed), ["echo"]);
+    let answered = ask_2026(&client, &internal_base, &agent, "tools/call", echo).await;
+    assert_eq!(
+        answered["result"]["content"].as_array().map(Vec::len),
+        Some(1),
+        "{answered}"
+    );
+
+    usage.flush().await;
+    let offers: Vec<Value> = ingestion
+        .received()
+        .into_iter()
+        .filter(|event| properties(event)["action"] == "McpFeedbackOffered")
+        .collect();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(properties(&offers[0])["endpoint"], "public");
 }

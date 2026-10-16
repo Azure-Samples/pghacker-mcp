@@ -3112,6 +3112,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "hmac",
  "http",
  "http-body",
  "http-body-util",
@@ -3119,9 +3120,11 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "sse-stream",
  "thiserror",
  "tokio",
@@ -3130,6 +3133,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

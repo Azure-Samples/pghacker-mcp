@@ -41,4 +41,6 @@ uuid.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
+# rmcp's own client, to drive the feedback form's round trips in tests.
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 tempfile.workspace = true

@@ -6,8 +6,8 @@
 //! bootstrap and migrations of schema `pghacker` and graph `pghacker_graph`,
 //! the embeddings client, search modes, citation checks, the commit history's
 //! schema and release ordering, the MCP server plumbing and the skills it
-//! serves, and the public endpoint's usage telemetry and the clients it
-//! counts.
+//! serves, and the public endpoint's usage telemetry, the clients it counts,
+//! and the feedback it asks them for.
 
 pub mod calls;
 pub mod clients;
@@ -15,6 +15,7 @@ pub mod code;
 pub mod config;
 pub mod db;
 pub mod embed;
+pub mod feedback;
 pub mod graph_indexes;
 pub mod mcp;
 pub mod migrate;
