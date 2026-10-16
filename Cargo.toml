@@ -66,6 +66,8 @@ gix = { version = "0.89", default-features = false }
 governor = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "1"
+# Skills' YAML frontmatter, which skills/list gives as JSON.
+serde_yaml_ng = "0.10"
 url = "2"
 include_dir = "0.7"
 tracing = "0.1"

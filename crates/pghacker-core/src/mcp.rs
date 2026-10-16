@@ -12,7 +12,8 @@
 //!
 //! A request that the endpoint's usage middleware gave a [`Scope`]
 //! (`crate::usage`) is recorded: its initialize, discover, tools/list or
-//! tool call, with the call's arguments, outcome and result's shape.
+//! tool call, with the call's arguments, outcome and result's shape, and its
+//! reads of the skills ([`McpServer::with_skills`]).
 
 use std::future::Future;
 use std::sync::Arc;
@@ -28,10 +29,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rmcp::handler::server::common::schema_for_type;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, DiscoverResult,
-    ErrorCode, Implementation, InitializeRequestParams, InitializeResult, JsonObject,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
-    ToolAnnotations,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
+    CustomResult, DiscoverResult, ErrorCode, Implementation, InitializeRequestParams,
+    InitializeResult, JsonObject, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -43,6 +45,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::calls::abandonable;
+use crate::skills::{self, Skills};
 use crate::usage::{self, Scope};
 
 /// A tool: its name, its description for agents, what it does to data, and
@@ -134,6 +137,7 @@ pub struct McpServer<T> {
     tools: T,
     list: Arc<Vec<Tool>>,
     info: Arc<ServerConfig>,
+    skills: Skills,
     cancel_on_disconnect: bool,
 }
 
@@ -147,8 +151,33 @@ impl<T: Tools> McpServer<T> {
             tools,
             list: Arc::new(list),
             info: Arc::new(info),
+            skills: Skills::default(),
             cancel_on_disconnect: false,
         }
+    }
+
+    /// Serves `skills` as the skills extension (SEP-2640) defines: the
+    /// capabilities add resources and the extension, `skills/list` and
+    /// `skills/get` describe the skills, and resources/list and
+    /// resources/read serve their files. Without skills, nothing changes.
+    pub fn with_skills(mut self, skills: Skills) -> Self {
+        if skills.is_empty() {
+            return self;
+        }
+        let mut info = (*self.info).clone();
+        let mut capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        capabilities.extensions = Some(
+            [(skills::EXTENSION.to_owned(), JsonObject::new())]
+                .into_iter()
+                .collect(),
+        );
+        info.capabilities = capabilities;
+        self.info = Arc::new(info);
+        self.skills = skills;
+        self
     }
 
     /// Abandons a call when its client goes away, rather than running it on
@@ -310,6 +339,127 @@ impl<T: Tools> ServerHandler for McpServer<T> {
             }
         };
         Ok(result.into())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        if let Some(scope) = usage_scope(&context) {
+            let mut event = scope.event("McpResourcesList", "resources/list");
+            request_client(&mut event, &context);
+            scope.record(event);
+        }
+        Ok(ListResourcesResult::with_all_items(self.skills.resources()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let uri = request.uri;
+        let file = self.skills.file(&uri);
+        if let Some(scope) = usage_scope(&context) {
+            let mut event = scope.event("McpResourceRead", "resources/read");
+            request_client(&mut event, &context);
+            event.property_cut("uri", &uri, URI_CHARS);
+            match file {
+                Some(_) => {
+                    event.property("activityStatus", "Succeeded");
+                }
+                None => usage::mcp::failed(&mut event, "UnknownResource", "no such resource"),
+            }
+            scope.record(event);
+        }
+        let Some(file) = file else {
+            // rmcp gives 2026-07-28 clients this error as invalid params.
+            return Err(ErrorData::resource_not_found(
+                format!("no resource {uri}"),
+                None,
+            ));
+        };
+        let contents =
+            ResourceContents::text(file.text.clone(), uri).with_mime_type(file.mime_type);
+        Ok(ReadResourceResult::new(vec![contents]).into())
+    }
+
+    /// `skills/list` and `skills/get`, when the server has skills.
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        let method = request.method.as_str();
+        let action = match method {
+            "skills/list" if !self.skills.is_empty() => "McpSkillsList",
+            "skills/get" if !self.skills.is_empty() => "McpSkillsGet",
+            // As rmcp answers any method it doesn't know.
+            _ => {
+                return Err(ErrorData::new(
+                    ErrorCode::METHOD_NOT_FOUND,
+                    request.method,
+                    None,
+                ));
+            }
+        };
+        let params = request.params.unwrap_or(Value::Null);
+        let outcome = self.skills_request(method, &params);
+        if let Some(scope) = usage_scope(&context) {
+            let mut event = scope.event(action, method);
+            request_client(&mut event, &context);
+            if let Some(uri) = params.get("uri").and_then(Value::as_str) {
+                event.property_cut("uri", uri, URI_CHARS);
+            }
+            match &outcome {
+                Ok(_) => {
+                    event.property("activityStatus", "Succeeded");
+                }
+                Err(error) => usage::mcp::failed(&mut event, "InvalidParams", &error.message),
+            }
+            scope.record(event);
+        }
+        let mut result = outcome?;
+        // rmcp completes its own results so for 2026-07-28 clients, but not
+        // custom ones: they say they're complete, and listings how long
+        // they keep, as tools/list does.
+        let current = context
+            .protocol_version()
+            .is_some_and(|version| version.as_str() >= ProtocolVersion::V_2026_07_28.as_str());
+        if current {
+            result["resultType"] = json!("complete");
+            if method == "skills/list" {
+                result["ttlMs"] = json!(0);
+                result["cacheScope"] = json!("private");
+            }
+        }
+        Ok(CustomResult::new(result))
+    }
+}
+
+/// A URI's characters in a usage event, at most.
+const URI_CHARS: usize = 1024;
+
+impl<T> McpServer<T> {
+    /// The answer to `skills/list` or `skills/get`. One page holds every
+    /// skill, so a listing's cursor is one this server never gave.
+    fn skills_request(&self, method: &str, params: &Value) -> Result<Value, ErrorData> {
+        if method == "skills/list" {
+            if params.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
+                return Err(ErrorData::invalid_params("unknown cursor", None));
+            }
+            let skills: Vec<Value> = self.skills.iter().map(skills::Skill::entry).collect();
+            return Ok(json!({ "skills": skills }));
+        }
+        let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+            ErrorData::invalid_params("skills/get takes the uri of a skill's SKILL.md", None)
+        })?;
+        let skill = self
+            .skills
+            .get(uri)
+            .ok_or_else(|| ErrorData::invalid_params(format!("no skill at {uri}"), None))?;
+        Ok(json!({ "skill": skill.entry() }))
     }
 }
 

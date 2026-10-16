@@ -5,8 +5,9 @@
 //! environment, PostgreSQL pools, tool calls that can be abandoned, the
 //! bootstrap and migrations of schema `pghacker` and graph `pghacker_graph`,
 //! the embeddings client, search modes, citation checks, the commit history's
-//! schema and release ordering, the MCP server plumbing, and the public
-//! endpoint's usage telemetry and the clients it counts.
+//! schema and release ordering, the MCP server plumbing and the skills it
+//! serves, and the public endpoint's usage telemetry and the clients it
+//! counts.
 
 pub mod calls;
 pub mod clients;
@@ -18,6 +19,7 @@ pub mod graph_indexes;
 pub mod mcp;
 pub mod migrate;
 pub mod search;
+pub mod skills;
 pub mod telemetry;
 pub mod testing;
 pub mod text;

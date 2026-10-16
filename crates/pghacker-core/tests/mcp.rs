@@ -4,7 +4,8 @@
 //! The MCP plumbing over HTTP, as clients use it: a legacy client's
 //! initialize then tools/list and tools/call without a session, structured
 //! results, tool errors, unknown tools, Host validation, ping from clients of
-//! either protocol, and calls whose clients give up.
+//! either protocol, calls whose clients give up, and skills (SEP-2640) as
+//! clients of either protocol find, read and check them.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,9 +14,11 @@ use std::time::Duration;
 use pghacker_core::mcp::{
     Effect, McpServer, Output, ToolSpec, Tools, failed, parse, router, schema,
 };
+use pghacker_core::skills::{EXTENSION, Skills, frontmatter};
 use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct EchoArgs {
@@ -96,7 +99,8 @@ async fn rpc(client: &reqwest::Client, base: &str, body: Value) -> (u16, Value) 
 }
 
 /// A request as a 2026-07-28 client sends it: no initialize, the version and
-/// the method in headers, the version and capabilities in `_meta`.
+/// the method in headers (with the name, a tool's or a resource's URI, for
+/// the methods that route by it), the version and capabilities in `_meta`.
 async fn rpc_2026(
     client: &reqwest::Client,
     base: &str,
@@ -104,17 +108,28 @@ async fn rpc_2026(
     method: &str,
     params: Value,
 ) -> Value {
+    let name = match method {
+        "tools/call" | "prompts/get" => params.get("name"),
+        "resources/read" => params.get("uri"),
+        _ => None,
+    }
+    .and_then(Value::as_str)
+    .map(str::to_owned);
     let mut params = params;
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {},
     });
-    let response = client
+    let mut request = client
         .post(format!("{base}/mcp"))
         .header("accept", "application/json, text/event-stream")
         .header("content-type", "application/json")
         .header("mcp-protocol-version", "2026-07-28")
-        .header("mcp-method", method)
+        .header("mcp-method", method);
+    if let Some(name) = name {
+        request = request.header("mcp-name", name);
+    }
+    let response = request
         .json(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
         .send()
         .await
@@ -340,4 +355,215 @@ async fn a_call_is_dropped_when_its_client_gives_up_if_the_server_cancels_on_dis
         !hang_dropped(false).await,
         "without cancel_on_disconnect, a call runs on as it always has"
     );
+}
+
+const SKILL: &str = "---\nname: demo\ndescription: Shows how; use when asked for a demo.\nlicense: MIT\nmetadata:\n  version: \"1\"\n---\n\n# Demo\n\nRead references/notes.md, then call echo.\n";
+const NOTES: &str = "Notes for the demo.\n";
+const SKILL_URI: &str = "skill://demo/SKILL.md";
+const NOTES_URI: &str = "skill://demo/references/notes.md";
+
+async fn serve_skills() -> String {
+    let skills = Skills::from_files([
+        ("demo/SKILL.md", SKILL.as_bytes().to_vec()),
+        ("demo/references/notes.md", NOTES.as_bytes().to_vec()),
+    ])
+    .unwrap();
+    let server = McpServer::new(Echo, "echo", "1", "Echo tools.").with_skills(skills);
+    serve_server(server, None).await
+}
+
+fn digest(text: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())))
+}
+
+/// The skill's entry, as skills/list and skills/get give it.
+fn demo_entry() -> Value {
+    json!({
+        "uri": SKILL_URI,
+        "frontmatter": { "name": "demo", "description": "Shows how; use when asked for a demo.",
+                         "license": "MIT", "metadata": { "version": "1" } },
+        "resources": [
+            { "uri": SKILL_URI, "digest": digest(SKILL), "size": SKILL.len() },
+            { "uri": NOTES_URI, "digest": digest(NOTES), "size": NOTES.len() },
+        ],
+    })
+}
+
+#[tokio::test]
+async fn a_legacy_client_finds_reads_and_checks_the_skills() {
+    let base = serve_skills().await;
+    let client = reqwest::Client::new();
+    let (_, init) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }),
+    )
+    .await;
+    let capabilities = &init["result"]["capabilities"];
+    assert_eq!(capabilities["extensions"][EXTENSION], json!({}), "{init}");
+    assert!(capabilities["resources"].is_object(), "{init}");
+    assert!(capabilities["tools"].is_object(), "{init}");
+
+    let (_, listed) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "skills/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        listed["result"],
+        json!({ "skills": [demo_entry()] }),
+        "{listed}"
+    );
+
+    let (_, got) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "skills/get", "params": { "uri": SKILL_URI } }),
+    )
+    .await;
+    assert_eq!(got["result"], json!({ "skill": demo_entry() }), "{got}");
+
+    // A host reads each file and checks it against the entry.
+    for (id, uri, text, mime) in [
+        (4, SKILL_URI, SKILL, "text/markdown"),
+        (5, NOTES_URI, NOTES, "text/markdown"),
+    ] {
+        let (_, read) = rpc(
+            &client,
+            &base,
+            json!({ "jsonrpc": "2.0", "id": id, "method": "resources/read", "params": { "uri": uri } }),
+        )
+        .await;
+        let contents = &read["result"]["contents"][0];
+        assert_eq!(contents["uri"], uri, "{read}");
+        assert_eq!(contents["mimeType"], mime);
+        let served = contents["text"].as_str().unwrap();
+        assert_eq!(served, text);
+        assert_eq!(digest(served), digest(text));
+        assert!(read["result"].get("resultType").is_none(), "{read}");
+    }
+    // The served frontmatter is the listed one.
+    assert_eq!(
+        Value::Object(frontmatter(SKILL).unwrap()),
+        demo_entry()["frontmatter"]
+    );
+
+    let (_, resources) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "resources/list", "params": {} }),
+    )
+    .await;
+    let resources = resources["result"]["resources"].as_array().unwrap();
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0]["uri"], SKILL_URI);
+    assert_eq!(resources[0]["name"], "demo");
+    assert_eq!(
+        resources[0]["description"],
+        "Shows how; use when asked for a demo."
+    );
+    assert_eq!(resources[0]["size"], SKILL.len());
+    assert_eq!(resources[1]["name"], "references/notes.md");
+
+    let (_, unknown) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "skills/get", "params": { "uri": "skill://nope/SKILL.md" } }),
+    )
+    .await;
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    let (_, unread) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": { "uri": "skill://demo/nope.md" } }),
+    )
+    .await;
+    assert_eq!(unread["error"]["code"], -32002, "{unread}");
+    let (_, paged) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 9, "method": "skills/list", "params": { "cursor": "x" } }),
+    )
+    .await;
+    assert_eq!(paged["error"]["code"], -32602, "{paged}");
+}
+
+#[tokio::test]
+async fn a_2026_client_discovers_and_reads_the_skills_with_complete_results() {
+    let base = serve_skills().await;
+    let client = reqwest::Client::new();
+    let discovered = rpc_2026(&client, &base, 1, "server/discover", json!({})).await;
+    assert_eq!(
+        discovered["result"]["capabilities"]["extensions"][EXTENSION],
+        json!({}),
+        "{discovered}"
+    );
+    assert!(discovered["result"]["capabilities"]["resources"].is_object());
+
+    let listed = rpc_2026(&client, &base, 2, "skills/list", json!({})).await;
+    let mut expected = json!({ "skills": [demo_entry()] });
+    expected["resultType"] = json!("complete");
+    expected["ttlMs"] = json!(0);
+    expected["cacheScope"] = json!("private");
+    assert_eq!(listed["result"], expected, "{listed}");
+
+    let got = rpc_2026(&client, &base, 3, "skills/get", json!({ "uri": SKILL_URI })).await;
+    assert_eq!(
+        got["result"],
+        json!({ "resultType": "complete", "skill": demo_entry() }),
+        "{got}"
+    );
+
+    let read = rpc_2026(
+        &client,
+        &base,
+        4,
+        "resources/read",
+        json!({ "uri": NOTES_URI }),
+    )
+    .await;
+    assert_eq!(read["result"]["resultType"], "complete", "{read}");
+    assert_eq!(read["result"]["contents"][0]["text"], NOTES);
+
+    let resources = rpc_2026(&client, &base, 5, "resources/list", json!({})).await;
+    assert_eq!(
+        resources["result"]["resources"].as_array().map(Vec::len),
+        Some(2),
+        "{resources}"
+    );
+
+    // Unknown skills and resources are invalid params on this protocol.
+    let unknown = rpc_2026(&client, &base, 6, "skills/get", json!({ "uri": NOTES_URI })).await;
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    let unread = rpc_2026(
+        &client,
+        &base,
+        7,
+        "resources/read",
+        json!({ "uri": "skill://x/SKILL.md" }),
+    )
+    .await;
+    assert_eq!(unread["error"]["code"], -32602, "{unread}");
+}
+
+#[tokio::test]
+async fn a_server_without_skills_declares_none_and_knows_no_skills_methods() {
+    let base = serve(None).await;
+    let client = reqwest::Client::new();
+    let discovered = rpc_2026(&client, &base, 1, "server/discover", json!({})).await;
+    let capabilities = &discovered["result"]["capabilities"];
+    assert!(capabilities["tools"].is_object(), "{discovered}");
+    assert!(capabilities.get("extensions").is_none(), "{discovered}");
+    assert!(capabilities.get("resources").is_none(), "{discovered}");
+    let listed = rpc_2026(&client, &base, 2, "skills/list", json!({})).await;
+    assert_eq!(listed["error"]["code"], -32601, "{listed}");
+    let (_, legacy) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "skills/get", "params": { "uri": SKILL_URI } }),
+    )
+    .await;
+    assert_eq!(legacy["error"]["code"], -32601, "{legacy}");
 }
