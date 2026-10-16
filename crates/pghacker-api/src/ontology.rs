@@ -210,6 +210,20 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
             &[],
         )
         .await?;
+    // The mailing lists retrieved, as sources records them.
+    let lists: Vec<Value> = client
+        .query(
+            "SELECT name, enabled, coalesce((config->>'follow')::boolean, false)
+             FROM sources WHERE kind = 'mailing_list' ORDER BY name",
+            &[],
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            json!({ "name": row.get::<_, String>(0), "enabled": row.get::<_, bool>(1),
+                    "follow": row.get::<_, bool>(2) })
+        })
+        .collect();
     let code = history_loaded(client, history).await?;
     let mut sql = vec![
         "SELECT a.display_name, count(*) FROM messages m JOIN authors a ON a.id = m.author_id GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
@@ -243,14 +257,13 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
         },
         "loaded": {
             "mail": {
-                "list": "pgsql-hackers",
+                "lists": lists,
                 "messages": coverage.get::<_, i64>(0),
                 "threads": coverage.get::<_, i64>(1),
                 "authors": coverage.get::<_, i64>(2),
                 "from": coverage.get::<_, Option<chrono::DateTime<chrono::Utc>>>(3),
                 "to": coverage.get::<_, Option<chrono::DateTime<chrono::Utc>>>(4),
                 "months": coverage.get::<_, Option<Vec<String>>>(5).unwrap_or_default(),
-                "note": "Whole months plus whole seed threads on SQL/PGQ and SQL/JSON, including older ones.",
             },
             "extraction": {
                 "threads_extracted": coverage.get::<_, i64>(6),

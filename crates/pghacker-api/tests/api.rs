@@ -14,6 +14,7 @@ INSERT INTO authors (id, display_name, message_count, first_seen, last_seen) VAL
     (2, 'Bob Reviewer', 2, '2026-06-02', '2026-06-10');
 INSERT INTO author_names (author_id, name, count) VALUES (1, 'Alice Hacker', 2), (2, 'Bob Reviewer', 2), (2, 'B. Reviewer', 1);
 INSERT INTO author_emails (email, author_id) VALUES ('alice@example.org', 1), ('bob@example.org', 2);
+INSERT INTO sources (kind, name, config) VALUES ('mailing_list', 'pgsql-hackers', '{"follow": true}');
 INSERT INTO threads (id, list, root_message_id, subject, started_at, last_at, message_count, participant_count) VALUES
     (10, 'pgsql-hackers', 'm1@example.org', 'JSON_TABLE plan clause', '2026-06-01', '2026-06-03', 3, 2),
     (11, 'pgsql-hackers', 'm4@example.org', 'Vacuum tuning', '2026-06-10', '2026-06-10', 1, 1);
@@ -471,4 +472,10 @@ async fn describes_the_ontology() {
         );
     }
     assert_eq!(out["loaded"]["mail"]["messages"], 4);
+    // The lists come from sources, not from the test slices' description.
+    assert_eq!(
+        out["loaded"]["mail"]["lists"],
+        json!([{ "name": "pgsql-hackers", "enabled": true, "follow": true }])
+    );
+    assert!(out["loaded"]["mail"].get("note").is_none());
 }

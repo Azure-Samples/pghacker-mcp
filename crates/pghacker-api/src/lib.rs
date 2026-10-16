@@ -42,5 +42,5 @@ pub mod descriptions {
         threads, positions by stance, and the features they took positions on.";
     pub const GET_ONTOLOGY: &str = "Describes the data: graph vertex labels and edge types with counts and \
         properties, tables and columns for the query tool, example SQL and Cypher, search modes, and what's loaded \
-        (months, seed threads, commit history, extraction coverage).";
+        (the mailing lists and their months, the commit history, extraction coverage).";
 }
