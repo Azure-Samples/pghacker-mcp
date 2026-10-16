@@ -47,7 +47,7 @@ rustls-pki-types = { version = "1", features = ["std"] }
 webpki-roots = "1"
 pgvector = { version = "0.4", features = ["postgres", "halfvec"] }
 half = "2"
-sqlparser = { version = "0.63", default-features = false, features = ["std"] }
+sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "gzip", "stream", "http2", "charset"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }

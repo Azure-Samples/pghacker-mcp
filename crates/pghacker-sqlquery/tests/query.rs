@@ -190,20 +190,26 @@ async fn large_results_are_cut_at_the_size_limit() {
 
 #[tokio::test]
 async fn a_statement_past_the_timeout_is_cancelled() {
-    let (_db, tool) = tool(1).await;
+    let (db, tool) = tool(1).await;
+    let mut admin = db.admin().await.unwrap();
+    let lock = admin.transaction().await.unwrap();
+    lock.batch_execute("LOCK TABLE pghacker.threads IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
     let started = Instant::now();
-    let message = failure(&tool, "SELECT pg_sleep(11)").await;
+    let message = failure(&tool, "SELECT count(*) FROM threads").await;
     let elapsed = started.elapsed();
     assert_eq!(message, TIMEOUT_MESSAGE);
     assert!(
         elapsed >= Duration::from_millis(9500) && elapsed < Duration::from_millis(11500),
         "{elapsed:?}"
     );
+    lock.rollback().await.unwrap();
     assert_eq!(value(&tool, "SELECT 1").await, "1");
 }
 
 #[tokio::test]
-async fn writes_fail_in_the_read_only_transaction() {
+async fn writes_inside_reads_are_refused_without_database_changes() {
     let (db, tool) = tool(1).await;
     let message = failure(
         &tool,
@@ -211,23 +217,20 @@ async fn writes_fail_in_the_read_only_transaction() {
          SELECT * FROM x",
     )
     .await;
-    // PostgreSQL names the statement, a SELECT, rather than its INSERT.
-    assert_eq!(
-        message,
-        "ERROR:  cannot execute SELECT in a read-only transaction"
+    assert!(message.contains("not INSERT"), "{message}");
+    assert!(
+        failure(&tool, "SELECT 1 AS a INTO TEMP copied")
+            .await
+            .contains("SELECT INTO")
     );
-    assert_eq!(
-        failure(&tool, "SELECT 1 AS a INTO TEMP copied").await,
-        "ERROR:  cannot execute SELECT INTO in a read-only transaction"
-    );
-    assert_eq!(
+    assert!(
         failure(
             &tool,
             "SELECT * FROM cypher('pghacker_graph', $$ CREATE (:Feature {key: 'feature:x'}) $$) \
              AS (x agtype)",
         )
-        .await,
-        "ERROR:  cannot execute SELECT in a read-only transaction"
+        .await
+        .contains("CREATE clause")
     );
     let message = failure(&tool, "INSERT INTO authors (display_name) VALUES ('x')").await;
     assert!(
@@ -438,12 +441,42 @@ async fn types_without_binary_decoders_render_as_text() {
 }
 
 #[tokio::test]
-async fn what_a_call_leaves_on_its_connection_does_not_reach_the_next() {
+async fn read_only_cypher_data_and_escaped_sql_names_still_execute() {
+    let (db, tool) = tool(1).await;
+    add_authored_messages(&db).await;
+    for (sql, expected) in [
+        (
+            "SELECT * FROM cypher('pghacker_graph', \
+             $$ RETURN {`create`: 'CREATE', `set`: 'SET', `delete`: 'DELETE'} $$) AS (data agtype)",
+            "CREATE",
+        ),
+        (
+            "SELECT * FROM cypher('pghacker_graph', \
+             $$ MATCH (`CREATE`:Author) RETURN `CREATE`.name $$) AS (name agtype)",
+            "Ada Example",
+        ),
+        (
+            "SELECT * FROM cypher('pghacker_graph', \
+             $$ RETURN 'CREATE' /* DELETE (n) */ $$) AS (value agtype)",
+            "CREATE",
+        ),
+    ] {
+        let result = text(&tool, sql).await;
+        assert!(result.contains(expected), "{sql}: {result}");
+    }
+    assert_eq!(
+        value(&tool, r#"SELECT U&"current\005fsetting"('work_mem')"#).await,
+        value(&tool, "SHOW work_mem").await
+    );
+}
+
+#[tokio::test]
+async fn side_effects_are_refused_and_read_connections_stay_clean() {
     let (db, tool) = tool(1).await;
     let pid = value(&tool, "SELECT pg_backend_pid()").await;
 
-    // A session-level advisory lock outlives the rollback; the reset releases it.
-    assert_eq!(value(&tool, "SELECT pg_advisory_lock(4242)").await, "\"\"");
+    let message = failure(&tool, "SELECT pg_advisory_lock(4242)").await;
+    assert!(message.contains("advisory locks"), "{message}");
     let held: i64 = db
         .admin()
         .await
@@ -457,7 +490,7 @@ async fn what_a_call_leaves_on_its_connection_does_not_reach_the_next() {
         .get(0);
     assert_eq!(held, 0);
 
-    // What a SELECT sets for the session is undone.
+    // Callers cannot change settings; trusted executor setup is unaffected.
     for (setting, set_to) in [
         ("work_mem", "1234kB"),
         ("search_path", "public"),
@@ -466,11 +499,12 @@ async fn what_a_call_leaves_on_its_connection_does_not_reach_the_next() {
         let show = format!("SHOW {setting}");
         let before = value(&tool, &show).await;
         assert_ne!(before, set_to);
-        value(
+        let message = failure(
             &tool,
             &format!("SELECT set_config('{setting}', '{set_to}', false)"),
         )
         .await;
+        assert!(message.contains("changes session settings"), "{message}");
         assert_eq!(value(&tool, &show).await, before, "{setting}");
     }
     assert_eq!(
@@ -485,14 +519,20 @@ async fn what_a_call_leaves_on_its_connection_does_not_reach_the_next() {
     let message = failure(&tool, "PREPARE p AS SELECT 1").await;
     assert!(message.contains("not PREPARE"), "{message}");
 
-    // All of it on the pool's one connection.
+    // Reads still reuse the pool's one clean connection.
     assert_eq!(value(&tool, "SELECT pg_backend_pid()").await, pid);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_abandoned_call_cancels_its_statement() {
     let (db, tool) = tool(1).await;
-    let sql = "SELECT pg_sleep(4.5) AS abandoned";
+    let mut admin = db.admin().await.unwrap();
+    let lock = admin.transaction().await.unwrap();
+    lock.batch_execute("LOCK TABLE pghacker.threads IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let sql = "SELECT id FROM threads /* abandoned */";
+    let observer = db.admin().await.unwrap();
     let call = tokio::spawn({
         let tool = tool.clone();
         async move {
@@ -503,9 +543,8 @@ async fn an_abandoned_call_cancels_its_statement() {
             .await
         }
     });
-    let admin = db.admin().await.unwrap();
     let running = || async {
-        admin
+        observer
             .query_one(
                 "SELECT count(*) FROM pg_stat_activity \
                  WHERE datname = current_database() AND query = $1 AND state = 'active'",
@@ -529,6 +568,7 @@ async fn an_abandoned_call_cancels_its_statement() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    lock.rollback().await.unwrap();
     // The pool's one connection was closed rather than returned; the next
     // call opens another.
     assert_eq!(value(&tool, "SELECT 1").await, "1");

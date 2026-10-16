@@ -8,8 +8,9 @@
 //!   EXPLAIN of one of those, and SHOW; transaction statements are refused
 //!   with a message of their own. Input that sqlparser can't parse, such as
 //!   an AGE `cypher()` call with its column definition list, is checked by
-//!   its tokens: one statement that starts with one of those words; input it
-//!   can't tokenize, such as an unterminated string, is refused.
+//!   its tokens, including known writes, side-effecting calls and Cypher
+//!   clauses. The first-word fallback is retained for other unsupported
+//!   syntax; it is not a complete SQL sandbox. Untokenizable input is refused.
 //! - [`QueryTool::run`] returns an [`Output`], `Failed` for refused
 //!   statements, PostgreSQL's errors and timeouts alike. The SQL is logged at
 //!   debug level only.
@@ -28,11 +29,6 @@ use deadpool_postgres::{Object, RecyclingMethod};
 use pghacker_core::db::{self, Pool};
 use pghacker_core::mcp::Output;
 use pghacker_core::text::truncate_chars;
-use sqlparser::ast::{Set, Statement};
-use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
-use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::QueryArgs;
 use crate::execute::{QueryResponse, run_readonly_query};
@@ -65,9 +61,6 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// The pool's connections' name in pg_stat_activity.
 const APPLICATION_NAME: &str = "pghacker-mcp query";
 
-/// The statements that query takes, for its refusals.
-const READS: &str = "one SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement";
-
 const DEALLOCATE_SQL_PREPARED: &str = "
     DO $reset$
     DECLARE statement_name text;
@@ -82,140 +75,13 @@ const DEALLOCATE_SQL_PREPARED: &str = "
 ";
 
 /// Checks `sql` before it runs: at most [`MAX_SQL_BYTES`], one statement,
-/// and a statement that reads, such as a SELECT, so no statement that
-/// controls transactions or changes settings. Input that sqlparser can't
-/// parse, such as a `cypher()` call with its column definitions, passes if
-/// its tokens are one statement that starts with a word that reads. A write
-/// inside a statement that reads, such as a data-modifying WITH or a
-/// `cypher()` CREATE, is the read-only transaction's to refuse. Returns why
-/// it's refused.
+/// and a statement that reads. Rejects nested writes, settings changes,
+/// known side-effecting functions and writing Cypher. Unsupported SQL keeps
+/// the first-word fallback after token-aware checks of known unsafe forms;
+/// the read-only transaction and database privileges remain backstops.
+/// Returns why a statement is refused.
 pub fn check(sql: &str) -> Result<(), String> {
-    if sql.len() > MAX_SQL_BYTES {
-        return Err(format!(
-            "the SQL is {} bytes; query takes at most {MAX_SQL_BYTES}",
-            sql.len()
-        ));
-    }
-    let Ok(statements) = Parser::parse_sql(&PostgreSqlDialect {}, sql) else {
-        return check_tokens(sql);
-    };
-    match statements.as_slice() {
-        [] => Err(no_statement()),
-        [statement] => check_statement(statement),
-        many => Err(several_statements(many.len())),
-    }
-}
-
-/// Checks a statement that sqlparser parsed.
-fn check_statement(statement: &Statement) -> Result<(), String> {
-    if let Some(name) = transaction_statement(statement) {
-        return Err(transaction_refusal(name));
-    }
-    match statement {
-        Statement::Query(_)
-        | Statement::ShowVariable { .. }
-        | Statement::ShowVariables { .. }
-        | Statement::ShowStatus { .. }
-        | Statement::ShowFunctions { .. }
-        | Statement::ShowCreate { .. }
-        | Statement::ShowColumns { .. }
-        | Statement::ShowCatalogs { .. }
-        | Statement::ShowDatabases { .. }
-        | Statement::ShowProcessList { .. }
-        | Statement::ShowSchemas { .. }
-        | Statement::ShowCharset(_)
-        | Statement::ShowObjects(_)
-        | Statement::ShowTables { .. }
-        | Statement::ShowViews { .. }
-        | Statement::ShowCollation { .. }
-        | Statement::ExplainTable { .. } => Ok(()),
-        Statement::Explain { statement, .. } => check_statement(statement),
-        other => {
-            let text = other.to_string();
-            let name = text.split_whitespace().next().unwrap_or("that statement");
-            Err(not_a_read(&name.to_uppercase()))
-        }
-    }
-}
-
-/// The name of the transaction statement that `statement` is, if it's one.
-fn transaction_statement(statement: &Statement) -> Option<&'static str> {
-    Some(match statement {
-        Statement::StartTransaction { .. } => "BEGIN or START TRANSACTION",
-        Statement::Commit { .. } => "COMMIT or END",
-        Statement::Rollback { .. } => "ROLLBACK, ABORT or ROLLBACK TO SAVEPOINT",
-        Statement::Savepoint { .. } => "SAVEPOINT",
-        Statement::ReleaseSavepoint { .. } => "RELEASE SAVEPOINT",
-        Statement::Set(Set::SetTransaction { .. }) => {
-            "SET TRANSACTION or SET SESSION CHARACTERISTICS AS TRANSACTION"
-        }
-        _ => return None,
-    })
-}
-
-/// Checks what sqlparser couldn't parse by its tokens, in which strings,
-/// dollar-quoted strings and comments are single tokens: one statement, and
-/// its first word one that starts a statement that reads, or a parenthesis.
-fn check_tokens(sql: &str) -> Result<(), String> {
-    let tokens = Tokenizer::new(&PostgreSqlDialect {}, sql)
-        .tokenize()
-        .map_err(|error| format!("query can't read the SQL: {error}"))?;
-    let statements: Vec<Vec<&Token>> = tokens
-        .split(|token| *token == Token::SemiColon)
-        .map(|statement| {
-            statement
-                .iter()
-                .filter(|token| !matches!(token, Token::Whitespace(_)))
-                .collect::<Vec<_>>()
-        })
-        .filter(|statement| !statement.is_empty())
-        .collect();
-    let first = match statements.as_slice() {
-        [] => return Err(no_statement()),
-        [statement] => statement[0],
-        many => return Err(several_statements(many.len())),
-    };
-    match first {
-        Token::LParen => Ok(()),
-        Token::Word(word) if word.quote_style.is_none() => match word.keyword {
-            Keyword::SELECT
-            | Keyword::WITH
-            | Keyword::VALUES
-            | Keyword::TABLE
-            | Keyword::EXPLAIN
-            | Keyword::SHOW => Ok(()),
-            Keyword::BEGIN | Keyword::START => {
-                Err(transaction_refusal("BEGIN or START TRANSACTION"))
-            }
-            Keyword::COMMIT | Keyword::END => Err(transaction_refusal("COMMIT or END")),
-            Keyword::ROLLBACK | Keyword::ABORT => Err(transaction_refusal(
-                "ROLLBACK, ABORT or ROLLBACK TO SAVEPOINT",
-            )),
-            Keyword::SAVEPOINT => Err(transaction_refusal("SAVEPOINT")),
-            Keyword::RELEASE => Err(transaction_refusal("RELEASE SAVEPOINT")),
-            _ => Err(not_a_read(&word.value.to_uppercase())),
-        },
-        other => Err(not_a_read(&other.to_string())),
-    }
-}
-
-fn no_statement() -> String {
-    "the SQL has no statement".to_owned()
-}
-
-fn several_statements(count: usize) -> String {
-    format!("the SQL has {count} statements; query runs one at a time")
-}
-
-fn transaction_refusal(name: &str) -> String {
-    format!(
-        "query runs each statement in a read-only transaction of its own, which it rolls back, \
-         so it doesn't take {name}"
-    )
-}
-
-fn not_a_read(name: &str) -> String {
-    format!("query only reads: it takes {READS}, not {name}")
+    crate::policy::check(sql, MAX_SQL_BYTES)
 }
 
 /// The query tool, with its pool of pgh_reader connections. Cheap to clone:
@@ -482,7 +348,7 @@ mod tests {
              ORDER BY content <@> to_bm25query('planner', 'pghacker.message_chunks_bm25') LIMIT 5",
             "SELECT id FROM message_chunks ORDER BY embedding <=> '[1,2,3]' LIMIT 5",
             "SELECT path FROM code_file_versions WHERE path % 'jsonpath' OR path ~* 'json'",
-            "SELECT pg_advisory_lock(1)",
+            "SELECT random(), clock_timestamp(), current_setting('search_path')",
             "SELECT 1 + /* nested /* comment */ ; */ 1",
             "-- a comment first\nSELECT 1",
         ] {
@@ -573,22 +439,22 @@ mod tests {
     }
 
     #[test]
-    fn writes_inside_reads_are_left_to_the_transaction() {
-        assert_eq!(
-            check(
+    fn writes_inside_reads_are_refused_before_execution() {
+        for (sql, reason) in [
+            (
                 "WITH x AS (INSERT INTO authors (display_name) VALUES ('x') RETURNING id) \
-                 SELECT * FROM x"
+                 SELECT * FROM x",
+                "not INSERT",
             ),
-            Ok(())
-        );
-        assert_eq!(check("SELECT 1 INTO t"), Ok(()));
-        assert_eq!(
-            check(
+            ("SELECT 1 INTO t", "SELECT INTO"),
+            (
                 "SELECT * FROM cypher('pghacker_graph', $$ CREATE (:Feature {key: 'x'}) $$) \
-                 AS (x agtype)"
+                 AS (x agtype)",
+                "CREATE clause",
             ),
-            Ok(())
-        );
+        ] {
+            assert!(refused(sql).contains(reason), "{sql}");
+        }
     }
 
     #[test]
@@ -612,6 +478,47 @@ mod tests {
         match unchecked(tool, sql).await {
             QueryResponse::Rows { csv, .. } => csv,
             other => panic!("{sql}: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_calls_do_not_need_a_database_connection() {
+        let tool = QueryTool::new("postgresql://pgh_reader@127.0.0.1:1/no_database", 1).unwrap();
+        for sql in [
+            "SET work_mem = '1MB'",
+            "SELECT set_config('work_mem', '1MB', true)",
+            "SELECT pg_advisory_lock(1)",
+            "SELECT pg_cancel_backend(1)",
+            "SELECT pg_sleep(1)",
+            "SELECT nextval('some_sequence')",
+            "SELECT * FROM cypher('g', $$ CREATE (n) $$) AS (n agtype)",
+            "WITH w AS (DELETE FROM authors RETURNING *) SELECT * FROM w",
+        ] {
+            let expected = check(sql).unwrap_err();
+            assert!(
+                matches!(tool.run(QueryArgs { sql: sql.to_owned(), max_rows: None }).await,
+                    Output::Failed(reason) if reason == expected),
+                "{sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_transaction_still_refuses_writes_if_the_checker_is_bypassed() {
+        let db = pghacker_core::testing::TestDb::create().await.unwrap();
+        let tool = QueryTool::new(&db.reader_url, 1).unwrap();
+        for sql in [
+            "WITH w AS (INSERT INTO authors (display_name) VALUES ('x') RETURNING id) \
+             SELECT * FROM w",
+            "SELECT 1 INTO TEMP copied",
+            "SELECT * FROM cypher('pghacker_graph', $$ CREATE (:Feature {key:'x'}) $$) AS (n agtype)",
+        ] {
+            assert!(check(sql).is_err(), "{sql}");
+            assert!(
+                matches!(unchecked(&tool, sql).await,
+                    QueryResponse::Failed(reason) if reason.contains("read-only transaction")),
+                "{sql}"
+            );
         }
     }
 
@@ -647,6 +554,14 @@ mod tests {
             (
                 "DECLARE held CURSOR WITH HOLD FOR SELECT 1",
                 "SELECT ag_catalog._graphid(1, 1) AS value",
+            ),
+            (
+                "SELECT pg_advisory_lock(4242)",
+                "SELECT '1'::agtype AS value",
+            ),
+            (
+                "SELECT set_config('work_mem', '1234kB', false)",
+                "SELECT '[1,2]'::vector AS value",
             ),
         ] {
             assert!(check(sql).is_err(), "{sql}");
@@ -687,6 +602,18 @@ mod tests {
         );
         assert_eq!(csv(&tool, "SELECT pg_backend_pid() AS pid").await, pid);
         assert_eq!(csv(&tool, left).await, "prepared,channels,held\n0,0,0");
+        let held: i64 = db
+            .admin()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 4242",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(held, 0);
     }
 
     #[test]
