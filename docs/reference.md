@@ -59,7 +59,7 @@ The home page (`home/`) is a React, Vite and TypeScript page. It gives the MCP U
 
 ## Tools
 
-The [README](../README.md#use-it) lists pghacker-mcp's tools, and each tool describes its arguments to MCP clients. The mail searches take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (the default). The indexer's tools serve the crawler agents:
+The [README](../README.md#use-it) lists pghacker-mcp's tools, and each tool describes its arguments to MCP clients. The mail searches take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (the default). `get_ontology` lists the tables and columns that `query` reads, and the schema's comments describe each one (migration `0023`): `obj_description` and `col_description` read them, as `get_ontology` shows, and history builds and installs copy those of the history's tables. The indexer's tools serve the crawler agents:
 
 | Area | pghacker-indexer's tools |
 | --- | --- |

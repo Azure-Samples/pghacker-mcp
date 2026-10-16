@@ -43,6 +43,7 @@ pub mod descriptions {
     pub const GET_AUTHOR: &str = "Returns an author's profile: names used, message counts and dates, most active \
         threads, positions by stance, and the features they took positions on.";
     pub const GET_ONTOLOGY: &str = "Describes the data: graph vertex labels and edge types with counts and \
-        properties, tables and columns for the query tool, example SQL and Cypher, search modes, and what's loaded \
-        (the mailing lists and their months, the commit history, extraction coverage).";
+        properties, tables and columns for the query tool (the schema's comments describe each), example SQL and \
+        Cypher, search modes, and what's loaded (the mailing lists and the range of their months, the commit \
+        history, extraction coverage).";
 }

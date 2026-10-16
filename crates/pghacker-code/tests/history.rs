@@ -479,6 +479,77 @@ async fn an_installed_build_replaces_the_tables_in_pghacker() {
 }
 
 #[tokio::test]
+async fn builds_and_installs_keep_the_tables_descriptions() {
+    let repo = fixture();
+    let db = TestDb::create().await.unwrap();
+    build(&db, &repo.path(), Vec::new()).await;
+    let mut admin = db.admin().await.unwrap();
+    let tables = history::store::TABLES.to_vec();
+    assert_eq!(
+        undescribed(&admin, SCHEMA, &tables).await,
+        Vec::<String>::new()
+    );
+    // An install gives the tables the descriptions pghacker's have then,
+    // which may have changed since the build began.
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "COMMENT ON COLUMN pghacker.code_commits.sha IS 'Changed during the build.';
+             COMMENT ON TABLE pghacker.code_refs IS NULL;",
+        )
+        .await
+        .unwrap();
+    history::store::swap(&mut admin, SCHEMA).await.unwrap();
+    assert_eq!(
+        undescribed(&admin, "pghacker", &tables).await,
+        vec!["code_refs".to_owned()]
+    );
+    let described = |sql: &'static str| admin.query_one(sql, &[]);
+    let sha: String = described(
+        "SELECT col_description('pghacker.code_commits'::regclass, \
+         (SELECT attnum FROM pg_attribute WHERE attrelid = 'pghacker.code_commits'::regclass \
+          AND attname = 'sha'))",
+    )
+    .await
+    .unwrap()
+    .get(0);
+    assert_eq!(sha, "Changed during the build.");
+    let lines: String =
+        described("SELECT obj_description('pghacker.code_line_instances'::regclass, 'pg_class')")
+            .await
+            .unwrap()
+            .get(0);
+    assert!(
+        lines.starts_with("Every line of every file version"),
+        "{lines}"
+    );
+}
+
+/// The history's tables in `schema`, and their columns, without a
+/// description.
+async fn undescribed(client: &Client, schema: &str, tables: &[&str]) -> Vec<String> {
+    client
+        .query(
+            "SELECT c.relname::text FROM pg_class c
+             WHERE c.relnamespace = $1::text::regnamespace AND c.relname = ANY($2)
+               AND obj_description(c.oid, 'pg_class') IS NULL
+             UNION ALL
+             SELECT c.relname || '.' || a.attname FROM pg_class c
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+             WHERE c.relnamespace = $1::text::regnamespace AND c.relname = ANY($2)
+               AND col_description(c.oid, a.attnum) IS NULL
+             ORDER BY 1",
+            &[&schema, &tables],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+#[tokio::test]
 async fn an_install_waits_for_the_graph_sync_and_asks_for_a_full_one() {
     let repo = fixture();
     let db = TestDb::create().await.unwrap();

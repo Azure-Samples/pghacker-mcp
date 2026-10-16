@@ -22,4 +22,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+pghacker-sqlquery.workspace = true
 tokio.workspace = true

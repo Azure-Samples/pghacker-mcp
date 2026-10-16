@@ -4,9 +4,12 @@
 //! Writes a build into a schema of its own, then swaps it into `pghacker`
 //! or keeps it there (the engine benchmark reads it in place).
 //!
-//! The tables' columns, constraints and indexes come from `pghacker`'s, as
-//! migration 0011 defines them: staging tables are created `LIKE` them
-//! without indexes, loaded, then given the same constraints and indexes.
+//! The tables' columns, constraints, indexes and comments come from
+//! `pghacker`'s, as the migrations define them: staging tables are created
+//! `LIKE` them without indexes, loaded, then given the same constraints and
+//! indexes. An install copies the comments again, so the tables it installs
+//! have the descriptions the migrations wrote, even after a build that began
+//! before them.
 //! A row is alive at address X when `lo <= X AND X < hi AND (alive IS NULL
 //! OR alive @> X)`.
 
@@ -77,6 +80,37 @@ pub const TABLES: [&str; 9] = [
     "code_line_instances",
 ];
 
+/// SQL that gives the history's tables in schema `s` the comments of
+/// `pghacker`'s, the tables' and their columns': the descriptions the
+/// migrations write, which agents read with obj_description and
+/// col_description. A comment `pghacker` lacks is removed.
+fn copy_comments(s: &str) -> String {
+    let tables: Vec<String> = TABLES.iter().map(|t| format!("'{t}'")).collect();
+    format!(
+        "DO $$
+         DECLARE
+             t text;
+             col record;
+         BEGIN
+             FOREACH t IN ARRAY ARRAY[{tables}] LOOP
+                 EXECUTE format('COMMENT ON TABLE {s}.%I IS %L', t,
+                                obj_description(format('pghacker.%I', t)::regclass, 'pg_class'));
+                 FOR col IN
+                     SELECT a.attname, col_description(a.attrelid, a.attnum) AS description
+                     FROM pg_attribute a JOIN pg_attribute b
+                       ON b.attrelid = format('{s}.%I', t)::regclass AND b.attname = a.attname
+                          AND b.attnum > 0 AND NOT b.attisdropped
+                     WHERE a.attrelid = format('pghacker.%I', t)::regclass
+                       AND a.attnum > 0 AND NOT a.attisdropped
+                 LOOP
+                     EXECUTE format('COMMENT ON COLUMN {s}.%I.%I IS %L', t, col.attname, col.description);
+                 END LOOP;
+             END LOOP;
+         END $$;",
+        tables = tables.join(", ")
+    )
+}
+
 /// Creates the build's schema afresh, with tables like `pghacker`'s but
 /// without their indexes, dropping one an earlier build made. A schema that
 /// a build didn't make is refused.
@@ -121,6 +155,7 @@ pub async fn create(client: &Client, schema: &str) -> Result<()> {
             "CREATE TABLE {s}.{t} (LIKE pghacker.{t} INCLUDING DEFAULTS INCLUDING CONSTRAINTS);"
         ));
     }
+    sql.push_str(&copy_comments(s));
     sql.push_str(&format!(
         "CREATE UNLOGGED TABLE {s}.stage_text (id int4 NOT NULL, text text NOT NULL, bytes int4 NOT NULL);
          CREATE UNLOGGED TABLE {s}.stage_versions (
@@ -653,11 +688,13 @@ pub async fn swap(client: &mut Client, schema: &str) -> Result<()> {
     // The graph sync reads these tables, a full sync for minutes. Waiting for
     // it on its lock, rather than queueing the exclusive lock behind it,
     // leaves the code tools reading meanwhile; and no sync starts until the
-    // swap is done.
+    // swap is done. The build takes the comments of the tables it replaces,
+    // which a migration may have changed since the build began.
     let mut sql = format!(
         "SELECT pg_advisory_xact_lock(hashtext('pghacker.graph_sync'));
-         LOCK TABLE {} IN ACCESS EXCLUSIVE MODE; DROP TABLE {};",
+         LOCK TABLE {} IN ACCESS EXCLUSIVE MODE; {} DROP TABLE {};",
         canonical.join(", "),
+        copy_comments(s),
         canonical.join(", ")
     );
     for t in TABLES {

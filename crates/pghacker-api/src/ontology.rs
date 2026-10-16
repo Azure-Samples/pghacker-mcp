@@ -108,6 +108,51 @@ const HISTORY_NOTE: &str = "The code tools read the commit history: every commit
     (alive IS NULL OR alive @> X); a version's lines are its lineage's instances alive at its lo, in \
     weave order.";
 
+/// Every readable table's description, from the schema's comments.
+pub const TABLE_COMMENTS_SQL: &str = "SELECT c.relname AS table_name, obj_description(c.oid, 'pg_class') AS description FROM pg_class c WHERE c.relnamespace = 'pghacker'::regnamespace AND c.relkind = 'r' AND has_table_privilege(c.oid, 'SELECT') ORDER BY 1";
+
+/// A table's columns, messages' here, with their types and descriptions.
+pub const COLUMN_COMMENTS_SQL: &str = "SELECT a.attname AS column_name, format_type(a.atttypid, a.atttypmod) AS type, col_description(a.attrelid, a.attnum) AS description FROM pg_attribute a WHERE a.attrelid = 'pghacker.messages'::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum";
+
+/// Where the tables' and columns' descriptions are, which `tables` leaves
+/// out, and how to read them.
+fn tables_note() -> String {
+    format!(
+        "The schema's comments describe each table and column; `tables` leaves them out. \
+         obj_description and col_description read them: every table's with `{TABLE_COMMENTS_SQL}`, \
+         and a table's columns' (messages' here) with `{COLUMN_COMMENTS_SQL}`."
+    )
+}
+
+/// The monthly archives that mail came from (YYYY-MM), in brief: the first
+/// and the last, how many, and the months between them that none came from,
+/// as runs such as "1997-07 to 1997-12".
+fn month_coverage(months: &[String]) -> Value {
+    let parse = |text: &str| -> Option<i32> {
+        let (year, month) = text.split_once('-')?;
+        let (year, month): (i32, i32) = (year.parse().ok()?, month.parse().ok()?);
+        (1..=12).contains(&month).then_some(year * 12 + month - 1)
+    };
+    let name = |i: i32| format!("{:04}-{:02}", i.div_euclid(12), i.rem_euclid(12) + 1);
+    let mut known: Vec<i32> = months.iter().filter_map(|m| parse(m)).collect();
+    known.sort_unstable();
+    known.dedup();
+    let missing: Vec<String> = known
+        .windows(2)
+        .filter(|pair| pair[1] - pair[0] > 1)
+        .map(|pair| match (pair[0] + 1, pair[1] - 1) {
+            (first, last) if first == last => name(first),
+            (first, last) => format!("{} to {}", name(first), name(last)),
+        })
+        .collect();
+    json!({
+        "first": known.first().map(|&i| name(i)),
+        "last": known.last().map(|&i| name(i)),
+        "count": months.len(),
+        "missing": missing,
+    })
+}
+
 /// SQL over the commit history.
 const HISTORY_SQL: &[&str] = &[
     "SELECT c.sha, c.committed_at, c.author_name, c.subject FROM code_commit_files f JOIN code_commits c ON c.addr = f.addr WHERE f.path = 'src/backend/parser/parse_jsontable.c' ORDER BY c.committed_at DESC LIMIT 10",
@@ -182,14 +227,19 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
             .map_or("", |(_, e)| *e);
         edges.push(json!({ "type": label, "count": count, "connects": endpoints }));
     }
+    // format_type names arrays by their elements (text[]), as
+    // information_schema doesn't.
     let tables: Vec<Value> = client
         .query(
-            "SELECT c.table_name, string_agg(c.column_name || ' ' || c.data_type, ', ' ORDER BY c.ordinal_position)
-             FROM information_schema.columns c
-             WHERE c.table_schema = 'pghacker' AND c.column_name NOT IN ('embedding', 'search_text')
-               AND has_table_privilege(current_user, format('%I.%I', c.table_schema, c.table_name), 'SELECT')
-               AND c.table_name NOT IN ('schema_migrations', 'graph_label_counts')
-             GROUP BY c.table_name ORDER BY c.table_name",
+            "SELECT c.relname::text,
+                    string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum)
+             FROM pg_class c
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+             WHERE c.relnamespace = 'pghacker'::regnamespace AND c.relkind IN ('r', 'p', 'v', 'f')
+               AND a.attname NOT IN ('embedding', 'search_text')
+               AND has_table_privilege(c.oid, 'SELECT')
+               AND c.relname NOT IN ('schema_migrations', 'graph_label_counts')
+             GROUP BY c.relname ORDER BY c.relname",
             &[],
         )
         .await?
@@ -242,9 +292,10 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
                      commit, else as a message wrote it.",
         },
         "tables": tables,
+        "tables_note": tables_note(),
         "examples": {
             "cypher": [
-                "SELECT * FROM cypher('pghacker_graph', $$ MATCH (a:Author)-[:HOLDS]->(p:Position)-[:ABOUT]->(f:Feature {slug: 'sql-pgq'}) RETURN a.name, p.stance, p.summary $$) AS (author agtype, stance agtype, summary agtype)",
+                "SELECT * FROM cypher('pghacker_graph', $$ MATCH (a:Author)-[:HOLDS]->(p:Position)-[:ABOUT]->(f:Feature {slug: 'sql-property-graph-queries'}) RETURN a.name, p.stance, p.summary $$) AS (author agtype, stance agtype, summary agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (t:Thread)-[:DISCUSSES]->(f:Feature) RETURN f.name, count(t) ORDER BY count(t) DESC LIMIT 10 $$) AS (feature agtype, threads agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (m:Message)-[:MENTIONS]->(f:File)-[:PART_OF]->(s:Subsystem {name: 'parser'}) RETURN f.path, count(m) ORDER BY count(m) DESC LIMIT 10 $$) AS (path agtype, mentions agtype)",
                 "SELECT * FROM cypher('pghacker_graph', $$ MATCH (a:Author)-[:COMMITTED]->(c:Commit)-[:MODIFIES]->(:File {path: 'src/backend/parser/parse_jsontable.c'}), (c)-[:DISCUSSED_IN]->(t:Thread) RETURN c.sha, c.committed_at, c.subject, a.name, t.subject ORDER BY c.committed_at DESC LIMIT 10 $$) AS (sha agtype, committed_at agtype, subject agtype, committer agtype, thread agtype)",
@@ -264,7 +315,7 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
                 "authors": coverage.get::<_, i64>(2),
                 "from": coverage.get::<_, Option<chrono::DateTime<chrono::Utc>>>(3),
                 "to": coverage.get::<_, Option<chrono::DateTime<chrono::Utc>>>(4),
-                "months": coverage.get::<_, Option<Vec<String>>>(5).unwrap_or_default(),
+                "months": month_coverage(&coverage.get::<_, Option<Vec<String>>>(5).unwrap_or_default()),
             },
             "extraction": {
                 "threads_extracted": coverage.get::<_, i64>(6),
@@ -277,4 +328,34 @@ pub async fn describe(client: &impl GenericClient, history: &str) -> Result<Valu
             "code_note": HISTORY_NOTE,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn months(list: &[&str]) -> Vec<String> {
+        list.iter().map(|m| (*m).to_owned()).collect()
+    }
+
+    #[test]
+    fn months_are_a_range_with_the_runs_missing_from_it() {
+        assert_eq!(
+            month_coverage(&months(&["1997-06", "1998-01", "1998-02"])),
+            json!({ "first": "1997-06", "last": "1998-02", "count": 3, "missing": ["1997-07 to 1997-12"] })
+        );
+        assert_eq!(
+            month_coverage(&months(&["2025-11", "2026-01", "2026-02", "2026-06"])),
+            json!({ "first": "2025-11", "last": "2026-06", "count": 4,
+                    "missing": ["2025-12", "2026-03 to 2026-05"] })
+        );
+        assert_eq!(
+            month_coverage(&months(&["2026-06", "2026-07"])),
+            json!({ "first": "2026-06", "last": "2026-07", "count": 2, "missing": [] })
+        );
+        assert_eq!(
+            month_coverage(&[]),
+            json!({ "first": null, "last": null, "count": 0, "missing": [] })
+        );
+    }
 }

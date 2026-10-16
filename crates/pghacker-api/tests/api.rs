@@ -509,6 +509,17 @@ async fn describes_the_commit_history_the_code_tools_read() {
 #[tokio::test]
 async fn describes_the_ontology() {
     let db = corpus().await;
+    // Mail from two monthly archives with two months between them, and from
+    // a thread page.
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "UPDATE messages SET archive_month = CASE id WHEN 100 THEN '2026-03' WHEN 103 THEN NULL
+                                                         ELSE '2026-06' END",
+        )
+        .await
+        .unwrap();
     let reader = db.reader().await.unwrap();
     let out = match ontology::get_ontology(&reader).await {
         Ok(out) => out,
@@ -563,4 +574,113 @@ async fn describes_the_ontology() {
         json!([{ "name": "pgsql-hackers", "enabled": true, "follow": true }])
     );
     assert!(out["loaded"]["mail"].get("note").is_none());
+    // The months in brief: their range, and the months missing from it.
+    assert_eq!(
+        out["loaded"]["mail"]["months"],
+        json!({ "first": "2026-03", "last": "2026-06", "count": 2, "missing": ["2026-04 to 2026-05"] })
+    );
+
+    // Columns with their types; arrays by their elements' type.
+    let columns = |table: &str| -> String {
+        out["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["table"] == table)
+            .unwrap_or_else(|| panic!("{table}"))["columns"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(
+        columns("messages").starts_with("id bigint, message_id text, list text, thread_id bigint")
+    );
+    assert!(columns("messages").contains("references_ids text[]"));
+    assert!(columns("patches").contains("paths text[]"));
+    assert!(columns("patches").contains("text_ids integer[]"));
+    assert!(columns("code_history").contains("paths text[]"));
+    assert!(columns("code_file_versions").contains("alive int8multirange"));
+    assert!(columns("threads").contains("last_at timestamp with time zone"));
+    assert!(!out["tables"].to_string().contains("ARRAY"));
+    assert!(
+        !columns("features").contains("embedding") && !columns("features").contains("search_text")
+    );
+
+    // The schema's comments describe every table listed and all its
+    // columns, the ones the list leaves out too; get_ontology leaves the
+    // comments out, and says how to read them, with SQL the query tool takes.
+    let note = out["tables_note"].as_str().unwrap();
+    for sql in [ontology::TABLE_COMMENTS_SQL, ontology::COLUMN_COMMENTS_SQL] {
+        assert!(note.contains(&format!("`{sql}`")), "{note}");
+        if let Err(error) = pghacker_sqlquery::check(sql) {
+            panic!("{sql}: {error}");
+        }
+    }
+    let described: Vec<(String, Option<String>)> = reader
+        .query(ontology::TABLE_COMMENTS_SQL, &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    for table in &tables {
+        let description = described.iter().find(|(t, _)| t == table);
+        assert!(matches!(description, Some((_, Some(_)))), "{table}");
+    }
+    assert!(
+        !described
+            .iter()
+            .any(|(t, _)| t == "author_emails" || t == "jobs")
+    );
+    let message_columns = reader
+        .query(ontology::COLUMN_COMMENTS_SQL, &[])
+        .await
+        .unwrap();
+    assert_eq!(message_columns.len(), 18);
+    for row in &message_columns {
+        assert!(
+            row.get::<_, Option<String>>(2).is_some(),
+            "{}",
+            row.get::<_, String>(0)
+        );
+    }
+    let undescribed: Vec<String> = reader
+        .query(
+            "SELECT c.relname || '.' || a.attname FROM pg_class c
+             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+             WHERE c.relnamespace = 'pghacker'::regnamespace AND c.relname = ANY($1)
+               AND col_description(c.oid, a.attnum) IS NULL",
+            &[&tables],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    assert_eq!(undescribed, Vec::<String>::new());
+    assert!(
+        !out.to_string()
+            .contains("without angle brackets: what answers cite")
+    );
+
+    // The examples pass the query tool's checks; the first finds positions
+    // on SQL/PGQ by its slug.
+    let examples = &out["examples"];
+    for example in examples["sql"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(examples["cypher"].as_array().unwrap())
+    {
+        let sql = example.as_str().unwrap();
+        if let Err(error) = pghacker_sqlquery::check(sql) {
+            panic!("{sql}: {error}");
+        }
+    }
+    assert!(
+        examples["cypher"][0]
+            .as_str()
+            .unwrap()
+            .contains("(f:Feature {slug: 'sql-property-graph-queries'})")
+    );
 }

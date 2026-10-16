@@ -2562,6 +2562,7 @@ dependencies = [
  "chrono",
  "pghacker-codesearch",
  "pghacker-core",
+ "pghacker-sqlquery",
  "pgvector",
  "regex",
  "schemars",
