@@ -227,6 +227,29 @@ test("usage telemetry reaches pghacker-mcp and the home page through the supervi
   );
 });
 
+test("feedback's settings reach pghacker-mcp alone, and only with usage telemetry", () => {
+  const settings = (env) => {
+    const environments = processEnvironments(readAzureConfig(env));
+    return Object.entries(environments)
+      .filter(([, processEnv]) => Object.keys(processEnv).some((key) => key.startsWith("PGHACKER_FEEDBACK_")))
+      .map(([name, processEnv]) => [name, processEnv.PGHACKER_FEEDBACK_RATE, processEnv.PGHACKER_FEEDBACK_COMMENTS]);
+  };
+  const withFeedback = { ...USAGE_ENV, PGHACKER_FEEDBACK_RATE: "0.1", PGHACKER_FEEDBACK_COMMENTS: "false" };
+  assert.deepEqual(settings(withFeedback), [["mcp", "0.1", "false"]]);
+  assert.deepEqual(readAzureConfig(withFeedback).feedback, { rate: 0.1, comments: false });
+  // Unset, off; without usage telemetry, nothing at all.
+  assert.deepEqual(settings(USAGE_ENV), [["mcp", "0", "false"]]);
+  assert.deepEqual(settings({ ...ENV, PGHACKER_FEEDBACK_RATE: "0.1" }), []);
+  assert.equal(readAzureConfig({ ...ENV, PGHACKER_FEEDBACK_RATE: "0.1" }).feedback, undefined);
+  for (const rate of ["1.5", "-0.1", "ten percent"]) {
+    assert.throws(() => readAzureConfig({ ...USAGE_ENV, PGHACKER_FEEDBACK_RATE: rate }), /PGHACKER_FEEDBACK_RATE must be a number from 0 to 1/);
+  }
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, PGHACKER_FEEDBACK_COMMENTS: "yes" }),
+    /PGHACKER_FEEDBACK_COMMENTS must be true or false/,
+  );
+});
+
 test("oauth2-proxy signs in the team for the portal, passes /mcp and the home page through, and gets no secret in its arguments", () => {
   const args = oauth2ProxyArgs(readAzureConfig(ENV));
   for (const expected of [

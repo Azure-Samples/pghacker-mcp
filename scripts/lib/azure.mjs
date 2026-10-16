@@ -79,6 +79,23 @@ function integer(env, name, fallback, { min = 1, max = 1_000_000 } = {}) {
   return n;
 }
 
+/** A number from 0 to 1, such as a chance; `fallback` when unset. */
+function fraction(env, name, fallback) {
+  const raw = value(env, name);
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) throw new Error(`${name} must be a number from 0 to 1, such as 0.1.`);
+  return n;
+}
+
+/** true or false; `fallback` when unset. */
+function flag(env, name, fallback) {
+  const raw = value(env, name);
+  if (raw === undefined) return fallback;
+  if (raw !== "true" && raw !== "false") throw new Error(`${name} must be true or false.`);
+  return raw === "true";
+}
+
 function list(env, name) {
   return (value(env, name) ?? "").split(",").map((item) => item.trim()).filter(Boolean);
 }
@@ -141,6 +158,12 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     }
     usage = { ...parseConnectionString(connectionString), idKey, revision: value(env, "CONTAINER_APP_REVISION") };
   }
+  // Feedback, which records with usage telemetry, so only with it: the
+  // chance that a client's hour of use brings a request for it, and whether
+  // the form takes a comment.
+  const feedback = usage
+    ? { rate: fraction(env, "PGHACKER_FEEDBACK_RATE", 0), comments: flag(env, "PGHACKER_FEEDBACK_COMMENTS", false) }
+    : undefined;
   return {
     root,
     dataDir,
@@ -191,6 +214,7 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     },
     portalRole: role,
     usage,
+    feedback,
     pass: Object.fromEntries(PASS_THROUGH.filter((name) => value(env, name) !== undefined).map((name) => [name, env[name]])),
   };
 }
@@ -395,6 +419,12 @@ export function processEnvironments(config) {
       PGHACKER_RATE_BURST: String(config.rate.burst),
       ...(config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
       ...usage,
+      ...(config.feedback
+        ? {
+          PGHACKER_FEEDBACK_RATE: String(config.feedback.rate),
+          PGHACKER_FEEDBACK_COMMENTS: String(config.feedback.comments),
+        }
+        : {}),
     };
     environments.proxy = {
       ...base(config, files.proxy.home, USERS.proxy),

@@ -215,6 +215,15 @@ test("each process gets only the credentials it needs", () => {
   assert.equal(portalEnvironment(parseLocalConfig(`${initialEnv(password)}PILOTSWARM_WORKER_CONCURRENCY=12\n`), {}).PILOTSWARM_WORKER_CONCURRENCY, "12");
   assert.equal(portal.PGHACKER_MCP_URL, "http://127.0.0.1:3102/mcp");
   assert.equal(portal.PGHACKER_INDEXER_MCP_URL, "http://127.0.0.1:3101/mcp");
+  // Agents pointed at another pghacker-mcp turn its feedback off: no person
+  // reads their answers.
+  const agents = (url, inherited = {}) =>
+    portalEnvironment(parseLocalConfig(`${initialEnv(password)}${url ? `PGHACKER_AGENT_MCP_URL=${url}\n` : ""}`), inherited)
+      .PGHACKER_MCP_URL;
+  assert.equal(agents("https://mcp.example.org/mcp"), "https://mcp.example.org/mcp?feedback=off");
+  assert.equal(agents("https://example.test/mcp?trace=1&feedback=on"), "https://example.test/mcp?trace=1&feedback=off");
+  assert.equal(agents("", { PGHACKER_AGENT_MCP_URL: "https://mcp.example.org/mcp" }), "https://mcp.example.org/mcp?feedback=off");
+  assert.throws(() => agents("not a url"), /PGHACKER_AGENT_MCP_URL must be a URL/);
   for (const key of ["HORIZON_EMBED_API_KEY", "PGH_INDEXER_PASSWORD", "PGH_READER_PASSWORD"]) {
     assert.equal(key in portal, false, key);
   }

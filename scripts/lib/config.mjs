@@ -200,10 +200,23 @@ export function portalEnvironment(config, inherited = process.env) {
   if (token) env.GITHUB_TOKEN = token;
   env.PGHACKER_INDEXER_MCP_URL = serviceUrl(config.indexerPort);
   // PGHACKER_AGENT_MCP_URL points the local agents at another pghacker-mcp,
-  // such as a deployment's public endpoint, for an evaluation of it.
-  env.PGHACKER_MCP_URL = config.values.PGHACKER_AGENT_MCP_URL || inherited.PGHACKER_AGENT_MCP_URL
-    || serviceUrl(config.mcpPort);
+  // such as a deployment's public endpoint, for an evaluation of it; with
+  // feedback=off, as no person reads the agents' answers.
+  const agentUrl = config.values.PGHACKER_AGENT_MCP_URL || inherited.PGHACKER_AGENT_MCP_URL;
+  env.PGHACKER_MCP_URL = agentUrl ? withoutFeedback(agentUrl) : serviceUrl(config.mcpPort);
   return env;
+}
+
+/** `url`, an MCP endpoint, with feedback=off: its server never asks for feedback. */
+export function withoutFeedback(url) {
+  let parsed;
+  try {
+    parsed = new URL(url.trim());
+  } catch {
+    throw new Error(`PGHACKER_AGENT_MCP_URL must be a URL, such as https://mcp.example.org/mcp: ${url}`);
+  }
+  parsed.searchParams.set("feedback", "off");
+  return parsed.toString();
 }
 
 function concurrency(value) {

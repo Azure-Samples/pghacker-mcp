@@ -3,8 +3,9 @@
 
 # Usage telemetry: Application Insights on the logs' workspace, which only
 # the app's identity may send to, the retention of its AppEvents table, the
-# key of the users' keyed hashes, and what the app gets; and none of it with
-# usage_enabled = false. Every provider is mocked.
+# key of the users' keyed hashes, and what the app gets, feedback's settings
+# among them; and none of it with usage_enabled = false. Every provider is
+# mocked.
 
 variables {
   subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -109,6 +110,40 @@ run "usage_is_recorded_by_default" {
     condition     = output.usage_app_insights_name == "pghacker-example-usage" && output.usage_app_id == "7a1b2c3d-0000-4000-8000-000000000003"
     error_message = "The outputs must name the resource and its application ID."
   }
+
+  assert {
+    condition = (
+      {
+        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
+        } == {
+        PGHACKER_FEEDBACK_RATE     = "0.1"
+        PGHACKER_FEEDBACK_COMMENTS = "false"
+      }
+      && !anytrue(flatten([
+        for job in azurerm_container_app_job.this : [
+          for env in job.template[0].container[0].env : startswith(env.name, "PGHACKER_FEEDBACK_")
+        ]
+      ]))
+    )
+    error_message = "By default the app, and not the jobs, must ask for feedback in one client-hour in ten, without comments."
+  }
+}
+
+run "feedback_is_set_with_its_variables" {
+  variables {
+    feedback_rate_per_hour    = 0
+    feedback_comments_enabled = true
+  }
+
+  assert {
+    condition = {
+      for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
+      } == {
+      PGHACKER_FEEDBACK_RATE     = "0"
+      PGHACKER_FEEDBACK_COMMENTS = "true"
+    }
+    error_message = "The app must get the feedback rate and comments setting as configured; a rate of 0 turns feedback off."
+  }
 }
 
 run "usage_can_be_turned_off" {
@@ -130,10 +165,10 @@ run "usage_can_be_turned_off" {
 
   assert {
     condition = (
-      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY"], env.name)])
+      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_FEEDBACK_RATE", "PGHACKER_FEEDBACK_COMMENTS"], env.name)])
       && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
     )
-    error_message = "Without usage, the app must get neither the connection string nor the users' key, so it records nothing."
+    error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."
   }
 }
 
@@ -163,6 +198,26 @@ run "app_env_cannot_replace_the_usage_settings" {
 
   variables {
     app_env = { APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=elsewhere" }
+  }
+
+  expect_failures = [var.app_env]
+}
+
+run "feedback_rate_is_a_chance" {
+  command = plan
+
+  variables {
+    feedback_rate_per_hour = 1.5
+  }
+
+  expect_failures = [var.feedback_rate_per_hour]
+}
+
+run "app_env_cannot_replace_the_feedback_settings" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_FEEDBACK_RATE = "1" }
   }
 
   expect_failures = [var.app_env]

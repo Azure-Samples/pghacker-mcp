@@ -588,6 +588,8 @@ variable "app_env" {
       "PGHACKER_DB_PORT",
       "PGHACKER_DB_SSLMODE",
       "PGHACKER_DEPLOYMENT",
+      "PGHACKER_FEEDBACK_COMMENTS",
+      "PGHACKER_FEEDBACK_RATE",
       "PGHACKER_FOUNDRY_EMBEDDING",
       "PGHACKER_FOUNDRY_ENDPOINT",
       "PGHACKER_FOUNDRY_LUNA",
@@ -604,7 +606,7 @@ variable "app_env" {
       "PGHACKER_RATE_PER_MINUTE",
       "PGHACKER_USAGE_ID_KEY",
     ])) == 0
-    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl and usage telemetry settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
+    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
   }
 }
 
@@ -679,4 +681,23 @@ variable "usage_total_retention_days" {
     condition     = var.usage_total_retention_days >= var.usage_retention_days && var.usage_total_retention_days <= 4383 && floor(var.usage_total_retention_days) == var.usage_total_retention_days
     error_message = "usage_total_retention_days must be a whole number from usage_retention_days to 4383."
   }
+}
+
+variable "feedback_rate_per_hour" {
+  description = "The chance, from 0 to 1, that a client's hour of use of the public MCP endpoint brings one request for feedback, \"Was this answer helpful?\", which the client's own prompt shows after an answer (PGHACKER_FEEDBACK_RATE; PRIVACY.md). Only clients that declare form elicitation, under MCP 2026-07-28, are asked. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
+  type        = number
+  default     = 0.1
+  nullable    = false
+
+  validation {
+    condition     = var.feedback_rate_per_hour >= 0 && var.feedback_rate_per_hour <= 1
+    error_message = "feedback_rate_per_hour must be from 0 to 1, such as 0.1; 0 turns feedback off."
+  }
+}
+
+variable "feedback_comments_enabled" {
+  description = "Whether the feedback prompt also takes an optional comment of up to 500 characters, recorded with the rating (PGHACKER_FEEDBACK_COMMENTS). Off by default: a comment is free text, which can hold personal data; update PRIVACY.md before turning it on."
+  type        = bool
+  default     = false
+  nullable    = false
 }

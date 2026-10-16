@@ -206,6 +206,8 @@ run "app_and_restore_job" {
       PGHACKER_GITHUB_ORG           = "example-org"
       PGHACKER_GITHUB_TEAM          = "example-team"
       PGHACKER_PORTAL_ROLE          = "user"
+      PGHACKER_FEEDBACK_RATE        = "0.1"
+      PGHACKER_FEEDBACK_COMMENTS    = "false"
       # The mocked resource's, which only names it: local authentication is off.
       APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
     }

@@ -103,9 +103,9 @@ locals {
     PGHACKER_FOUNDRY_EMBEDDING = azurerm_cognitive_deployment.this[var.foundry_embedding_deployment].name
   }
 
-  # The app's: the jobs' plus its public face, sign-in, crawler and usage
-  # telemetry settings, then app_env, whose validation keeps it from
-  # replacing any of these. The connection string isn't a secret: with local
+  # The app's: the jobs' plus its public face, sign-in, crawler, usage
+  # telemetry and feedback settings, then app_env, whose validation keeps it
+  # from replacing any of these. The connection string isn't a secret: with local
   # authentication off, its instrumentation key only names the resource.
   app_env = merge(
     local.job_env,
@@ -124,6 +124,11 @@ locals {
     },
     length(var.github_users) > 0 ? { PGHACKER_GITHUB_USERS = join(",", var.github_users) } : {},
     var.usage_enabled ? { APPLICATIONINSIGHTS_CONNECTION_STRING = nonsensitive(azurerm_application_insights.usage[0].connection_string) } : {},
+    # Feedback records with usage telemetry, so it goes with it.
+    var.usage_enabled ? {
+      PGHACKER_FEEDBACK_RATE     = tostring(var.feedback_rate_per_hour)
+      PGHACKER_FEEDBACK_COMMENTS = tostring(var.feedback_comments_enabled)
+    } : {},
     var.app_env,
   )
 }
