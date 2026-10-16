@@ -147,7 +147,7 @@ Bootstrap creates each edge label with its indexes. Startup refuses a database w
 
 `next_extraction_batch` leases the threads that extraction never read, or whose mail changed since, from two lanes: **new mail**, whose latest message is from the last 7 days, oldest first; and the **backfill**, from the newest back to the archive's start. While both have threads, new mail gets at most half the leases. A thread whose mail changes during its lease is leased again. With `PGHACKER_EXTRACTION_ORDER=largest`, the largest threads never extracted go first instead. `ingest_status` shows both lanes (`extraction.lanes`).
 
-Extracting a thread again replaces its participants' positions there, except those a merge moved, which `undo_merge` needs. A feature's release comes from its thread with the latest message.
+Extracting a thread again replaces its participants' positions there, except those a merge moved, which `undo_merge` needs. A feature's release comes from its thread with the latest message, saved by the name it shipped as. Four releases were renamed during their development, and their threads use the development names: 6.6 for 7.0, 7.5 for 8.0, 8.5 for 9.0 and 9.7 for 10 (`shipped_release()`, migration `0021`).
 
 `npm run crawl` drives extraction locally: `--supervisor` lets the pghacker-crawler agent run the pilot, and `--watch` keeps extracting as threads arrive, as in Azure. Keep `--concurrency` at or below `PILOTSWARM_WORKER_CONCURRENCY`.
 

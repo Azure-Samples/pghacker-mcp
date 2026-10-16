@@ -187,7 +187,7 @@ pub struct FeatureIn {
     /// What the thread shows by its last messages (see status_signals). A
     /// reused feature keeps the most advanced status any of its threads showed.
     pub status: FeatureStatus,
-    /// The major version it targeted or shipped in, such as "19". A feature's release comes from its thread with the latest message.
+    /// The major version it targeted or shipped in, such as "19". A feature's release comes from its thread with the latest message, saved by the name it shipped as: 6.6 as 7.0, 7.5 as 8.0, 8.5 as 9.0, 9.7 as 10.
     #[serde(default)]
     pub release: Option<String>,
     /// Paths of files whose changes implement it, from this thread's patches or file anchors.
@@ -1314,11 +1314,12 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 let slug = feature.slug.clone().expect("validated");
                 let embedding = vectors.next().flatten();
                 let release_at = feature.release.as_ref().and(evidence_at);
+                // A release by the name it shipped as (migration 0021): 9.0, not 8.5.
                 let id: i64 = tx
                     .query_one(
                         "INSERT INTO features (slug, name, description, status, release, release_at, embedding,
                                                created_by, model)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                         VALUES ($1, $2, $3, $4, shipped_release($5), $6, $7, $8, $9) RETURNING id",
                         &[&slug, &feature.name.trim(), &feature.description.trim(), &feature.status.as_str(),
                           &feature.release, &release_at, &embedding, &session, &model],
                     )
@@ -1348,13 +1349,14 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 // A status only moves forward: a follow-up thread doesn't undo a
                 // commit. A release is replaced only by one from evidence at least
                 // as recent, an undated thread's only fills a missing one: an
-                // older thread extracted later doesn't undo a newer one's.
+                // older thread extracted later doesn't undo a newer one's. It's
+                // saved by the name it shipped as.
                 tx.execute(
                     "UPDATE features SET
                          status = CASE WHEN pg_temp.status_rank($2) > pg_temp.status_rank(status) THEN $2 ELSE status END,
                          release = CASE WHEN $3::text IS NOT NULL
                                              AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
-                                        THEN $3 ELSE release END,
+                                        THEN shipped_release($3) ELSE release END,
                          release_at = CASE WHEN $3::text IS NOT NULL
                                                 AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
                                            THEN $4 ELSE release_at END,

@@ -658,6 +658,173 @@ async fn releases_set_before_take_their_features_most_recent_thread() {
     );
 }
 
+#[tokio::test]
+async fn a_release_is_saved_by_the_name_it_shipped_as() {
+    let db = corpus(&[
+        (1, Some(500), "pending", false),
+        (2, Some(400), "pending", false),
+        (3, Some(300), "pending", false),
+        (4, Some(200), "pending", false),
+        (5, Some(100), "pending", false),
+    ])
+    .await;
+    let indexer = indexer(&db, &[]);
+    let at = |release: &str, thread: i64| (Some(release.to_owned()), Some(thread));
+
+    claim(&db, &indexer, 1, "foreign-keys", Some("6.6")).await;
+    assert_eq!(release(&db, "foreign-keys").await, at("7.0", 1));
+    claim(&db, &indexer, 2, "savepoints", Some("7.5")).await;
+    assert_eq!(release(&db, "savepoints").await, at("8.0", 2));
+    claim(&db, &indexer, 3, "sql-pgq", Some("19")).await;
+    assert_eq!(
+        release(&db, "sql-pgq").await,
+        at("19", 3),
+        "a release that shipped as it was named"
+    );
+
+    claim(&db, &indexer, 1, "plan-clause", None).await;
+    claim(&db, &indexer, 4, "plan-clause", Some("8.5")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("9.0", 4),
+        "a reused feature's missing release"
+    );
+    claim(&db, &indexer, 5, "plan-clause", Some("9.7")).await;
+    assert_eq!(
+        release(&db, "plan-clause").await,
+        at("10", 5),
+        "a newer thread's release replaces it"
+    );
+}
+
+/// The strings a Cypher query returns, without agtype's quotes, sorted.
+async fn cypher(db: &TestDb, query: &str) -> Vec<String> {
+    let mut values: Vec<String> = db
+        .reader()
+        .await
+        .unwrap()
+        .query(
+            &format!(
+                "SELECT x::text FROM ag_catalog.cypher('pghacker_graph', $$ {query} $$) \
+                 AS (x ag_catalog.agtype)"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get::<_, String>(0).trim_matches('"').to_owned())
+        .collect();
+    values.sort();
+    values
+}
+
+#[tokio::test]
+async fn releases_saved_by_development_names_take_their_shipped_names() {
+    let db = corpus(&[(1, Some(30), "extracted", false)]).await;
+    let mut client = db.indexer().await.unwrap();
+    // As images before 0021 saved them.
+    client
+        .batch_execute(
+            "INSERT INTO features (id, slug, name, description, status, release, release_at) VALUES
+                 (1, 'foreign-keys', 'Foreign keys', 'A change.', 'committed', '6.6', '1999-09-28'),
+                 (2, 'savepoints', 'Savepoints', 'A change.', 'committed', '7.5', '2004-07-11'),
+                 (3, 'hot-standby', 'Hot standby', 'A change.', 'committed', '8.5', '2010-01-12'),
+                 (4, 'standby-queries', 'Standby queries', 'A change.', 'committed', '8.5', '2009-11-02'),
+                 (5, 'pglogical', 'pglogical', 'A change.', 'proposed', '9.7', '2016-04-15'),
+                 (6, 'streaming-replication', 'Streaming replication', 'A change.', 'committed', '9.0',
+                  '2010-03-23'),
+                 (7, 'sql-pgq', 'SQL/PGQ', 'A change.', 'in_progress', '19', '2026-01-01'),
+                 (8, 'no-release', 'No release', 'A change.', 'proposed', NULL, NULL);
+             UPDATE features SET merged_into = 3 WHERE id = 4;
+             INSERT INTO feature_threads (feature_id, thread_id) SELECT id, 1 FROM features;",
+        )
+        .await
+        .unwrap();
+    graph::sync(&mut client).await.unwrap();
+    let releases = "MATCH (r:Release) RETURN r.version";
+    assert_eq!(
+        cypher(&db, releases).await,
+        ["19", "6.6", "7.5", "8.5", "9.0", "9.7"]
+    );
+    let dated = "SELECT string_agg(id || ' ' || coalesce(release_at::text, '-'), ', ' ORDER BY id) FROM features";
+    let dates: String = client.query_one(dated, &[]).await.unwrap().get(0);
+
+    client
+        .batch_execute("DROP FUNCTION shipped_release(text)")
+        .await
+        .unwrap();
+    client
+        .batch_execute(include_str!(
+            "../../../migrations/0021_shipped_releases.sql"
+        ))
+        .await
+        .unwrap();
+    let saved: Vec<(i64, Option<String>)> = client
+        .query("SELECT id, release FROM features ORDER BY id", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    let shipped = |id: i64, release: &str| (id, Some(release.to_owned()));
+    assert_eq!(
+        saved,
+        [
+            shipped(1, "7.0"),
+            shipped(2, "8.0"),
+            shipped(3, "9.0"),
+            shipped(4, "9.0"),
+            shipped(5, "10"),
+            shipped(6, "9.0"),
+            shipped(7, "19"),
+            (8, None),
+        ],
+        "every feature, merged or not"
+    );
+    let unchanged: String = client.query_one(dated, &[]).await.unwrap().get(0);
+    assert_eq!(unchanged, dates, "the evidence's dates stay");
+
+    // The change capture brings the graph along, without a full sync.
+    let full_requested: bool = client
+        .query_one(
+            "SELECT full_requested > full_done FROM graph_sync_state",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!full_requested);
+    assert!(graph::pending(&client).await.unwrap());
+    while graph::sync_changes(&mut client, graph::BATCH)
+        .await
+        .unwrap()
+        .changes
+        > 0
+    {}
+    assert_eq!(
+        cypher(&db, releases).await,
+        ["10", "19", "7.0", "8.0", "9.0"]
+    );
+    assert_eq!(
+        cypher(
+            &db,
+            "MATCH (f:Feature)-[:TARGETS]->(r:Release) RETURN f.slug + ' ' + r.version"
+        )
+        .await,
+        [
+            "foreign-keys 7.0",
+            "hot-standby 9.0",
+            "pglogical 10",
+            "savepoints 8.0",
+            "sql-pgq 19",
+            "streaming-replication 9.0"
+        ]
+    );
+    let drift = graph::check(&mut client).await.unwrap();
+    assert!(drift.is_empty(), "{drift:#?}");
+}
+
 /// Each position: its id, author, feature, decision, stance, summary and
 /// how many citations it has.
 type Position = (i64, i64, Option<i64>, Option<i64>, String, String, i64);

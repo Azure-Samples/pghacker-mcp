@@ -193,8 +193,9 @@ Startup applies the migrations a database lacks, and refuses one that changed af
 | `0018_feature_release_at` | When a feature's release was stated |
 | `0019_patch_series_text` | Patches' series versions as text, parsed again ([Patch series](#patch-series)) |
 | `0020_retire_version_sources` | Deletes the PostgreSQL versions the snapshot loader left in `sources`, and its jobs ([Commit history](#commit-history)) |
+| `0021_shipped_releases` | Features' releases by the names they shipped as ([Shipped release names](#shipped-release-names)) |
 
-Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version.
+Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)).
 
 ### Patch series
 
@@ -229,6 +230,19 @@ ALTER TABLE pghacker.patches ADD COLUMN series_version text;
 UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_after = now(),
        last_error = NULL, result = NULL, finished_at = NULL
 WHERE kind = 'patch_series';
+```
+
+### Shipped release names
+
+An image with migration `0021_shipped_releases` saves a feature's release by the name it shipped as. Four releases were renamed during their development, and their threads use the development names: 6.6 for 7.0, 7.5 for 8.0, 8.5 for 9.0 and 9.7 for 10 ([reference](../docs/reference.md#extraction)).
+- The migration renames the features saved before: 76 in production, and more as extraction reaches older threads.
+- The graph sync then moves their `TARGETS` edges and drops the four development names' `Release` vertices, without a full sync.
+
+Images before `0021`, such as `aad595a` and `33616a4`, save releases as their threads name them. That includes the old revision while it overlaps the new one during the upgrade. Rolling back to one needs nothing. After the upgrade, and after rolling forward from one, rename the releases they saved, as `pgh_indexer`; it changes nothing when there are none:
+
+```sql
+UPDATE pghacker.features SET release = pghacker.shipped_release(release)
+WHERE release IS DISTINCT FROM pghacker.shipped_release(release);
 ```
 
 ### Email addresses
@@ -370,7 +384,8 @@ them (`release_at`), so keep extraction off (`PGHACKER_CRAWL=off`). After
 rolling forward, run `SELECT * FROM pghacker.restore_addresses();`. If it
 extracted, check the releases it set or changed against their threads
 before extraction resumes, and date those without `release_at` as `0018`
-did: the latest `last_at` of the feature's threads.
+did: the latest `last_at` of the feature's threads. Then rename the
+development names it saved ([Shipped release names](#shipped-release-names)).
 
 ## Custom domains
 
