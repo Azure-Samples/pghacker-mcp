@@ -15,14 +15,19 @@
 //!
 //! [`plan`] threads the affected threads' messages afresh, all at once and
 //! so in no order. A message is linked to its ancestors up to the newest that
-//! starts a topic. A piece of linked messages joins the other thread whose
-//! message, root or unstored ancestor it's linked to, else keeps the
-//! affected thread whose root it holds. A piece that starts with a reply
-//! without ancestors then joins the nearest thread with its subject, as the
-//! subject match of [`crate::store`] does. An affected thread rooted at what
-//! isn't a message keeps the remaining piece with most of its messages, and
-//! the others become threads of their own, rooted at their first message
-//! without ancestors, else at the oldest ancestor of their first message.
+//! starts a topic. A piece of linked messages keeps the affected thread whose
+//! root it holds; of several, each keeps its messages, and the piece's others
+//! join the one rooted at the piece's root, else the one with most of them.
+//! Another piece with corrected IDs joins the other thread
+//! whose message, root or unstored ancestor it's linked to; without them,
+//! only one rooted at its own root, since ingest saw its links and left
+//! apart the threads they link. A piece that starts with a reply without
+//! ancestors then joins a thread with its subject, as the subject match of
+//! [`crate::store`] does, the one it's in if it can. An affected thread
+//! rooted at what links no piece keeps the remaining piece with most of its
+//! messages, and the others become threads of their own, rooted at their
+//! first message without ancestors, else at the oldest ancestor of their
+//! first message.
 //! The changes fall into groups that touch threads no other group touches,
 //! each applied in a transaction of its own ([`check`], [`apply_moves`],
 //! [`finish`]).
@@ -274,6 +279,8 @@ pub struct Msg {
     pub sent_at: Option<DateTime<Utc>>,
     /// It starts a topic.
     pub starts_topic: bool,
+    /// Its threading IDs were corrected ([`reread`]).
+    pub changed: bool,
     /// The ancestors that link it ([`ancestors`]).
     pub ancestors: Vec<String>,
 }
@@ -486,9 +493,15 @@ pub fn partition(input: &Input) -> Partition {
         .collect();
 
     let mut out = Partition::default();
-    // A piece linked to other threads joins the one it's linked to most; one
-    // that holds an affected thread's root keeps that thread.
+    // A piece that holds an affected thread's root keeps that thread. Another
+    // piece with corrected IDs joins the other thread it's linked to most.
+    // Ingest saw the links that stored IDs had already, and left apart the
+    // threads they link (it doesn't merge threads that extracts cite): a
+    // piece without corrected IDs joins another thread only when that thread
+    // is rooted at the piece's root, which no other thread may take.
     let mut destinations: Vec<Option<Destination>> = Vec::with_capacity(pieces.len());
+    // Messages that stay in their threads, apart from their pieces.
+    let mut stay: HashMap<i64, i64> = HashMap::new();
     for piece in &pieces {
         let mut through_messages: BTreeMap<i64, usize> = BTreeMap::new();
         for m in &piece.messages {
@@ -511,32 +524,61 @@ pub fn partition(input: &Input) -> Partition {
             .flatten()
             .copied()
             .collect();
-        let joined = through_messages
+        // Of the affected threads whose roots it holds, it joins the one
+        // rooted at its own root, else the one with most of its messages;
+        // the others keep their messages.
+        let held: Vec<i64> = input
+            .roots
             .iter()
-            .max_by_key(|(t, n)| (**n, Reverse(**t)))
+            .filter(|(_, root)| piece.ids.contains(root.as_str()))
             .map(|(t, _)| *t)
-            .or_else(|| through_roots.first().copied())
-            .or_else(|| through_shared.first().copied());
-        destinations.push(match joined {
-            Some(t) => {
-                let also: BTreeSet<i64> = through_messages
-                    .keys()
-                    .chain(&through_roots)
-                    .chain(&through_shared)
-                    .copied()
-                    .filter(|&o| o != t)
-                    .collect();
-                if !also.is_empty() {
-                    out.also.entry(t).or_default().extend(also);
+            .collect();
+        let own = if held.len() > 1 {
+            let root = piece.root();
+            held.iter()
+                .copied()
+                .find(|t| input.roots[t] == root)
+                .or_else(|| {
+                    held.iter().copied().max_by_key(|t| {
+                        let n = piece.messages.iter().filter(|m| m.thread == *t).count();
+                        (n, Reverse(*t))
+                    })
+                })
+        } else {
+            held.first().copied()
+        };
+        if let Some(o) = own {
+            for m in &piece.messages {
+                if m.thread != o && held.contains(&m.thread) {
+                    stay.insert(m.id, m.thread);
                 }
-                Some(Destination::Thread(t))
             }
-            None => input
-                .roots
+        }
+        let joined = if piece.messages.iter().any(|m| m.changed) {
+            through_messages
                 .iter()
-                .find(|(_, root)| piece.ids.contains(root.as_str()))
-                .map(|(t, _)| Destination::Thread(*t)),
-        });
+                .max_by_key(|(t, n)| (**n, Reverse(**t)))
+                .map(|(t, _)| *t)
+                .or_else(|| through_roots.first().copied())
+                .or_else(|| through_shared.first().copied())
+        } else {
+            input.outside_roots.get(&piece.root()).copied()
+        };
+        let destination = own.or(joined);
+        if let Some(t) = destination {
+            let also: BTreeSet<i64> = through_messages
+                .keys()
+                .chain(&through_roots)
+                .chain(&through_shared)
+                .chain(&held)
+                .copied()
+                .filter(|&o| o != t)
+                .collect();
+            if !also.is_empty() {
+                out.also.entry(t).or_default().extend(also);
+            }
+        }
+        destinations.push(destination.map(Destination::Thread));
     }
     // The others that start with a reply without ancestors join a thread
     // with their subject, below.
@@ -575,9 +617,10 @@ pub fn partition(input: &Input) -> Partition {
     }
 
     // Pieces that start with a reply without ancestors, in the replies'
-    // order: the nearest thread with their subject, active within 60 days
-    // and rooted before them, as the subject match does; else a thread of
-    // their own, which later ones may join.
+    // order: a thread with their subject, active within 60 days and rooted
+    // before them, as the subject match does, the one the reply is in if it
+    // can, else the nearest; else a thread of their own, which later ones
+    // may join.
     let window = TimeDelta::days(SUBJECT_WINDOW_DAYS);
     let mut candidates: Vec<SubjectCandidate<'_>> = pieces
         .iter()
@@ -598,16 +641,17 @@ pub fn partition(input: &Input) -> Partition {
     for (i, m) in replies {
         let piece = &pieces[i];
         let key = subject::key(&m.subject);
-        let mut best: Option<(TimeDelta, Destination)> = None;
+        let own = Destination::Thread(m.thread);
+        let mut best: Option<(bool, TimeDelta, Destination)> = None;
         if let Some(sent) = m.sent_at {
             let mut consider = |last: Option<DateTime<Utc>>, destination: &Destination| {
                 let Some(last) = last else { return };
-                let distance = (last - sent).abs();
+                let rank = (*destination != own, (last - sent).abs());
                 if best
                     .as_ref()
-                    .is_none_or(|(d, b)| (distance, destination) < (*d, b))
+                    .is_none_or(|(o, d, b)| (rank.0, rank.1, destination) < (*o, *d, b))
                 {
-                    best = Some((distance, destination.clone()));
+                    best = Some((rank.0, rank.1, destination.clone()));
                 }
             };
             for c in &candidates {
@@ -625,7 +669,7 @@ pub fn partition(input: &Input) -> Partition {
             }
         }
         let destination = match best {
-            Some((_, destination)) => {
+            Some((_, _, destination)) => {
                 // The thread it joins grows with it.
                 if let Some(c) = candidates.iter_mut().find(|c| c.destination == destination) {
                     let joined = piece.candidate(destination.clone());
@@ -645,7 +689,10 @@ pub fn partition(input: &Input) -> Partition {
     for (piece, destination) in pieces.iter().zip(destinations) {
         let destination = destination.expect("every piece settled");
         for m in &piece.messages {
-            out.destinations.insert(m.id, destination.clone());
+            let to = stay
+                .get(&m.id)
+                .map_or_else(|| destination.clone(), |t| Destination::Thread(*t));
+            out.destinations.insert(m.id, to);
         }
     }
     out
@@ -898,6 +945,7 @@ pub async fn plan(client: &impl GenericClient, changes: &[HeaderChange]) -> Resu
                 subject: r.subject.clone(),
                 sent_at: r.sent_at,
                 starts_topic,
+                changed: fixed.contains_key(&r.id),
                 ancestors: ancestors(
                     &r.message_id,
                     r.parent.as_deref(),

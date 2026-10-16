@@ -19,8 +19,15 @@ fn msg(id: i64, message_id: &str, thread: i64, d: i64, subject: &str, ancestors:
         subject: subject.into(),
         sent_at: day(d),
         starts_topic: false,
+        changed: false,
         ancestors: ancestors.iter().map(|a| a.to_string()).collect(),
     }
+}
+
+/// `m`, with threading IDs that the reread corrected.
+fn corrected(mut m: Msg) -> Msg {
+    m.changed = true;
+    m
 }
 
 fn new(root: &str) -> Destination {
@@ -58,9 +65,9 @@ fn pieces_keep_their_thread_join_others_or_become_threads() {
         msg(2, "a", 1, 1, "Re: Heads up: 7.3.3", &["r1"]),
         // Glued on by an address, now gone: a conversation whose root isn't
         // stored, and a reply to another thread's message.
-        msg(3, "x", 1, 300, "Re: Windows build", &["u1"]),
+        corrected(msg(3, "x", 1, 300, "Re: Windows build", &["u1"])),
         msg(4, "y", 1, 301, "Re: Windows build", &["x", "u1"]),
-        msg(5, "z", 1, 500, "Re: Parser bug?", &["o1"]),
+        corrected(msg(5, "z", 1, 500, "Re: Parser bug?", &["o1"])),
     ];
     input.outside_messages.insert("o1".into(), 9);
     let p = partition(&input);
@@ -151,7 +158,7 @@ fn a_piece_linked_to_two_threads_joins_one_and_tells() {
     input.roots.insert(1, "r".into());
     input.messages = vec![
         msg(1, "r", 1, 0, "Topic", &[]),
-        msg(2, "m", 1, 1, "Re: Topic", &["o1", "o2"]),
+        corrected(msg(2, "m", 1, 1, "Re: Topic", &["o1", "o2"])),
         msg(3, "n", 1, 2, "Re: Topic", &["o2", "m"]),
     ];
     input.outside_messages.insert("o1".into(), 9);
@@ -335,5 +342,266 @@ fn a_reply_without_ancestors_keeps_the_thread_it_roots() {
     assert_eq!(p.destinations[&2], new("tutorial"));
     assert_eq!(p.destinations[&3], new("tutorial"));
     assert!(p.reroots.is_empty());
+    assert_roots_free(&input, &p);
+}
+
+#[test]
+fn a_piece_with_its_threads_root_keeps_it_and_leaves_linked_threads_apart() {
+    // "support for MERGE" loses a topic. One of its replies also answers
+    // "MERGE and parsing with prepared statements", which ingest kept apart
+    // because extracts cite both: it stays with the root, and the other
+    // thread stays as it is.
+    let mut input = Input::default();
+    input.roots.insert(12364, "merge".into());
+    let mut topic = msg(
+        3,
+        "bulk",
+        12364,
+        495,
+        "Should use MERGE use BulkInsertState ?",
+        &[],
+    );
+    topic.starts_topic = true;
+    input.messages = vec![
+        msg(1, "merge", 12364, 0, "support for MERGE", &[]),
+        msg(2, "r2", 12364, 450, "Re: support for MERGE", &["merge"]),
+        topic,
+        msg(
+            4,
+            "simon",
+            12364,
+            590,
+            "Re: MERGE and parsing with prepared statements",
+            &["prep2", "prep1", "r2"],
+        ),
+    ];
+    input.outside_messages.insert("prep1".into(), 11580);
+    input.outside_messages.insert("prep2".into(), 11580);
+    let p = partition(&input);
+    for m in [1, 2, 4] {
+        assert_eq!(
+            p.destinations[&m],
+            Destination::Thread(12364),
+            "message {m}"
+        );
+    }
+    assert_eq!(p.destinations[&3], new("bulk"));
+    assert!(p.reroots.is_empty());
+    assert_eq!(p.also, BTreeMap::from([(12364, BTreeSet::from([11580]))]));
+    assert_roots_free(&input, &p);
+
+    // A root that isn't stored, which the piece's messages name, holds it
+    // as well.
+    let mut input = Input::default();
+    input.roots.insert(11641, "u0".into());
+    let mut topic = msg(3, "restart", 11641, 400, "storing an explicit nonce", &[]);
+    topic.starts_topic = true;
+    input.messages = vec![
+        msg(1, "a", 11641, 0, "Re: storing an explicit nonce", &["u0"]),
+        msg(
+            2,
+            "b",
+            11641,
+            1,
+            "Re: storing an explicit nonce",
+            &["o1", "a", "u0"],
+        ),
+        topic,
+    ];
+    input.outside_messages.insert("o1".into(), 12411);
+    let p = partition(&input);
+    assert_eq!(p.destinations[&1], Destination::Thread(11641));
+    assert_eq!(p.destinations[&2], Destination::Thread(11641));
+    assert_eq!(p.destinations[&3], new("restart"));
+    assert!(p.reroots.is_empty());
+    assert_roots_free(&input, &p);
+}
+
+#[test]
+fn a_piece_holding_two_roots_leaves_each_thread_its_messages() {
+    // As above, but "MERGE and parsing with prepared statements" is
+    // affected too: each thread keeps its messages.
+    let mut input = Input::default();
+    input.roots.insert(12364, "merge".into());
+    input.roots.insert(11580, "prep0".into());
+    let mut topic = msg(
+        5,
+        "bulk",
+        12364,
+        495,
+        "Should use MERGE use BulkInsertState ?",
+        &[],
+    );
+    topic.starts_topic = true;
+    let prepared = "MERGE and parsing with prepared statements";
+    let re_prepared = format!("Re: {prepared}");
+    input.messages = vec![
+        msg(1, "merge", 12364, 0, "support for MERGE", &[]),
+        msg(2, "r2", 12364, 450, "Re: support for MERGE", &["merge"]),
+        msg(3, "prep0", 11580, 560, prepared, &[]),
+        msg(4, "prep1", 11580, 561, &re_prepared, &["prep0"]),
+        topic,
+        msg(
+            6,
+            "simon",
+            12364,
+            590,
+            &re_prepared,
+            &["prep1", "prep0", "r2"],
+        ),
+    ];
+    let p = partition(&input);
+    for m in [1, 2, 6] {
+        assert_eq!(
+            p.destinations[&m],
+            Destination::Thread(12364),
+            "message {m}"
+        );
+    }
+    assert_eq!(p.destinations[&3], Destination::Thread(11580));
+    assert_eq!(p.destinations[&4], Destination::Thread(11580));
+    assert_eq!(p.destinations[&5], new("bulk"));
+    assert!(p.reroots.is_empty());
+    assert_eq!(p.also, BTreeMap::from([(12364, BTreeSet::from([11580]))]));
+    assert_roots_free(&input, &p);
+}
+
+#[test]
+fn pieces_without_corrected_ids_leave_linked_threads_apart() {
+    // "storing an explicit nonce" starts a topic in reply to a thread whose
+    // message, the thread's root, isn't stored. Another thread, which ingest
+    // kept apart, is rooted at one of its replies, and a second topic
+    // follows a year later: the thread keeps the first topic's messages,
+    // under the topic.
+    let mut input = Input::default();
+    input.roots.insert(11641, "u0".into());
+    let mut nonce = msg(1, "nonce", 11641, 0, "storing an explicit nonce", &[]);
+    nonce.starts_topic = true;
+    let mut checksums = msg(
+        4,
+        "checksums",
+        11641,
+        380,
+        "better page-level checksums",
+        &[],
+    );
+    checksums.starts_topic = true;
+    input.messages = vec![
+        nonce,
+        msg(
+            2,
+            "r27",
+            11641,
+            2,
+            "Re: storing an explicit nonce",
+            &["nonce"],
+        ),
+        msg(
+            3,
+            "r28",
+            11641,
+            3,
+            "Re: storing an explicit nonce",
+            &["r27", "nonce"],
+        ),
+        checksums,
+    ];
+    input.outside_roots.insert("r27".into(), 12411);
+    let p = partition(&input);
+    for m in 1..=3 {
+        assert_eq!(
+            p.destinations[&m],
+            Destination::Thread(11641),
+            "message {m}"
+        );
+    }
+    assert_eq!(p.destinations[&4], new("checksums"));
+    assert_eq!(p.reroots, BTreeMap::from([(11641, "nonce".to_owned())]));
+    assert_roots_free(&input, &p);
+
+    // With corrected IDs, the piece joins the thread rooted at its reply.
+    input.messages[1].changed = true;
+    let p = partition(&input);
+    for m in 1..=3 {
+        assert_eq!(
+            p.destinations[&m],
+            Destination::Thread(12411),
+            "message {m}"
+        );
+    }
+    assert_roots_free(&input, &p);
+}
+
+#[test]
+fn a_topic_joins_the_thread_rooted_at_it() {
+    // Replies to a topic arrived first and got a thread rooted at it.
+    let mut input = Input::default();
+    input.roots.insert(5817, "fdw".into());
+    let mut topic = msg(
+        3,
+        "wholerow",
+        5817,
+        2340,
+        "Partition-wise join with whole row vars",
+        &[],
+    );
+    topic.starts_topic = true;
+    input.messages = vec![
+        msg(
+            1,
+            "fdw",
+            5817,
+            0,
+            "Expression errors with \"FOR UPDATE\" and postgres_fdw",
+            &[],
+        ),
+        msg(
+            2,
+            "fdw-re",
+            5817,
+            1,
+            "Re: Expression errors with \"FOR UPDATE\" and postgres_fdw",
+            &["fdw"],
+        ),
+        topic,
+        msg(
+            4,
+            "wholerow-re",
+            5817,
+            2341,
+            "Re: Partition-wise join with whole row vars",
+            &["wholerow"],
+        ),
+    ];
+    input.outside_roots.insert("wholerow".into(), 4220);
+    let p = partition(&input);
+    assert_eq!(p.destinations[&1], Destination::Thread(5817));
+    assert_eq!(p.destinations[&2], Destination::Thread(5817));
+    assert_eq!(p.destinations[&3], Destination::Thread(4220));
+    assert_eq!(p.destinations[&4], Destination::Thread(4220));
+    assert_roots_free(&input, &p);
+}
+
+#[test]
+fn a_reply_without_ancestors_stays_in_its_thread_with_its_subject() {
+    // Two threads with one subject, which ingest kept apart, and a topic
+    // that makes the first affected: its replies without ancestors stay,
+    // though the other thread is nearer.
+    let subject = "Foreign join pushdown vs EvalPlanQual";
+    let reply = format!("Re: {subject}");
+    let mut input = Input::default();
+    input.roots.insert(27984, "fj".into());
+    let mut topic = msg(3, "hook", 27984, 70, "Hooking at standard_join_search", &[]);
+    topic.starts_topic = true;
+    input.messages = vec![
+        msg(1, "fj", 27984, 0, subject, &[]),
+        msg(2, "fj-re", 27984, 110, &reply, &["fj"]),
+        topic,
+        msg(4, "kaigai", 27984, 117, &reply, &[]),
+    ];
+    input.outside_subjects.insert(4, vec![(27532, day(118))]);
+    let p = partition(&input);
+    assert_eq!(p.destinations[&4], Destination::Thread(27984));
+    assert_eq!(p.destinations[&3], new("hook"));
     assert_roots_free(&input, &p);
 }
