@@ -54,8 +54,9 @@ impl Question {
 pub(super) enum Arrival {
     /// Not followed: too many clients are.
     Untracked,
-    /// Part of the current question.
-    Same,
+    /// Part of the current question, `number`, after a gap since the
+    /// client's last call ended (milliseconds; 0 while one runs).
+    Same { number: u32, gap: u64 },
     /// The start of question `number`, after the question before it, if
     /// any, and the gap since that one's last call ended (milliseconds).
     New {
@@ -116,7 +117,10 @@ impl Questions {
         client.running += 1;
         client.last = client.last.max(now);
         if gap <= question_gap {
-            return Arrival::Same;
+            return Arrival::Same {
+                number: client.question.number,
+                gap,
+            };
         }
         let previous = client.question;
         let number = previous.number.saturating_add(1);
@@ -240,10 +244,19 @@ mod tests {
             }
         );
         // Up to the question gap after the last call ended, the same question.
-        assert_eq!(call(&mut questions, &a, 5_000, true), Arrival::Same);
+        assert_eq!(
+            call(&mut questions, &a, 5_000, true),
+            Arrival::Same {
+                number: 1,
+                gap: 4_000
+            }
+        );
         assert_eq!(
             call(&mut questions, &a, 6_000 + QUESTION, false),
-            Arrival::Same
+            Arrival::Same {
+                number: 1,
+                gap: QUESTION
+            }
         );
         // Beyond it, the next, after the one before: its calls, the failure
         // among them, and the gap.
@@ -277,13 +290,19 @@ mod tests {
         arrive(&mut questions, &a, 0);
         // A long call: the next arrives long after the first arrived, but
         // while it runs.
-        assert_eq!(arrive(&mut questions, &a, 10 * MIN), Arrival::Same);
+        assert_eq!(
+            arrive(&mut questions, &a, 10 * MIN),
+            Arrival::Same { number: 1, gap: 0 }
+        );
         questions.finish(&a, true, 11 * MIN);
         questions.finish(&a, true, 12 * MIN);
         // The gap runs from the end of the last call to end.
         assert_eq!(
             arrive(&mut questions, &a, 12 * MIN + QUESTION),
-            Arrival::Same
+            Arrival::Same {
+                number: 1,
+                gap: QUESTION
+            }
         );
         questions.finish(&a, true, 16 * MIN);
         let Arrival::New {
@@ -332,7 +351,13 @@ mod tests {
         // The user takes 8 minutes; the retry runs as part of question 2.
         assert!(questions.resume(&a, 13 * MIN, SESSION));
         questions.finish(&a, true, 13 * MIN + 1_000);
-        assert_eq!(call(&mut questions, &a, 14 * MIN, true), Arrival::Same);
+        assert_eq!(
+            call(&mut questions, &a, 14 * MIN, true),
+            Arrival::Same {
+                number: 2,
+                gap: MIN - 1_000
+            }
+        );
         let Arrival::New {
             number: 3,
             previous: Some((previous, _)),
@@ -347,7 +372,13 @@ mod tests {
         let b = key("w", "copilot-cli");
         assert!(questions.resume(&b, 0, SESSION));
         questions.finish(&b, true, 1_000);
-        assert_eq!(call(&mut questions, &b, 2_000, true), Arrival::Same);
+        assert_eq!(
+            call(&mut questions, &b, 2_000, true),
+            Arrival::Same {
+                number: 1,
+                gap: 1_000
+            }
+        );
     }
 
     #[test]
@@ -381,7 +412,7 @@ mod tests {
         // A known client still is followed.
         assert_eq!(
             arrive(&mut questions, &key("0", "copilot-cli"), 2),
-            Arrival::Same
+            Arrival::Same { number: 1, gap: 0 }
         );
         // Once they end and the session gap passes, they're forgotten.
         for n in 0..MAX_CLIENTS {

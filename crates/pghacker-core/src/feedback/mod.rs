@@ -46,7 +46,7 @@ use uuid::Uuid;
 
 use crate::config::Env;
 use crate::usage::Usage;
-use questions::{Key, Questions};
+use questions::{Key, Question, Questions};
 use sampler::Sampler;
 use token::Tokens;
 
@@ -90,6 +90,11 @@ pub struct Settings {
     /// The apps that can be asked, by `clientInfo` name, matched ignoring
     /// case.
     pub clients: Vec<String>,
+    /// For trying the form by hand: every question after a client's first
+    /// is asked, whatever the pause before it, the warm-up, the draw, the
+    /// hour's ask, a decline or the address's outcomes; and why a call isn't
+    /// asked is logged at info.
+    pub debug: bool,
 }
 
 impl Default for Settings {
@@ -101,6 +106,7 @@ impl Default for Settings {
             session_gap: Duration::from_secs(600),
             min_questions: 5,
             clients: CLIENTS.iter().map(|name| (*name).to_owned()).collect(),
+            debug: false,
         }
     }
 }
@@ -234,7 +240,9 @@ impl Feedback {
     ///   one keeps the session active;
     /// - PGHACKER_FEEDBACK_MIN_QUESTIONS (5), the questions before an ask;
     /// - PGHACKER_FEEDBACK_CLIENTS, the apps asked, by `clientInfo` name and
-    ///   separated by commas; unset or blank, [`CLIENTS`].
+    ///   separated by commas; unset or blank, [`CLIENTS`];
+    /// - PGHACKER_FEEDBACK_DEBUG (false), for trying the form by hand: every
+    ///   question after a client's first is asked ([`Settings::debug`]).
     ///
     /// It's on only with usage telemetry, where it records, and its keys
     /// derive from usage telemetry's PGHACKER_USAGE_ID_KEY.
@@ -272,6 +280,7 @@ impl Feedback {
             None => defaults.clients,
             Some(list) => clients(list)?,
         };
+        let debug = env.parse_or("PGHACKER_FEEDBACK_DEBUG", false)?;
         let settings = Settings {
             rate,
             comments,
@@ -279,6 +288,7 @@ impl Feedback {
             session_gap: Duration::from_secs(session_gap),
             min_questions,
             clients,
+            debug,
         };
         if rate == 0.0 {
             return Ok(Self::off());
@@ -325,8 +335,15 @@ impl Feedback {
             session_gap_s = settings.session_gap.as_secs_f64(),
             min_questions = settings.min_questions,
             clients = ?settings.clients,
+            debug = settings.debug,
             "feedback is on"
         );
+        if settings.debug {
+            tracing::warn!(
+                "feedback is in debug mode: every question after a client's first is asked; \
+                 for trying the form, never for users"
+            );
+        }
         let clients = settings
             .clients
             .iter()
@@ -366,20 +383,45 @@ impl Feedback {
                 .arrive(&key, now_ms, inner.question_gap(), inner.session_gap());
         let rated = match arrival {
             questions::Arrival::Untracked => return Arrival::Run(Call::none()),
-            questions::Arrival::Same => None,
-            questions::Arrival::New { number, previous } => previous.filter(|(question, gap)| {
-                *gap < inner.session_gap()
-                    && number > inner.settings.min_questions
-                    && question.succeeded()
-            }),
+            questions::Arrival::Same { number, gap } => {
+                if inner.settings.debug {
+                    tracing::info!(
+                        tool,
+                        question = number,
+                        gap_s = gap as f64 / 1000.0,
+                        "feedback: the same question, not asked"
+                    );
+                }
+                None
+            }
+            questions::Arrival::New { number, previous } => {
+                match inner.decide(&mut state, &key.user, number, previous, secs) {
+                    Ok(rated) => Some(rated),
+                    Err(why) => {
+                        let gap_s = previous.map(|(_, gap)| gap as f64 / 1000.0);
+                        if inner.settings.debug {
+                            tracing::info!(
+                                tool,
+                                question = number,
+                                gap_s,
+                                why,
+                                "feedback: a new question, not asked"
+                            );
+                        } else {
+                            tracing::debug!(
+                                tool,
+                                question = number,
+                                gap_s,
+                                why,
+                                "feedback: a new question, not asked"
+                            );
+                        }
+                        None
+                    }
+                }
+            }
         };
-        let asked = rated.filter(|_| {
-            inner
-                .sampler
-                .armed(&key.user, secs / 3600, inner.settings.rate)
-                && state.ask(&key.user, secs)
-        });
-        let Some((question, gap)) = asked else {
+        let Some((question, gap)) = rated else {
             drop(state);
             return Arrival::Run(Call {
                 track: Some((inner.clone(), key)),
@@ -441,7 +483,7 @@ impl Feedback {
                 Some(id) if guard.answered(&id, secs) => {
                     rejection = guard.reject(user, secs).then_some("used");
                 }
-                Some(_) if !guard.within_limits(user, secs) => {
+                Some(_) if !guard.within_limits(user, secs, inner.settings.debug) => {
                     rejection = guard.reject(user, secs).then_some("limit");
                 }
                 Some(id) => {
@@ -477,6 +519,40 @@ impl Feedback {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().expect("feedback's lock")
+    }
+
+    /// Whether the start of question `number`, after `previous` and the
+    /// pause since it (milliseconds), is asked about it at `secs`: the
+    /// question to rate and the pause, or why not. In debug mode, every one
+    /// after the client's first is.
+    fn decide(
+        &self,
+        state: &mut State,
+        user: &str,
+        number: u32,
+        previous: Option<(Question, u64)>,
+        secs: u64,
+    ) -> Result<(Question, u64), &'static str> {
+        let Some((question, gap)) = previous else {
+            return Err("the client's first question");
+        };
+        if self.settings.debug {
+            return Ok((question, gap));
+        }
+        if gap >= self.session_gap() {
+            return Err("the session was idle");
+        }
+        if number <= self.settings.min_questions {
+            return Err("the warm-up");
+        }
+        if !question.succeeded() {
+            return Err("no call of the question before succeeded");
+        }
+        if !self.sampler.armed(user, secs / 3600, self.settings.rate) {
+            return Err("the hour isn't drawn");
+        }
+        state.ask(user, secs)?;
+        Ok((question, gap))
     }
 
     /// The client `caller` is, if it can be followed and asked: an address,
@@ -582,28 +658,35 @@ impl State {
         Some(self.addresses.entry(user.to_owned()).or_default())
     }
 
-    /// Whether `user` may be asked at `secs`, marking its hour asked if so.
-    fn ask(&mut self, user: &str, secs: u64) -> bool {
+    /// Whether `user` may be asked at `secs`, marking its hour asked if so,
+    /// or why not.
+    fn ask(&mut self, user: &str, secs: u64) -> Result<(), &'static str> {
         let hour = secs / 3600;
         let Some(address) = self.address(user, secs) else {
-            return false;
+            return Err("no room to keep the address");
         };
-        if address.paused_until > secs || address.asked_hour == Some(hour) {
-            return false;
+        if address.paused_until > secs {
+            return Err("paused after a decline");
+        }
+        if address.asked_hour == Some(hour) {
+            return Err("already asked this hour");
         }
         address.asked_hour = Some(hour);
-        true
+        Ok(())
     }
 
     fn answered(&self, id: &Uuid, secs: u64) -> bool {
         self.answered.get(id).is_some_and(|until| *until > secs)
     }
 
-    fn within_limits(&self, user: &str, secs: u64) -> bool {
+    /// Whether an outcome of `user`'s at `secs` is within the limits: per
+    /// minute in all, and, unless in debug mode, per address an hour.
+    fn within_limits(&self, user: &str, secs: u64, debug: bool) -> bool {
         let hour = secs / 3600;
-        let address = self.addresses.get(user).is_none_or(|address| {
-            address.outcomes.0 != hour || address.outcomes.1 < ADDRESS_OUTCOMES_PER_HOUR
-        });
+        let address = debug
+            || self.addresses.get(user).is_none_or(|address| {
+                address.outcomes.0 != hour || address.outcomes.1 < ADDRESS_OUTCOMES_PER_HOUR
+            });
         let all = self.minute.0 != secs / 60 || self.minute.1 < OUTCOMES_PER_MINUTE;
         address && all
     }
@@ -796,6 +879,7 @@ mod tests {
             ("PGHACKER_FEEDBACK_MIN_QUESTIONS", "101"),
             ("PGHACKER_FEEDBACK_MIN_QUESTIONS", "five"),
             ("PGHACKER_FEEDBACK_CLIENTS", "copilot-cli,,codex-mcp-client"),
+            ("PGHACKER_FEEDBACK_DEBUG", "always"),
         ] {
             let error = Feedback::from_env(&env(&[(key, bad)]), &off).err();
             assert!(
@@ -850,6 +934,7 @@ mod tests {
             ("PGHACKER_FEEDBACK_SESSION_GAP", "300"),
             ("PGHACKER_FEEDBACK_MIN_QUESTIONS", "1"),
             ("PGHACKER_FEEDBACK_CLIENTS", " copilot-cli , My App "),
+            ("PGHACKER_FEEDBACK_DEBUG", "true"),
         ]);
         assert_eq!(
             set,
@@ -860,6 +945,7 @@ mod tests {
                 session_gap: Duration::from_secs(300),
                 min_questions: 1,
                 clients: vec!["copilot-cli".into(), "My App".into()],
+                debug: true,
             }
         );
         assert_eq!(clients, ["copilot-cli", "my app"]);
@@ -1165,13 +1251,13 @@ mod tests {
         // forgetting them: a newcomer isn't asked, and every pause stays.
         state.record(USER, Uuid::new_v4(), 0, true);
         for n in 1..MAX_ADDRESSES {
-            assert!(state.ask(&format!("{n:032x}"), 0));
+            assert_eq!(state.ask(&format!("{n:032x}"), 0), Ok(()));
         }
-        assert!(!state.ask(OTHER, 0));
+        assert_eq!(state.ask(OTHER, 0), Err("no room to keep the address"));
         assert_eq!(state.addresses.len(), MAX_ADDRESSES);
         assert!(state.addresses[USER].paused_until > 0);
         // An hour on, those only asked no longer matter, and room is made.
-        assert!(state.ask(OTHER, 3600));
+        assert_eq!(state.ask(OTHER, 3600), Ok(()));
         assert!(state.addresses[USER].paused_until > 3600);
         assert_eq!(state.addresses.len(), 2);
     }
@@ -1262,12 +1348,77 @@ mod tests {
         // An address's own limit, which its one ask an hour keeps far off.
         let mut state = State::default();
         for _ in 0..ADDRESS_OUTCOMES_PER_HOUR {
-            assert!(state.within_limits(USER, 0));
+            assert!(state.within_limits(USER, 0, false));
             state.record(USER, Uuid::new_v4(), 0, false);
         }
-        assert!(!state.within_limits(USER, 0));
-        assert!(state.within_limits(USER, 3600));
-        assert!(state.within_limits(OTHER, 0));
+        assert!(!state.within_limits(USER, 0, false));
+        assert!(state.within_limits(USER, 3600, false));
+        assert!(state.within_limits(OTHER, 0, false));
+        // Debug mode has no limit per address.
+        assert!(state.within_limits(USER, 0, true));
+    }
+
+    #[test]
+    fn in_debug_mode_every_question_after_the_first_is_asked() {
+        // Whatever the warm-up (5), the draw (almost never), the hour's ask,
+        // a decline, the address's outcomes, an idle session, or a question
+        // before whose calls all failed.
+        let feedback = feedback_with(|settings| {
+            settings.debug = true;
+            settings.rate = 1e-9;
+        });
+        let me = caller(USER);
+        run(&feedback, &me, 0, true);
+        let mut t = STEP;
+        for (n, answer) in ["decline", "up", "down", "skip"].into_iter().enumerate() {
+            let asked = ask(&feedback, &me, "search", t);
+            assert_eq!(asked.rated.number, n as u32 + 1);
+            let response = match answer {
+                "decline" => responses(json!({ "action": "decline" })),
+                rating => accept(rating),
+            };
+            let (outcome, rejection) = resume(
+                &feedback,
+                &me,
+                "search",
+                Some(&state_of(&asked)),
+                Some(&response),
+                t + 5,
+            );
+            assert_eq!(rejection, None, "{answer}");
+            assert!(outcome.is_some(), "{answer}");
+            // A call within the question isn't.
+            run(&feedback, &me, t + 30, true);
+            t += STEP;
+        }
+        // After two hours away.
+        let back = t + 7200;
+        let after_a_pause = ask(&feedback, &me, "search", back);
+        assert!(after_a_pause.rated.gap > Duration::from_secs(7000));
+        let resumed = feedback.resume(
+            &me,
+            "search",
+            Some(&state_of(&after_a_pause)),
+            Some(&accept("up")),
+            at(back + 5),
+        );
+        resumed.call.end(false, at(back + 6));
+        // After that question, whose one call failed.
+        let after_a_failure = ask(&feedback, &me, "search", back + 200);
+        assert_eq!(
+            (after_a_failure.rated.calls, after_a_failure.rated.failed),
+            (1, 1)
+        );
+        // A client's first question, or a client that can't be asked, still
+        // isn't.
+        let mut script = caller(OTHER);
+        script.app = Some("mcp".into());
+        for client in [caller(OTHER), script] {
+            run(&feedback, &client, 0, true);
+            if client.app.as_deref() == Some("mcp") {
+                run(&feedback, &client, STEP, true);
+            }
+        }
     }
 
     #[test]
