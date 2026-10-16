@@ -43,6 +43,9 @@ export function Footer() {
         pgsql-hackers archive at postgresql.org and PostgreSQL's git repository. Not affiliated with the PostgreSQL
         Global Development Group.
       </p>
+      <p>
+        <a href="https://go.microsoft.com/fwlink/?LinkId=521839">Privacy</a>
+      </p>
     </footer>
   );
 }

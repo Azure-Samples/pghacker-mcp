@@ -86,9 +86,10 @@ function parseUrl(url) {
  * A request handler for the home page in `root`, a directory Vite built.
  * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
  * the portal's share links go on to; without it, they stay on the request's
- * own origin, as on the local edge.
+ * own origin, as on the local edge. `onPage(request)` hears of each page
+ * served to a GET, for usage telemetry.
  */
-export function createHomeHandler({ root = HOME_DIR, portal = "" } = {}) {
+export function createHomeHandler({ root = HOME_DIR, portal = "", onPage } = {}) {
   if (portal && URL.parse(portal)?.origin !== portal) {
     throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
   }
@@ -129,6 +130,13 @@ export function createHomeHandler({ root = HOME_DIR, portal = "" } = {}) {
         send(request, response, 302, { location: `${portal}${PORTAL_PATH}${url.search}`, "cache-control": CACHE.none });
       } else if (pathname === "/") {
         await file(request, response, "index.html", CACHE.page);
+        if (onPage && request.method === "GET" && response.statusCode === 200) {
+          try {
+            onPage(request);
+          } catch (error) {
+            console.error(`[home] usage telemetry: ${error.message}`);
+          }
+        }
       } else if (pathname === "/index.html") {
         send(request, response, 301, { location: `/${url.search}`, "cache-control": CACHE.file });
       } else if (STATIC_NAME.test(pathname)) {

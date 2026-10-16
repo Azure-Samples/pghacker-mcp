@@ -1,12 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Per-client rate limiting for the public endpoint: a token bucket per IP
-//! address (an IPv6 client's /64), refilled continuously; and the check that
-//! requests came through the deployment's Front Door.
+//! Per-client rate limiting for the public endpoint: a token bucket per
+//! client (`pghacker_core::clients`: an IP address, an IPv6 client's /64),
+//! refilled continuously; and the check that requests came through the
+//! deployment's Front Door.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use pghacker_core::clients;
 
 #[derive(Clone)]
 pub struct RateLimit {
@@ -27,7 +29,8 @@ struct Inner {
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
 }
 
-/// Where a request's client address comes from.
+/// Where a request's client address comes from, for the rate limit and
+/// usage telemetry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientIp {
     /// The connection's peer.
@@ -36,8 +39,34 @@ pub enum ClientIp {
     /// proxy that drops clients' X-Forwarded-For only.
     FirstForwardedFor,
     /// A header that the proxy in front sets to the client's address and that
-    /// clients can't, such as Azure Front Door's X-Azure-ClientIP.
+    /// clients can't, such as Azure Front Door's X-Azure-SocketIP. (Its
+    /// X-Azure-ClientIP follows a client's X-Forwarded-For.)
     Header(HeaderName),
+}
+
+impl ClientIp {
+    /// The client's address: where `self` says, else the connection's peer.
+    pub fn of(&self, request: &Request) -> Option<IpAddr> {
+        let header = match self {
+            ClientIp::Socket => None,
+            ClientIp::FirstForwardedFor => request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next()),
+            ClientIp::Header(name) => request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok()),
+        };
+        if let Some(ip) = header.and_then(|value| value.trim().parse().ok()) {
+            return Some(ip);
+        }
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip())
+    }
 }
 
 struct Bucket {
@@ -66,7 +95,7 @@ impl RateLimit {
             let idle = Duration::from_secs_f64(self.inner.burst / self.inner.per_second);
             buckets.retain(|_, bucket| now.duration_since(bucket.at) < idle);
         }
-        let bucket = buckets.entry(bucket_key(ip)).or_insert(Bucket {
+        let bucket = buckets.entry(clients::bucket(ip)).or_insert(Bucket {
             tokens: self.inner.burst,
             at: now,
         });
@@ -84,38 +113,7 @@ impl RateLimit {
     }
 
     fn client(&self, request: &Request) -> Option<IpAddr> {
-        let header = match &self.inner.client_ip {
-            ClientIp::Socket => None,
-            ClientIp::FirstForwardedFor => request
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.split(',').next()),
-            ClientIp::Header(name) => request
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok()),
-        };
-        if let Some(ip) = header.and_then(|value| value.trim().parse().ok()) {
-            return Some(ip);
-        }
-        request
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|ConnectInfo(addr)| addr.ip())
-    }
-}
-
-/// The bucket of `ip`: itself, or for IPv6 its /64, which one client holds.
-fn bucket_key(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V4(_) => ip,
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(Ipv6Addr::from(
-                u128::from(v6) & 0xffff_ffff_ffff_ffff_0000_0000_0000_0000,
-            )),
-        },
+        self.inner.client_ip.of(request)
     }
 }
 
@@ -230,12 +228,12 @@ mod tests {
     fn finds_the_client_where_told() {
         let forged = [
             ("x-forwarded-for", "203.0.113.9, 198.51.100.7"),
-            ("x-azure-clientip", "198.51.100.7"),
+            ("x-azure-socketip", "198.51.100.7"),
         ];
         let header = RateLimit::new(
             60,
             1,
-            ClientIp::Header(HeaderName::from_static("x-azure-clientip")),
+            ClientIp::Header(HeaderName::from_static("x-azure-socketip")),
         );
         assert_eq!(
             header.client(&request(&forged)),

@@ -64,6 +64,7 @@ locals {
     local.job_secrets,
     { "oauth2-cookie-secret" = azurerm_key_vault_secret.oauth2_cookie.versionless_id },
     { for name in local.github_secrets : name => "${local.vault_uri}/secrets/${name}" },
+    var.usage_enabled ? { "usage-id-key" = azurerm_key_vault_secret.usage_id_key[0].versionless_id } : {},
   )
 
   # --- The container's environment -------------------------------------------
@@ -75,11 +76,15 @@ locals {
     PGH_READER_PASSWORD        = "pgh-reader-password"
     PGH_SWARM_PASSWORD         = "pgh-swarm-password"
   }
-  app_secret_env = merge(local.job_secret_env, {
-    OAUTH2_PROXY_CLIENT_ID     = "github-client-id"
-    OAUTH2_PROXY_CLIENT_SECRET = "github-client-secret"
-    OAUTH2_PROXY_COOKIE_SECRET = "oauth2-cookie-secret"
-  })
+  app_secret_env = merge(
+    local.job_secret_env,
+    {
+      OAUTH2_PROXY_CLIENT_ID     = "github-client-id"
+      OAUTH2_PROXY_CLIENT_SECRET = "github-client-secret"
+      OAUTH2_PROXY_COOKIE_SECRET = "oauth2-cookie-secret"
+    },
+    var.usage_enabled ? { PGHACKER_USAGE_ID_KEY = "usage-id-key" } : {},
+  )
 
   # Plain settings for the app and the jobs. The model names come from the
   # deployments, so that the jobs and the app wait for them. AZURE_CLIENT_ID
@@ -98,8 +103,10 @@ locals {
     PGHACKER_FOUNDRY_EMBEDDING = azurerm_cognitive_deployment.this[var.foundry_embedding_deployment].name
   }
 
-  # The app's: the jobs' plus its public face, sign-in and crawler settings,
-  # then app_env, whose validation keeps it from replacing any of these.
+  # The app's: the jobs' plus its public face, sign-in, crawler and usage
+  # telemetry settings, then app_env, whose validation keeps it from
+  # replacing any of these. The connection string isn't a secret: with local
+  # authentication off, its instrumentation key only names the resource.
   app_env = merge(
     local.job_env,
     {
@@ -116,6 +123,7 @@ locals {
       PGHACKER_PORTAL_ROLE          = var.portal_role
     },
     length(var.github_users) > 0 ? { PGHACKER_GITHUB_USERS = join(",", var.github_users) } : {},
+    var.usage_enabled ? { APPLICATIONINSIGHTS_CONNECTION_STRING = nonsensitive(azurerm_application_insights.usage[0].connection_string) } : {},
     var.app_env,
   )
 }

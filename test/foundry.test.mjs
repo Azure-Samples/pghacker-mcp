@@ -40,6 +40,13 @@ test("tokens come from the identity endpoint for the identity, and are reused un
   });
   await assert.rejects(refused(), /HTTP 400 invalid_request/);
   await assert.rejects(managedIdentityTokens({})(), /no managed identity/);
+
+  // Another service's tokens, such as Azure Monitor's for usage telemetry.
+  const monitor = managedIdentityTokens({
+    endpoint: "http://identity.local/msi/token", header: "h", clientId: "uami", resource: "https://monitor.azure.com", fetchImpl, now: () => clock,
+  });
+  await monitor();
+  assert.equal(asked.at(-1).url.searchParams.get("resource"), "https://monitor.azure.com");
 });
 
 test("the proxy forwards /openai/ requests with the token in place of the caller's key, streaming the answer", async (t) => {

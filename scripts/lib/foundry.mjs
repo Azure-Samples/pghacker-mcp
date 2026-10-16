@@ -7,13 +7,16 @@
 // Entra token in place of whatever key the caller sent, so PilotSwarm's
 // OpenAI-compatible provider, the embedder and the crawl scheduler work with
 // a placeholder key, and the identity's credentials stay in the supervisor.
+// The same proxy, with Azure Monitor's tokens, carries usage telemetry to
+// Application Insights (scripts/lib/monitor.mjs).
 import http from "node:http";
 import https from "node:https";
 
 /** What callers send as their key; the proxy replaces it. */
 export const PLACEHOLDER_KEY = "managed-identity";
 
-const RESOURCE = "https://cognitiveservices.azure.com";
+/** The audience of Foundry's tokens. */
+export const FOUNDRY_RESOURCE = "https://cognitiveservices.azure.com";
 const REFRESH_BEFORE_MS = 5 * 60_000;
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
@@ -21,12 +24,15 @@ const HOP_BY_HOP = new Set([
 ]);
 
 /**
- * Tokens for Foundry from the Container Apps identity endpoint
- * (IDENTITY_ENDPOINT, IDENTITY_HEADER) for the user-assigned identity
- * `clientId`: a function that returns one, cached until five minutes
- * before it expires, with concurrent callers sharing a request.
+ * Tokens for `resource` (Foundry's by default) from the Container Apps
+ * identity endpoint (IDENTITY_ENDPOINT, IDENTITY_HEADER) for the
+ * user-assigned identity `clientId`: a function that returns one, cached
+ * until five minutes before it expires, with concurrent callers sharing a
+ * request.
  */
-export function managedIdentityTokens({ endpoint, header, clientId, fetchImpl = fetch, now = Date.now }) {
+export function managedIdentityTokens({
+  endpoint, header, clientId, resource = FOUNDRY_RESOURCE, fetchImpl = fetch, now = Date.now,
+}) {
   let cached = null;
   let pending = null;
   return async function token() {
@@ -34,7 +40,7 @@ export function managedIdentityTokens({ endpoint, header, clientId, fetchImpl = 
     if (cached && cached.expiresAt - now() > REFRESH_BEFORE_MS) return cached.value;
     pending ??= (async () => {
       const url = new URL(endpoint);
-      url.searchParams.set("resource", RESOURCE);
+      url.searchParams.set("resource", resource);
       url.searchParams.set("api-version", "2019-08-01");
       if (clientId) url.searchParams.set("client_id", clientId);
       const response = await fetchImpl(url, {
@@ -70,21 +76,31 @@ function sendError(response, status, code, message) {
  * (the account's origin) with `token()`'s bearer token; resolves with the
  * server once it listens.
  */
-export function startFoundryProxy({ upstream, token, port, host = "127.0.0.1", log = () => {} }) {
+export function startFoundryProxy(options) {
+  return startTokenProxy({ name: "Foundry", prefix: "/openai/", ...options });
+}
+
+/**
+ * Listens on `host`:`port` and forwards the requests whose path starts with
+ * `prefix` to `upstream`, the origin of the service `name`, with `token()`'s
+ * bearer token in place of any key the caller sent; resolves with the server
+ * once it listens.
+ */
+export function startTokenProxy({ name, prefix, upstream, token, port, host = "127.0.0.1", log = () => {} }) {
   const target = new URL(upstream);
   const client = target.protocol === "https:" ? https : http;
   const agent = new client.Agent({ keepAlive: true, maxSockets: 128 });
   const server = http.createServer(async (request, response) => {
-    if (!request.url?.startsWith("/openai/")) {
-      sendError(response, 404, "not_found", "Only /openai/ requests go to Foundry.");
+    if (!request.url?.startsWith(prefix)) {
+      sendError(response, 404, "not_found", `Only ${prefix} requests go to ${name}.`);
       return;
     }
     let bearer;
     try {
       bearer = await token();
     } catch (error) {
-      log(`No token for Foundry: ${error.message}`);
-      sendError(response, 502, "managed_identity", `No token for Foundry: ${error.message}`);
+      log(`No token for ${name}: ${error.message}`);
+      sendError(response, 502, "managed_identity", `No token for ${name}: ${error.message}`);
       return;
     }
     const headers = {};
@@ -108,8 +124,8 @@ export function startFoundryProxy({ upstream, token, port, host = "127.0.0.1", l
       answer.pipe(response);
     });
     forwarded.on("error", (error) => {
-      log(`A Foundry request failed: ${error.message}`);
-      sendError(response, 502, "upstream", `Foundry didn't answer: ${error.message}`);
+      log(`A ${name} request failed: ${error.message}`);
+      sendError(response, 502, "upstream", `${name} didn't answer: ${error.message}`);
     });
     response.on("close", () => {
       if (!response.writableFinished) forwarded.destroy();

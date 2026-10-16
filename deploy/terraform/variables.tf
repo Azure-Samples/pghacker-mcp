@@ -574,6 +574,7 @@ variable "app_env" {
 
   validation {
     condition = !anytrue([for name in keys(var.app_env) : startswith(name, "OAUTH2_PROXY_")]) && length(setintersection(keys(var.app_env), [
+      "APPLICATIONINSIGHTS_CONNECTION_STRING",
       "AZURE_CLIENT_ID",
       "PGH_INDEXER_PASSWORD",
       "PGH_READER_PASSWORD",
@@ -601,8 +602,9 @@ variable "app_env" {
       "PGHACKER_PUBLIC_URL",
       "PGHACKER_RATE_BURST",
       "PGHACKER_RATE_PER_MINUTE",
+      "PGHACKER_USAGE_ID_KEY",
     ])) == 0
-    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit and crawl settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
+    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl and usage telemetry settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
   }
 }
 
@@ -631,5 +633,50 @@ variable "front_door_custom_domain" {
       && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.front_door_custom_domain))
     )
     error_message = "front_door_custom_domain must be null or a lowercase DNS hostname of at most 64 characters, with valid labels and no scheme, path, port, wildcard or trailing dot."
+  }
+}
+
+# --- Usage telemetry --------------------------------------------------------------
+
+variable "usage_enabled" {
+  description = "Record usage telemetry (PRIVACY.md): an Application Insights resource on the logs' workspace, the retention of its AppEvents table, the key of the users' keyed hashes in Key Vault (usage-id-key) and APPLICATIONINSIGHTS_CONNECTION_STRING for the app. False creates none of these, and the app records nothing."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "usage_daily_cap_gb" {
+  description = "The most usage telemetry Application Insights takes in a day, in GB. Past it, the rest of the day's events are dropped."
+  type        = number
+  default     = 5
+  nullable    = false
+
+  validation {
+    condition     = var.usage_daily_cap_gb > 0 && var.usage_daily_cap_gb <= 100
+    error_message = "usage_daily_cap_gb must be more than 0 and at most 100."
+  }
+}
+
+variable "usage_retention_days" {
+  description = "How many days usage events stay queryable in the AppEvents table, 30 to 730."
+  type        = number
+  default     = 730
+  nullable    = false
+
+  validation {
+    condition     = var.usage_retention_days >= 30 && var.usage_retention_days <= 730 && floor(var.usage_retention_days) == var.usage_retention_days
+    error_message = "usage_retention_days must be a whole number from 30 to 730."
+  }
+}
+
+variable "usage_total_retention_days" {
+  description = "How many days usage events are kept in all, from usage_retention_days to 4383 (12 years). Beyond usage_retention_days they're in long-term retention, which search jobs read."
+  type        = number
+  default     = 1095
+  nullable    = false
+
+  validation {
+    condition     = var.usage_total_retention_days >= var.usage_retention_days && var.usage_total_retention_days <= 4383 && floor(var.usage_total_retention_days) == var.usage_total_retention_days
+    error_message = "usage_total_retention_days must be a whole number from usage_retention_days to 4383."
   }
 }

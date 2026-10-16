@@ -71,6 +71,9 @@ mcp_rate_burst                = 30
 crawl_start_sessions          = 2
 crawl_max_sessions            = 4
 
+# Usage telemetry (PRIVACY.md); false records nothing.
+usage_enabled = true
+
 # Replace these with your GitHub organization and team slug.
 # Explicit github_users can admit additional logins or work around an OAuth App
 # that your organization has not approved. Keep the list private and intentional.

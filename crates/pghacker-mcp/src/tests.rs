@@ -1,0 +1,221 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+//! The listeners as `main` assembles them: the public one's Front Door
+//! check, usage records and rate limit, and the internal one's records.
+
+use std::sync::Arc;
+
+use axum::Router;
+use axum::http::HeaderName;
+use pghacker_core::mcp::{Effect, McpServer, Output, ToolSpec, Tools, parse, router, schema};
+use pghacker_core::usage::testing::Ingestion;
+use pghacker_core::usage::{ACTION, ERROR, Settings, Usage};
+use rmcp::ErrorData;
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::{internal, public};
+use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct EchoArgs {
+    text: String,
+}
+
+#[derive(Clone)]
+struct Echo;
+
+static SPECS: &[ToolSpec] = &[ToolSpec {
+    name: "echo",
+    description: "Echoes text.",
+    effect: Effect::Read,
+    schema: schema::<EchoArgs>,
+}];
+
+impl Tools for Echo {
+    fn specs(&self) -> &'static [ToolSpec] {
+        SPECS
+    }
+
+    async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
+        let args: EchoArgs = parse(name, arguments)?;
+        Ok(Output::Json(json!({ "echo": args.text, "items": [1, 2] })))
+    }
+}
+
+const FRONT_DOOR_ID: &str = "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11";
+
+async fn listen(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn post(client: &reqwest::Client, base: &str, headers: &[(&str, &str)], body: Value) -> u16 {
+    let mut request = client
+        .post(format!("{base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.json(&body).send().await.unwrap().status().as_u16()
+}
+
+fn initialize() -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": { "name": "test-client", "version": "1.0" } } })
+}
+
+fn call(text: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "echo", "arguments": { "text": text } } })
+}
+
+fn properties(envelope: &Value) -> &Value {
+    &envelope["data"]["baseData"]["properties"]
+}
+
+#[tokio::test]
+async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
+    let ingestion = Ingestion::start().await;
+    let usage = Usage::new(Settings {
+        endpoint: ingestion.url.clone(),
+        instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+        id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+        role: "pghacker-mcp".into(),
+        version: "0.1.0".into(),
+        instance: None,
+    })
+    .unwrap();
+    let server = McpServer::new(Echo, "echo", "1", "Echo.");
+    let socket_ip = ClientIp::Header(HeaderName::from_static("x-azure-socketip"));
+    // Two requests, then one a minute.
+    let limit = RateLimit::new(1, 2, socket_ip.clone());
+    let base = listen(public(
+        router(server.clone(), None),
+        limit,
+        &usage,
+        socket_ip,
+        Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
+    ))
+    .await;
+    let internal_base = listen(internal(router(server, None), &usage)).await;
+    let client = reqwest::Client::new();
+    let through_front_door = [
+        ("x-azure-fdid", FRONT_DOOR_ID),
+        ("x-azure-socketip", "203.0.113.9"),
+        ("x-forwarded-for", "10.9.9.9"),
+        ("user-agent", "test-client/1.0"),
+    ];
+
+    // Not through this Front Door: refused, and not recorded.
+    let elsewhere = [("x-azure-socketip", "198.51.100.1")];
+    assert_eq!(post(&client, &base, &elsewhere, initialize()).await, 403);
+    assert_eq!(
+        post(&client, &base, &through_front_door, initialize()).await,
+        200
+    );
+    assert_eq!(
+        post(&client, &base, &through_front_door, call("hi")).await,
+        200
+    );
+    // Over the limit: recorded once a minute.
+    assert_eq!(
+        post(&client, &base, &through_front_door, call("more")).await,
+        429
+    );
+    assert_eq!(
+        post(&client, &base, &through_front_door, call("more")).await,
+        429
+    );
+    // The internal listener: no limit, and no client address.
+    let agent = [("x-azure-socketip", "203.0.113.9")];
+    assert_eq!(
+        post(&client, &internal_base, &agent, call("agent")).await,
+        200
+    );
+
+    usage.flush().await;
+    let events = ingestion.received();
+    let seen: Vec<(&str, &str)> = events
+        .iter()
+        .map(|event| {
+            let properties = properties(event);
+            (
+                properties["action"].as_str().unwrap(),
+                properties["endpoint"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("McpInitialize", "public"),
+            ("McpToolCall", "public"),
+            ("McpRateLimited", "public"),
+            ("McpToolCall", "internal"),
+        ],
+        "{events:#?}"
+    );
+    let [initialized, called, limited, agent_call] = &events[..] else {
+        unreachable!()
+    };
+
+    // The client's address is only the location tag's; its user, a keyed
+    // hash, and its session are the same across its requests.
+    let user = initialized["tags"]["ai.user.id"].as_str().unwrap();
+    assert_eq!(user.len(), 32);
+    for event in [initialized, called, limited] {
+        assert_eq!(event["tags"]["ai.location.ip"], "203.0.113.9");
+        assert_eq!(event["tags"]["ai.user.id"], user);
+        assert_eq!(
+            event["tags"]["ai.session.id"],
+            initialized["tags"]["ai.session.id"]
+        );
+        assert_eq!(
+            event.to_string().matches("203.0.113.9").count(),
+            1,
+            "{event}"
+        );
+        assert!(!event.to_string().contains("10.9.9.9"), "{event}");
+        assert_eq!(properties(event)["userAgent"], "test-client/1.0");
+    }
+    assert_eq!(properties(initialized)["clientName"], "test-client");
+    assert_eq!(properties(initialized)["protocolVersion"], "2025-06-18");
+
+    assert_eq!(called["data"]["baseData"]["name"], ACTION);
+    assert_eq!(called["tags"]["ai.operation.name"], "echo");
+    assert_eq!(properties(called)["toolName"], "echo");
+    assert_eq!(properties(called)["arg.text"], "hi");
+    assert_eq!(properties(called)["activityStatus"], "Succeeded");
+    assert_eq!(
+        called["data"]["baseData"]["measurements"]["result.items"],
+        2.0
+    );
+
+    assert_eq!(limited["data"]["baseData"]["name"], ERROR);
+    assert_eq!(properties(limited)["statusCode"], "429");
+
+    assert_eq!(agent_call["tags"]["ai.location.ip"], "0.0.0.0");
+    assert!(
+        agent_call["tags"].get("ai.user.id").is_none(),
+        "{agent_call}"
+    );
+    assert!(
+        !agent_call.to_string().contains("203.0.113.9"),
+        "{agent_call}"
+    );
+    assert_eq!(properties(agent_call)["arg.text"], "agent");
+    assert_eq!(usage.lost(), 0);
+}

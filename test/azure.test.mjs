@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import {
-  PORTS, USERS, databaseUrl, databaseUrls, embedEnvironment, foundryCatalog, layout, lookupUser, oauth2ProxyArgs,
-  processEnvironments, readAzureConfig,
+  MONITOR_PROXY, PORTS, USERS, databaseUrl, databaseUrls, embedEnvironment, foundryCatalog, layout, lookupUser,
+  oauth2ProxyArgs, processEnvironments, readAzureConfig,
 } from "../scripts/lib/azure.mjs";
 
 const SECRETS = {
@@ -100,7 +100,8 @@ test("agents use the internal pghacker-mcp listener; the public one is rate-limi
   assert.equal(environments.swarm.PORTAL_AUTHZ_DEFAULT_ROLE, "user");
   assert.equal(environments.mcp.PGHACKER_MCP_ADDR, `127.0.0.1:${PORTS.mcp}`);
   assert.equal(environments.mcp.PGHACKER_MCP_INTERNAL_ADDR, `127.0.0.1:${PORTS.mcpInternal}`);
-  assert.equal(environments.mcp.PGHACKER_CLIENT_IP_HEADER, "x-azure-clientip");
+  // Front Door's socket address: its X-Azure-ClientIP follows a client's X-Forwarded-For.
+  assert.equal(environments.mcp.PGHACKER_CLIENT_IP_HEADER, "x-azure-socketip");
   assert.equal(environments.mcp.PGHACKER_FRONT_DOOR_ID, ENV.PGHACKER_FRONT_DOOR_ID);
   assert.equal(environments.mcp.PGHACKER_RATE_PER_MINUTE, "60");
   assert.deepEqual(environments.mcp.PGHACKER_ALLOWED_HOSTS.split(","), ENV.PGHACKER_PUBLIC_HOSTS.split(","));
@@ -167,6 +168,63 @@ test("the home page's server runs as its own user with the page, its port and th
   assert.equal(home.PGHACKER_PORTAL_URL, "https://pghacker-abc.z01.azurefd.net");
   assert.deepEqual(Object.keys(home).sort(), ["HOME", "LOGNAME", "PATH", "PGHACKER_HOME_DIR", "PGHACKER_PORTAL_URL", "PORT", "RUST_LOG", "USER"]);
   assert.equal(new Set(Object.values(PORTS)).size, Object.keys(PORTS).length);
+});
+
+const USAGE_ENV = {
+  ...ENV,
+  APPLICATIONINSIGHTS_CONNECTION_STRING:
+    "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;"
+    + "LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=22222222-0000-4000-8000-000000000000",
+  PGHACKER_USAGE_ID_KEY: "usage-id-key-0123456789abcdefghijklmnopqrstuvwxyz",
+  CONTAINER_APP_REVISION: "pghacker-example--0000016",
+};
+
+test("usage telemetry reaches pghacker-mcp and the home page through the supervisor's proxy, with Application Insights only", () => {
+  const config = readAzureConfig(USAGE_ENV);
+  assert.deepEqual(config.usage, {
+    instrumentationKey: "11111111-2222-4333-8444-555555555555",
+    ingestionEndpoint: "https://westus3-1.in.applicationinsights.azure.com",
+    audience: "https://monitor.azure.com",
+    idKey: USAGE_ENV.PGHACKER_USAGE_ID_KEY,
+    revision: "pghacker-example--0000016",
+  });
+  const environments = processEnvironments(config);
+  for (const name of ["mcp", "home"]) {
+    const env = environments[name];
+    assert.equal(env.PGHACKER_USAGE_ENDPOINT, MONITOR_PROXY, name);
+    assert.equal(env.PGHACKER_USAGE_IKEY, "11111111-2222-4333-8444-555555555555", name);
+    assert.equal(env.PGHACKER_USAGE_ID_KEY, USAGE_ENV.PGHACKER_USAGE_ID_KEY, name);
+    assert.equal(env.CONTAINER_APP_REVISION, "pghacker-example--0000016", name);
+    assert.equal(env.PGHACKER_FRONT_DOOR_ID, ENV.PGHACKER_FRONT_DOOR_ID, name);
+  }
+  assert.equal(MONITOR_PROXY, `http://127.0.0.1:${PORTS.monitor}`);
+  // The users' key reaches those two alone, and the connection string none:
+  // the supervisor's proxy holds the way in.
+  for (const [name, env] of Object.entries(environments)) {
+    const text = Object.values(env).join("\n");
+    assert.equal(text.includes(USAGE_ENV.PGHACKER_USAGE_ID_KEY), ["mcp", "home"].includes(name), name);
+    assert.ok(!text.includes("IngestionEndpoint"), name);
+  }
+
+  // Without Application Insights, no process records usage; nor do the jobs.
+  for (const env of [
+    ...Object.values(processEnvironments(readAzureConfig(ENV))),
+    ...Object.values(processEnvironments(readAzureConfig(USAGE_ENV, { serve: false }))),
+  ]) {
+    assert.ok(!Object.keys(env).some((key) => key.startsWith("PGHACKER_USAGE_")));
+  }
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, PGHACKER_USAGE_ID_KEY: "" }),
+    /needs PGHACKER_USAGE_ID_KEY/,
+  );
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, PGHACKER_USAGE_ID_KEY: "too-short" }),
+    /at least 32 characters/,
+  );
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, APPLICATIONINSIGHTS_CONNECTION_STRING: "IngestionEndpoint=https://x.example/" }),
+    /InstrumentationKey/,
+  );
 });
 
 test("oauth2-proxy signs in the team for the portal, passes /mcp and the home page through, and gets no secret in its arguments", () => {

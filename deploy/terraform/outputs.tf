@@ -145,3 +145,13 @@ output "log_analytics_workspace_id" {
   description = "The Log Analytics workspace's customer ID, for az monitor log-analytics query, which reads the jobs' reports."
   value       = azurerm_log_analytics_workspace.this.workspace_id
 }
+
+output "usage_app_insights_name" {
+  description = "The usage telemetry's Application Insights resource, or null with usage_enabled = false."
+  value       = try(azurerm_application_insights.usage[0].name, null)
+}
+
+output "usage_app_id" {
+  description = "Its application ID, for az monitor app-insights query --apps, or null with usage_enabled = false."
+  value       = try(azurerm_application_insights.usage[0].app_id, null)
+}

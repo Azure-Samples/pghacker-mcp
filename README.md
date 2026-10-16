@@ -75,6 +75,10 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 
 [deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/` on Front Door's own host name, requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
 
+## Privacy and telemetry
+
+A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments and the shape of its answer, the client, and an approximate location; and each view of the home page. To turn it off, set `usage_enabled = false` and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
+
 ## Learn more
 
 - [Reference](docs/reference.md): settings, tools and their limits, the commit history, the graph, extraction, tests and the repository's layout.

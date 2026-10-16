@@ -20,9 +20,10 @@ flowchart LR
   end
   CA --> DB
   CA --> F
+  CA -->|usage events| AI[(Application Insights)]
 ```
 
-- **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client (`X-Azure-ClientIP`, IPv6 by /64), and serves only requests that came through this Front Door profile (`X-Azure-FDID`).
+- **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client, and serves only requests that came through this Front Door profile (`X-Azure-FDID`). A client is the address it connected from, `X-Azure-SocketIP` (IPv6 by /64). `X-Azure-ClientIP` would follow a client's `X-Forwarded-For`.
 - **`https://<front door>/`** is the public home page (`home/`): what pghacker-mcp is, the MCP URL (its own origin's `/mcp`) and how to add it to an agent, and example prompts with their answers. Its files are public; any other path needs sign-in. oauth2-proxy answers `/robots.txt` itself (`Disallow: /`).
 - **`https://<front door>/portal/`** is the PilotSwarm portal. Users sign in with GitHub, and only members of your configured `github_org`/`github_team` (or `github_users`) get in. Members are PilotSwarm `user`s (`portal_role`).
   - Only Front Door's own host name serves it. A [custom domain](#custom-domains) gets the home page and `/mcp`, and Front Door answers 404 for its other paths. Sign-in therefore happens on one host, at one callback.
@@ -31,6 +32,10 @@ flowchart LR
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door and the ingress pass a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
+- **Usage telemetry** goes to Application Insights on the logs' workspace.
+  - It records an event for each request to `/mcp`: the tool, its arguments, its outcome and the shape of its answer, and the client. It also records each view of the home page.
+  - Application Insights derives a country, region and city from each client's address, then discards the address.
+  - `usage_enabled = false` turns it off ([PRIVACY.md](../PRIVACY.md)).
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads) and any branch, tag or commit of PostgreSQL.
     - A list added without months, `follow` included, queues the whole archive.
@@ -42,16 +47,16 @@ flowchart LR
 
 ## The container
 
-`scripts/container.mjs` runs as root under tini. It starts the Foundry proxy on loopback and bootstraps the database (creating it, the roles, extensions, schema and graph, then migrating). It then runs each service as its own user, with an environment that lists only what it needs (`scripts/lib/azure.mjs`):
+`scripts/container.mjs` runs as root under tini. It starts the Foundry proxy on loopback, and, with Application Insights, the usage telemetry's proxy (`scripts/lib/monitor.mjs`). Then it bootstraps the database (creating it, the roles, extensions, schema and graph, then migrating). It then runs each service as its own user, with an environment that lists only what it needs (`scripts/lib/azure.mjs`):
 
 | Process | User | Gets |
 | --- | --- | --- |
 | oauth2-proxy | `pgh-proxy` | The GitHub OAuth App's ID and secret, and the cookie secret |
-| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page, its port and the portal's origin (`PGHACKER_PORTAL_URL`), for share links; no secret |
-| pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy |
+| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page, its port and the portal's origin (`PGHACKER_PORTAL_URL`), for share links; usage telemetry's settings, among them its one secret, the users' key (`usage-id-key`) |
+| pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy; pghacker-mcp also gets usage telemetry's settings |
 | PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus; models through the Foundry proxy |
 
-Only the bootstrap, which runs once before the services start, gets the administrator's password. No process gets the managed identity's endpoint: the proxy, in the supervisor, uses it, and forwards only to the Foundry account. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
+Only the bootstrap, which runs once before the services start, gets the administrator's password. No process gets the managed identity's endpoint: the proxies, in the supervisor, use it, and forward only to the Foundry account and to Application Insights' `/v2.1/track`. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
 - `/healthz` fails after 15 minutes of failed bootstraps, or when a service keeps exiting.
 - `/readyz` passes when bootstrap is done and oauth2-proxy, pghacker-mcp and the portal answer. It reports the home page too, but doesn't wait for it, so that `/mcp` stays up if the page fails.
 
@@ -423,6 +428,9 @@ Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 ## Operations
 
 - **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[home]`, `[oauth2-proxy]`.
+- **Usage telemetry.**
+  - Events that couldn't be sent are logged as `usage events weren't sent`, under `[mcp]` or `[home]`, at most once a minute.
+  - Past `usage_daily_cap_gb` (5 GB) a day, Application Insights drops the rest of the day's events.
 - **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.

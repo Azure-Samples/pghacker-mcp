@@ -4,7 +4,9 @@
 // The Azure container's supervisor, run as root by tini (Dockerfile). It
 // prepares each user's directories and PilotSwarm's model catalog, runs the
 // Foundry proxy, which signs the services' model requests with the managed
-// identity's tokens (scripts/lib/foundry.mjs), bootstraps the database, then
+// identity's tokens (scripts/lib/foundry.mjs), and, when the app has
+// Application Insights, the proxy that signs pghacker-mcp's and the home
+// page's usage telemetry (scripts/lib/monitor.mjs), bootstraps the database, then
 // runs every service as its own user with only its own environment
 // (scripts/lib/azure.mjs), restarts those that exit, and serves the probes'
 // health checks on PORTS.health:
@@ -26,6 +28,7 @@ import {
   PORTS, USERS, foundryCatalog, layout, lookupUser, oauth2ProxyArgs, processEnvironments, readAzureConfig,
 } from "./lib/azure.mjs";
 import { managedIdentityTokens, startFoundryProxy } from "./lib/foundry.mjs";
+import { startMonitorProxy } from "./lib/monitor.mjs";
 
 const BOOTSTRAP_GIVE_UP_MS = 15 * 60_000;
 const RESTART_WINDOW_MS = 10 * 60_000;
@@ -288,6 +291,26 @@ foundryToken().then(
   () => log(`Foundry proxy on :${PORTS.foundry} for ${config.foundry.endpoint}, with the managed identity's token.`),
   (error) => log(`Foundry proxy on :${PORTS.foundry}, but no token yet: ${error.message}`),
 );
+if (config.usage) {
+  const monitorToken = managedIdentityTokens({
+    endpoint: process.env.IDENTITY_ENDPOINT,
+    header: process.env.IDENTITY_HEADER,
+    clientId: config.foundry.clientId,
+    resource: config.usage.audience,
+  });
+  await startMonitorProxy({
+    upstream: config.usage.ingestionEndpoint,
+    token: monitorToken,
+    port: PORTS.monitor,
+    log: (message) => log(`Application Insights proxy: ${message}`),
+  });
+  monitorToken().then(
+    () => log(`Application Insights proxy on :${PORTS.monitor} for ${config.usage.ingestionEndpoint}, with the managed identity's token.`),
+    (error) => log(`Application Insights proxy on :${PORTS.monitor}, but no token yet: ${error.message}`),
+  );
+} else {
+  log("No APPLICATIONINSIGHTS_CONNECTION_STRING: usage telemetry is off.");
+}
 log(`Health checks on :${PORTS.health}; bootstrapping ${config.db.name} on ${config.db.host}.`);
 if (await bootstrap()) {
   byName.home.start();

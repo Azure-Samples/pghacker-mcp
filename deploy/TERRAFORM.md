@@ -1,10 +1,10 @@
 # pghacker-mcp's Terraform
 
-[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the home page, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, and Azure Front Door Standard as the public entry: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in, on Front Door's own host name alone (a custom domain serves only the first two).
+[`terraform/`](terraform/) deploys pghacker-mcp to Azure: one container app (oauth2-proxy, the home page, the PilotSwarm portal and worker, pghacker-indexer and pghacker-mcp under a supervisor) in a VNet-integrated Container Apps environment, HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints, Key Vault for every secret, Application Insights for usage telemetry, and Azure Front Door Standard as the public entry: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in, on Front Door's own host name alone (a custom domain serves only the first two).
 
 | Path | Contents |
 |---|---|
-| `terraform/*.tf` | The configuration: `main.tf` (resource group, registry, identity, vault, generated secrets), `network.tf`, `horizondb.tf`, `foundry.tf`, `containerapps.tf`, `frontdoor.tf` |
+| `terraform/*.tf` | The configuration: `main.tf` (resource group, registry, identity, vault, generated secrets), `network.tf`, `horizondb.tf`, `foundry.tf`, `containerapps.tf`, `frontdoor.tf`, `usage.tf` (usage telemetry) |
 | `terraform/tests/` | Offline `terraform test` suites; every provider is mocked (`tests/mocks/`) |
 | `terraform/.terraform.lock.hcl` | Provider versions and hashes for linux_amd64 and darwin_arm64 |
 | `environments/example.tfvars` | Synthetic template to copy and customize; no real deployment identifiers |
@@ -49,7 +49,7 @@ The first apply runs with `create_app = false`: everything but the app, includin
 
 ## Key Vault secrets
 
-The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps. Foundry's key authentication is off, as the subscription's policy requires: the identity is a *Cognitive Services OpenAI User* of the account, and the container's Foundry proxy requests its tokens (`AZURE_CLIENT_ID`).
+The app and the jobs read every secret through Key Vault references resolved by the user-assigned identity; no secret value is set on Container Apps. Foundry's key authentication is off, as the subscription's policy requires: the identity is a *Cognitive Services OpenAI User* of the account, and the container's Foundry proxy requests its tokens (`AZURE_CLIENT_ID`). Application Insights' local authentication is off too: the identity is a *Monitoring Metrics Publisher* of it, and the container's usage telemetry proxy requests its tokens, so `APPLICATIONINSIGHTS_CONNECTION_STRING` is a plain setting.
 
 | Secret | Made by | Read as | By |
 |---|---|---|---|
@@ -57,6 +57,7 @@ The app and the jobs read every secret through Key Vault references resolved by 
 | `pgh-indexer-password`, `pgh-reader-password`, `pgh-swarm-password` | Terraform, 40 characters | `PGH_INDEXER_PASSWORD`, `PGH_READER_PASSWORD`, `PGH_SWARM_PASSWORD` | App, jobs |
 | `oauth2-cookie-secret` | Terraform, 32 alphanumerics | `OAUTH2_PROXY_COOKIE_SECRET` | App |
 | `github-client-id`, `github-client-secret` | The operator, from the GitHub OAuth App | `OAUTH2_PROXY_CLIENT_ID`, `OAUTH2_PROXY_CLIENT_SECRET` | App |
+| `usage-id-key` | Terraform, 64 alphanumerics, with `usage_enabled` | `PGHACKER_USAGE_ID_KEY` | App: pghacker-mcp and the home page |
 
 Register the GitHub OAuth App with `public_url` as its homepage and `oauth_callback_url` as its callback, then store its credentials (applying with `create_app = true` stops until both exist):
 
@@ -77,7 +78,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `tenant_id` | `null` | The subscription's tenant, for the Azure CLI's tokens; null uses the CLI's default |
 | `location` | required | Region for everything; needs HorizonDB, Container Apps and the models |
 | `resource_group_name` | required | Resource group Terraform creates for the deployment |
-| `name_prefix` | `"pghacker"` | Prefix of derived names (`-logs`, `-env`, `-id`, `-vnet`, `-hdb`, `-pg17-<hash>`, `-foundry`, `-afd`) |
+| `name_prefix` | `"pghacker"` | Prefix of derived names (`-logs`, `-env`, `-id`, `-vnet`, `-hdb`, `-pg17-<hash>`, `-foundry`, `-afd`, `-usage`) |
 | `app_name` | `"pghacker"` | Container app's name; jobs are `<app_name>-probe` and `-restore` |
 | `tags` | `{}` | Tags for every resource that takes them |
 | `acr_name` | required | Registry name, globally unique |
@@ -87,6 +88,9 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `key_vault_name` | required | Vault name, globally unique |
 | `key_vault_purge_protection_enabled` | `false` | Purge protection; irreversible |
 | `log_retention_days` | `30` | Log Analytics retention, 30 to 730 |
+| `usage_enabled` | `true` | Usage telemetry ([PRIVACY.md](../PRIVACY.md)): Application Insights on the logs' workspace, `usage-id-key`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` for the app; false creates none of them, and the app records nothing. `AppEvents` keeps the events it already holds until their retention ends |
+| `usage_daily_cap_gb` | `5` | The most usage telemetry Application Insights takes a day; it drops the rest of the day's events |
+| `usage_retention_days`, `usage_total_retention_days` | `730`, `1095` | How long usage events stay queryable (30 to 730) and are kept (up to 4383) in the `AppEvents` table |
 | `deployer_object_ids` | `[]` | Everyone who applies, given Key Vault Secrets Officer; empty means whoever is applying |
 | `vnet_address_space` | `"10.66.0.0/22"` | VNet range |
 | `container_apps_subnet_prefix` | `"10.66.0.0/24"` | Container Apps subnet, /27 or larger; fixed once the environment exists |
@@ -135,6 +139,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `container_app_environment_name`, `container_app_environment_default_domain`, `app_name` | Container Apps |
 | `probe_job_name`, `restore_job_name` | Jobs (`restore_job_name` is null without `seed_image`) |
 | `managed_identity_client_id`, `log_analytics_workspace_id` | Identity and logs |
+| `usage_app_insights_name`, `usage_app_id` | Usage telemetry's Application Insights resource and its application ID, for `az monitor app-insights query --apps`; null with `usage_enabled = false` |
 
 ## Secrets in state
 

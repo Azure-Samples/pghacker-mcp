@@ -7,12 +7,15 @@
 // (scripts/container.mjs) runs. Each process gets only what it needs: no
 // other process sees the administrator's password, the roles' passwords or
 // oauth2-proxy's secrets, and none gets the managed identity's endpoint:
-// the supervisor's Foundry proxy (scripts/lib/foundry.mjs) uses it for them.
+// the supervisor's Foundry proxy (scripts/lib/foundry.mjs) uses it for them,
+// as does its Application Insights proxy (scripts/lib/monitor.mjs) for usage
+// telemetry.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT, extractionEnvironment } from "./config.mjs";
 import { PLACEHOLDER_KEY } from "./foundry.mjs";
+import { parseConnectionString } from "./monitor.mjs";
 import { oauth2ProxyRouteArgs } from "./routes.mjs";
 
 export const DATA_DIR = "/var/lib/pghacker";
@@ -26,10 +29,14 @@ export const PORTS = {
   mcpInternal: 3103,
   home: 3104,
   foundry: 3110,
+  monitor: 3111,
 };
 
 /** The supervisor's Foundry proxy, which adds the managed identity's token. */
 export const FOUNDRY_PROXY = `http://127.0.0.1:${PORTS.foundry}`;
+
+/** The supervisor's Application Insights proxy, likewise, for usage telemetry. */
+export const MONITOR_PROXY = `http://127.0.0.1:${PORTS.monitor}`;
 
 /** The Unix users the processes run as (the Dockerfile creates them). */
 export const USERS = {
@@ -123,6 +130,17 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
   if (history !== undefined && !/^[a-z_][a-z0-9_]{0,62}$/.test(history)) {
     throw new Error("PGHACKER_CODE_HISTORY must name a schema, such as pghacker.");
   }
+  // Usage telemetry, when the app has Application Insights: its resource,
+  // and the key of the users' keyed hashes.
+  const connectionString = value(env, "APPLICATIONINSIGHTS_CONNECTION_STRING");
+  let usage;
+  if (serve && connectionString !== undefined) {
+    const idKey = value(env, "PGHACKER_USAGE_ID_KEY");
+    if (idKey === undefined || [...idKey].length < 32) {
+      throw new Error("APPLICATIONINSIGHTS_CONNECTION_STRING needs PGHACKER_USAGE_ID_KEY, of at least 32 characters.");
+    }
+    usage = { ...parseConnectionString(connectionString), idKey, revision: value(env, "CONTAINER_APP_REVISION") };
+  }
   return {
     root,
     dataDir,
@@ -172,6 +190,7 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
       cookieSecret: env.OAUTH2_PROXY_COOKIE_SECRET,
     },
     portalRole: role,
+    usage,
     pass: Object.fromEntries(PASS_THROUGH.filter((name) => value(env, name) !== undefined).map((name) => [name, env[name]])),
   };
 }
@@ -350,6 +369,16 @@ export function processEnvironments(config) {
     },
   };
   if (config.public) {
+    // Usage telemetry's settings, for pghacker-mcp and the home page: their
+    // events go through the supervisor's Application Insights proxy.
+    const usage = config.usage
+      ? {
+        PGHACKER_USAGE_ENDPOINT: MONITOR_PROXY,
+        PGHACKER_USAGE_IKEY: config.usage.instrumentationKey,
+        PGHACKER_USAGE_ID_KEY: config.usage.idKey,
+        ...(config.usage.revision ? { CONTAINER_APP_REVISION: config.usage.revision } : {}),
+      }
+      : {};
     environments.mcp = {
       ...services,
       ...rust,
@@ -359,10 +388,13 @@ export function processEnvironments(config) {
       PGHACKER_MCP_ADDR: `127.0.0.1:${PORTS.mcp}`,
       PGHACKER_MCP_INTERNAL_ADDR: `127.0.0.1:${PORTS.mcpInternal}`,
       PGHACKER_ALLOWED_HOSTS: config.public.hosts.join(","),
-      PGHACKER_CLIENT_IP_HEADER: "x-azure-clientip",
+      // Front Door's X-Azure-SocketIP: its X-Azure-ClientIP follows a
+      // client's X-Forwarded-For, which anyone can send.
+      PGHACKER_CLIENT_IP_HEADER: "x-azure-socketip",
       PGHACKER_RATE_PER_MINUTE: String(config.rate.perMinute),
       PGHACKER_RATE_BURST: String(config.rate.burst),
       ...(config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
+      ...usage,
     };
     environments.proxy = {
       ...base(config, files.proxy.home, USERS.proxy),
@@ -371,15 +403,18 @@ export function processEnvironments(config) {
       OAUTH2_PROXY_COOKIE_SECRET: config.github.cookieSecret,
     };
     // The home page's server: the built page, its port and the portal's
-    // origin, Front Door's host name, which its share links go on to;
-    // nothing else. It has a user of its own: a process can read the
-    // environment of another of the same user, and oauth2-proxy's holds its
-    // secrets.
+    // origin, Front Door's host name, which its share links go on to; and
+    // usage telemetry's settings, with the Front Door profile whose requests
+    // name their client; nothing else. It has a user of its own: a process
+    // can read the environment of another of the same user, and
+    // oauth2-proxy's holds its secrets.
     environments.home = {
       ...base(config, files.home.home, USERS.home),
       PORT: String(PORTS.home),
       PGHACKER_HOME_DIR: path.join(config.root, "home", "dist"),
       PGHACKER_PORTAL_URL: config.public.portalUrl,
+      ...usage,
+      ...(config.usage && config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
     };
   }
   return environments;

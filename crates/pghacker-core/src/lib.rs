@@ -5,9 +5,11 @@
 //! environment, PostgreSQL pools, tool calls that can be abandoned, the
 //! bootstrap and migrations of schema `pghacker` and graph `pghacker_graph`,
 //! the embeddings client, search modes, citation checks, the commit history's
-//! schema and release ordering, and the MCP server plumbing.
+//! schema and release ordering, the MCP server plumbing, and the public
+//! endpoint's usage telemetry and the clients it counts.
 
 pub mod calls;
+pub mod clients;
 pub mod code;
 pub mod config;
 pub mod db;
@@ -19,6 +21,7 @@ pub mod search;
 pub mod telemetry;
 pub mod testing;
 pub mod text;
+pub mod usage;
 
 /// The AGE graph that the indexer projects the tables into.
 pub const GRAPH: &str = "pghacker_graph";

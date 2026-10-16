@@ -127,3 +127,12 @@ mock_resource "azurerm_cdn_frontdoor_custom_domain" {
     expiration_date  = "2026-12-01T00:00:00Z"
   }
 }
+
+mock_resource "azurerm_application_insights" {
+  defaults = {
+    id                  = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Insights/components/pghacker-example-usage"
+    app_id              = "7a1b2c3d-0000-4000-8000-000000000003"
+    instrumentation_key = "11111111-2222-4333-8444-555555555555"
+    connection_string   = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
+  }
+}

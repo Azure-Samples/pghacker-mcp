@@ -100,6 +100,28 @@ test("the home page is checked again on each visit, under a strict policy", asyn
   assert.equal(await head.text(), "");
 });
 
+test("the page's views are heard, for usage telemetry: GETs of the page alone", async (t) => {
+  const heard = [];
+  const home = createHomeHandler({ root: distFixture(t), onPage: (request) => heard.push(request.url) });
+  const port = await listen(t, http.createServer(home));
+  const base = `http://127.0.0.1:${port}`;
+  for (const [path, method] of [
+    ["/?utm_source=newsletter", "GET"], ["/", "HEAD"], ["/static/index-abc.js", "GET"], ["/favicon.svg", "GET"],
+    ["/nope", "GET"], ["/?session=abc", "GET"], ["/index.html", "GET"], ["/healthz", "GET"],
+  ]) {
+    const response = await fetch(`${base}${path}`, { method, redirect: "manual" });
+    await response.arrayBuffer();
+  }
+  assert.deepEqual(heard, ["/?utm_source=newsletter"]);
+
+  // A recorder that fails doesn't fail the page.
+  const failing = createHomeHandler({ root: distFixture(t), onPage: () => { throw new Error("broken"); } });
+  const failingPort = await listen(t, http.createServer(failing));
+  const page = await fetch(`http://127.0.0.1:${failingPort}/`);
+  assert.equal(page.status, 200);
+  assert.equal(await page.text(), PAGE);
+});
+
 test("fingerprinted files are kept a year, the page's other files an hour", async (t) => {
   const { base } = await siteFixture(t);
   const script = await fetch(`${base}/static/index-abc.js`);

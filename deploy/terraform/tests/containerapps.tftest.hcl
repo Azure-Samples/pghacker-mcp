@@ -69,6 +69,10 @@ override_resource {
   target = azurerm_key_vault_secret.oauth2_cookie
   values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/oauth2-cookie-secret" }
 }
+override_resource {
+  target = azurerm_key_vault_secret.usage_id_key[0]
+  values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/usage-id-key" }
+}
 
 # The defaults: everything but the app, so the probe can run first.
 run "first_apply_creates_no_app" {
@@ -141,7 +145,7 @@ run "app_and_restore_job" {
     condition = (
       nonsensitive(alltrue([for secret in azurerm_container_app.app[0].secret : secret.value == null && secret.identity == azurerm_user_assigned_identity.app.id]))
       && { for secret in azurerm_container_app.app[0].secret : secret.name => secret.key_vault_secret_id } == {
-        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password", "oauth2-cookie-secret", "github-client-id", "github-client-secret"] :
+        for name in ["db-admin-password", "pgh-indexer-password", "pgh-reader-password", "pgh-swarm-password", "oauth2-cookie-secret", "github-client-id", "github-client-secret", "usage-id-key"] :
         name => "https://pghacker-example-kv.vault.azure.net/secrets/${name}"
       }
     )
@@ -171,6 +175,7 @@ run "app_and_restore_job" {
       OAUTH2_PROXY_CLIENT_ID     = "github-client-id"
       OAUTH2_PROXY_CLIENT_SECRET = "github-client-secret"
       OAUTH2_PROXY_COOKIE_SECRET = "oauth2-cookie-secret"
+      PGHACKER_USAGE_ID_KEY      = "usage-id-key"
     }
     error_message = "The app's secret variables must read the contract's secrets."
   }
@@ -201,6 +206,8 @@ run "app_and_restore_job" {
       PGHACKER_GITHUB_ORG           = "example-org"
       PGHACKER_GITHUB_TEAM          = "example-team"
       PGHACKER_PORTAL_ROLE          = "user"
+      # The mocked resource's, which only names it: local authentication is off.
+      APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
     }
     error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users."
   }

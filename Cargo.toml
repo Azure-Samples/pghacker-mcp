@@ -51,8 +51,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.11"
+hmac = "0.13"
 hex = "0.4"
 base64 = "0.22"
+flate2 = "1"
 regex = "1"
 regex-syntax = "0.8"
 fancy-regex = "0.19"
