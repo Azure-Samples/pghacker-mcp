@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Checks wide loop searches and pipeline counts on the full PG19 tree
 //! against GNU grep, using a temporary database: the tree is served from a
 //! commit history built there.

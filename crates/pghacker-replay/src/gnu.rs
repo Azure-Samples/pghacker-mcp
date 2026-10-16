@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! GNU grep 3.11 in Docker (debian:trixie-slim, LC_ALL=C.UTF-8) on
 //! materialized trees: the ground truth for the grep tool's output.
 //!

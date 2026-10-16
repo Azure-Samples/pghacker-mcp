@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The public entry: an Azure Front Door Standard endpoint in front of the app,
 # which keeps the host name, <name>-<hash>.<zone>.azurefd.net, when the
 # Container Apps environment is replaced. That host name serves every path,

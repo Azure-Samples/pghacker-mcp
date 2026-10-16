@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { readLocalConfig } from "./lib/config.mjs";
 import { runDatabase, stopPortal } from "./lib/processes.mjs";
 import { stopRecordedServices } from "./lib/services.mjs";

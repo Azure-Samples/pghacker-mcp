@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The Container Apps environment, the app and its jobs: Key Vault references,
 # the environment contract, ingress restrictions and the staged first apply.
 # Every provider is mocked, so runs apply to synthetic state, never to Azure.

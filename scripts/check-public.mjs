@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // Checks a deployment's routes from outside, as a visitor and read-only
 // (scripts/lib/health.mjs, checkPublic): the public home page and the
 // anonymous MCP endpoint, and the portal behind GitHub sign-in on its own

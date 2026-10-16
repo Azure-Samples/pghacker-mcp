@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pghacker-mcp's tools: mail and graph search, read-only SQL, and code search.
 
 use std::sync::{Arc, LazyLock};

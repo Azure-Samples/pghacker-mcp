@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Shared by pghacker-indexer and pghacker-mcp: configuration from the
 //! environment, PostgreSQL pools, tool calls that can be abandoned, the
 //! bootstrap and migrations of schema `pghacker` and graph `pghacker_graph`,

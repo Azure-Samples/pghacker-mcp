@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use super::*;
 
 const MULTIPART: &[u8] = include_bytes!("../../tests/fixtures/multipart_patch.eml");

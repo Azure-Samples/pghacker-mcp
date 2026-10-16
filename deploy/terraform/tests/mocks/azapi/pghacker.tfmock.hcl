@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Every azapi resource shares these defaults: the HorizonDB cluster reads
 # fqdn, the Front Door endpoint host_name.
 mock_resource "azapi_resource" {

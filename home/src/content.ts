@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /*
  * What the page says. The examples come from the requirements' use cases and
  * the evaluation (eval/questions.json), each checked against the deployed

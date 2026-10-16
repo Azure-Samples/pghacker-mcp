@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The weave builder: applies every commit, in address order, to the files
 //! of its lane, recording each line instance's birth, deaths and place in
 //! its lineage's weave.

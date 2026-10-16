@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The commit-history builder on generated repositories: every file at every
 //! commit rebuilds to its blob, and lines are stored once.
 

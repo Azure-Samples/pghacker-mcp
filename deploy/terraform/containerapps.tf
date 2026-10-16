@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The Container Apps environment, the app and its manual jobs. They share the
 # identity, the registry, the Key Vault references and the database and
 # Foundry settings (locals.tf); the restore job runs the seed image.

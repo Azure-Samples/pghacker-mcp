@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /**
  * The colour theme: light, dark, or the system's, kept in localStorage. The
  * page is light unless someone chooses otherwise. theme-boot.js shows the

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The bootstrap, which the administrator runs, and the migrations, which
 //! pgh_indexer runs: both on every start, both idempotent.
 

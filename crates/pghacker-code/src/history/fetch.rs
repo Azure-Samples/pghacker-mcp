@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The history's clone: every branch and tag of PostgreSQL's repository,
 //! fetched into a bare repository that syncs read.
 

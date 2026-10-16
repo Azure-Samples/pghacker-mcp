@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 WITH labels AS (
     SELECT l.name::text AS label, l.kind::text AS label_kind, c.oid AS table_oid,
            n.nspname::text AS schema_name, c.relname::text AS table_name,

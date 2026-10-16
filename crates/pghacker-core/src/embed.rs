@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Embeddings through an OpenAI-compatible endpoint, configured as PilotSwarm
 //! configures its embedder: `HORIZON_EMBED_URL`, `_MODEL`, `_DIM`,
 //! `_API_KEY`, `_API_KEY_HEADER` (default `api-key`, Azure's) and `_BEARER`

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The PostgreSQL side of a search: candidate lines through pg_trgm, the time
 //! budget, and the lines around matches.
 

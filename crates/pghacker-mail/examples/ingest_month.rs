@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Ingests monthly archives and seed threads from the real archive into a
 //! scratch database, dropped at the end, and reports what was stored and how
 //! well it threaded. The archive cache is the repository's `.runtime/cache`.

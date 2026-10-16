@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- The code tools read the commit history (0011) alone, so the snapshots it
 -- replaced are retired: their tables, the capture of their changes for the
 -- graph, and their loader's unfinished jobs.

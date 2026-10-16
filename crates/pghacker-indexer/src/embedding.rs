@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The embeddings backfill: message chunks and extracts whose embedding is
 //! still NULL. Search works without embeddings, in full text mode.
 

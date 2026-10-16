@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Commit history: every line of every commit, stored once.
 //!
 //! Each line instance is one row with the addresses of the commits it is

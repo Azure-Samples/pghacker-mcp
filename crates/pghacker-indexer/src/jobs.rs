@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The job queue: idempotent jobs keyed by (kind, key), claimed with
 //! `FOR UPDATE SKIP LOCKED`, retried with backoff, and recurring jobs that
 //! re-queue themselves.

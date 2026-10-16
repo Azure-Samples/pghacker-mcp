@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // Checks for the evaluation's answers: the same quote rule as the indexer's
 // citations (pghacker_core::text::quote_in), CSV from the query tool, the
 // answer's JSON block, and the commits it cites.

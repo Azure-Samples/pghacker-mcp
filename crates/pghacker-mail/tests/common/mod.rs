@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! What the tests share: mail stored as ingest once stored it, and a
 //! message's stored text.
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The grep tool: a grep command line, with its trailing pipeline, run over a
 //! commit's tree as GNU grep 3.11 would run it at the source root, output
 //! and all.

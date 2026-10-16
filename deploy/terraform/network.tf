@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The VNet of the Container Apps environment and of the private endpoints
 # through which it reaches HorizonDB (horizondb.tf) and Foundry (foundry.tf).
 # Neither service joins a VNet; private endpoints are their only private path.

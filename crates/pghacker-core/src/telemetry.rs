@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Logging to stderr, filtered by `RUST_LOG`.
 
 use tracing_subscriber::EnvFilter;

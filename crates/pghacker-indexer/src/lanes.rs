@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The lanes extraction leases threads from. A thread needs extraction when
 //! extraction never read it, or read it before its latest messages came.
 //! Those whose latest message is from the last days (7 by default,

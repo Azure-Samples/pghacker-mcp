@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # PostgreSQL 17 with the extensions pghacker-mcp needs: Apache AGE (graph),
 # pgvector (semantic search) and pg_textsearch (BM25). pg_trgm ships in contrib.
 # The base image already trusts the PGDG repository, which builds all three.

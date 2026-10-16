@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Anchors: what a message mentions that exists outside the archive. Paths
 //! in the PostgreSQL tree, commits, CommitFest entries and major releases,
 //! from the subject, the cleaned body and the patches' paths. Precision over

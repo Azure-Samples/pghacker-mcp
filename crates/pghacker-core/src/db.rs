@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! PostgreSQL connections and pools.
 //!
 //! Every connection offers TLS as the URL's `sslmode` asks: `prefer`,

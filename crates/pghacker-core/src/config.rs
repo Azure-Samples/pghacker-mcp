@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Settings from the environment. The services read only their process
 //! environment, which the launcher builds; tests and local tools also read
 //! the repository's `.env`, under the process environment.

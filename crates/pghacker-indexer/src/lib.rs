@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pghacker-indexer: async workers that retrieve sources (monthly mbox
 //! archives, seed threads, the commit history's new commits), embed chunks,
 //! resolve anchors, find duplicate candidates among the extracts and

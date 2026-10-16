@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Times one code-tool call through a commit history: a grep command line
 //! or, with --search, a search for the text, or with --json, a search with
 //! those JSON arguments, whose answer goes to

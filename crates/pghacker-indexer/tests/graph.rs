@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The incremental graph sync against the full one: whatever the tables go
 //! through, applying the changes they captured must leave exactly the graph
 //! that a full sync computes, with AGE's rows matching the bookkeeping and the

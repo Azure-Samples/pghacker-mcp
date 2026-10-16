@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- The commit history in the graph (graph.rs): a Commit vertex for every
 -- commit, keyed by its full SHA, which MODIFIES its files, is DISCUSSED_IN
 -- the threads that discussed it, is a BACKPATCH_OF its back-patch group's

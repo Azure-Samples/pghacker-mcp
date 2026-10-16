@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Indexes patches' lines for search_patches: each distinct line once in
 //! patch_texts, by kind, and each patch's lines in order as text_ids.
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Monthly mbox archives, as the archive serves them.
 //!
 //! Each message starts with a `From <sender> <asctime date>` line and messages

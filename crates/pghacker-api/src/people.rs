@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search_authors, get_author and author_perspective.
 
 use std::collections::{HashMap, HashSet};

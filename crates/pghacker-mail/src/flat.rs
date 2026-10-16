@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The archive's flat thread view, `/message-id/flat/<id>`: the whole thread
 //! on one page, oldest message first, each with a header table whose
 //! `Message-ID:` row links to the message.

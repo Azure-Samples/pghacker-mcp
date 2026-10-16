@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Back-patch groups: commits that apply one change to several lanes, as
 //! PostgreSQL back-patches fixes to its supported branches. Commits group
 //! when they are on different lanes and have the same patch id, or the same

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # HorizonDB (preview), PostgreSQL 17, through azapi. azapi's bundled schemas
 # don't cover Microsoft.HorizonDB, so schema validation is off.
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search_extracts: features, decisions and positions with their citations.
 
 use anyhow::Result;

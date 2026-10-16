@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Resolves anchors against the commit history that the code tools read: a
 //! path mentioned in mail becomes a virtual path the tools read
 //! (`/branch/<newest release line>/<path>`, else `/branch/master/<path>`,

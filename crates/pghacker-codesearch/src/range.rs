@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Ranges of commits, as git log takes them, over commit addresses: `X` is
 //! X and its ancestors; `A..B` is B's ancestors that aren't A's. In
 //! PostgreSQL's history, a tree, a range is master commits in an interval

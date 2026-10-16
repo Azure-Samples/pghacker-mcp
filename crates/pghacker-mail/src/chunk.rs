@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Search chunks: a message's subject and cleaned body cut at paragraph
 //! boundaries into pieces of about 1,200–1,800 characters, for BM25 and
 //! embeddings.

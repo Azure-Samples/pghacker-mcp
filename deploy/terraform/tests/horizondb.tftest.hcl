@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # HorizonDB: the parameter group, the cluster and its private path. Every
 # provider is mocked, so runs apply to synthetic state, never to Azure.
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Revisions in the commit history: what the `version` argument and the
 //! virtual folders name. Accepted, case-insensitively where git allows:
 //!

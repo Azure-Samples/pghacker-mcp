@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Rust (ripgrep) and PCRE regexes as PostgreSQL advanced regular expressions
 //! (AREs), the filter that lets pg_trgm prune candidate lines.
 //!

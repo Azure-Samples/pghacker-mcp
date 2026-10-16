@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Duplicate candidates for find_duplicates: pairs of features, or of
 -- decisions, that look alike, found as each extract arrives rather than by
 -- comparing every pair at once. The duplicates job compares each new extract

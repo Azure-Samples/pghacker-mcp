@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Profiles common loop searches with many unrelated branches' lines
 //! sharing the history's trigram index. Builds a synthetic repository into
 //! a temporary TestDb, never the application's corpus.

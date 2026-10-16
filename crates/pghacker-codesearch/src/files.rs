@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! read_file and list_files: a commit's files with line numbers, and its
 //! folders.
 

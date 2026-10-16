@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The site's routes, one table for both front ends: oauth2-proxy in Azure
 // (scripts/lib/azure.mjs makes its --upstream, --skip-auth-route and
 // --api-route flags from it) and the local edge (scripts/lib/edge.mjs).

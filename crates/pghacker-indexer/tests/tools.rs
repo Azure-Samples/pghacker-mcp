@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Tool calls over HTTP, as crawler sessions make them, while find_duplicates
 //! calls are stuck: ingest_status still answers and the jobs still run, a
 //! stuck statement runs no longer than the tool timeout, and a call whose client gives

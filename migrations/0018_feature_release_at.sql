@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- When the evidence for a feature's release was written: the date of the
 -- latest message of the thread whose extraction gave the release. A thread's
 -- claim replaces the release only when its thread's latest message is at

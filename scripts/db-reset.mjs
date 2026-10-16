@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { spawnSync } from "node:child_process";
 import { readLocalConfig, serviceEnvironments } from "./lib/config.mjs";
 import { processIsAlive, readPortalRecord, runDatabase } from "./lib/processes.mjs";

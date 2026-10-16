@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Projects the tables into the AGE graph `pghacker_graph`. Writes go straight
 //! into AGE's label tables, which is much faster than Cypher MERGE, and
 //! `graph_nodes` and `graph_edges` record which vertex and edge each key

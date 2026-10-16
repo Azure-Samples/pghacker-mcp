@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The Azure deployment's configuration. deploy/terraform gives the container
 // the environment described in deploy/README.md; this turns it into the
 // environment, user and arguments of each process the supervisor

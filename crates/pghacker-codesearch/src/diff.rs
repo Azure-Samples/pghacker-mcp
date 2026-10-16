@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Unified diffs rendered from the weave, formatted as git diff formats
 //! them: within each change block the removed lines come before the added
 //! ones, hunks closer than twice the context merge, and each hunk header

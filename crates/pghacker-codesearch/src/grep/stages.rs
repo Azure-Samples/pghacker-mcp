@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The pipeline stages the grep tool runs on grep's output, as GNU
 //! coreutils (in the C.UTF-8 locale) would: head, tail, wc, sort, uniq, cut
 //! and cat. A further grep stage is handled by the caller.

@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- The cluster's roles, run by the administrator before database.sql and
 -- on every start: idempotent. The passwords arrive as the settings
 -- pghacker.indexer_password, pghacker.reader_password and, when PilotSwarm

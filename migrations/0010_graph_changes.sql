@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Change capture for the incremental graph sync. Triggers on the tables that
 -- the graph projects append, in the writing transaction, the keys of the
 -- vertices and the edges that a change may affect, from the row before and

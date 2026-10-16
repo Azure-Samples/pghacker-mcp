@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Writing parsed messages in the caller's transaction: threading, authors,
 //! patches, anchors and chunks, idempotently.
 //!

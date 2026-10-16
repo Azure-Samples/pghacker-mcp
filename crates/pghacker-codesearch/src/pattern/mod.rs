@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Search patterns: grep's and ripgrep's dialects, translated twice, into
 //! conditions on the text of the commit history's lines
 //! (`code_line_instances.line`) that pg_trgm's index can use, and into an

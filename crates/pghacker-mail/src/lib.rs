@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pgsql-hackers archive retrieval, parsing, threading, authors, patches,
 //! anchors and chunks.
 //!

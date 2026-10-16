@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // Extraction sessions: running them, and the scheduler that keeps them busy
 // for as long as threads await extraction (npm run crawl -- --watch, which
 // the Azure container runs). The scheduler has no caps of its own: its

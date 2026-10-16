@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The indexer's settings, from the environment the launcher builds.
 
 use std::path::PathBuf;

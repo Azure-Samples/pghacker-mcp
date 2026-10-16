@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The rules that differ from ripgrep: in a basic regex `\(`, `\|`, `\{`,
 //! `\+` and `\?` are the operators; `^` is an anchor only at the start of
 //! the pattern, a group or an alternative, and `$` only at the end; `*` (and

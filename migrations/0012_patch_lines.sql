@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Patches' lines for search_patches and grep over patches: each distinct
 -- line once, by kind ('+' added, '-' removed, ' ' context, 'h' any other
 -- line: headers, hunk ranges, text around the diff), without its diff

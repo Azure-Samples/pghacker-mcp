@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Code search over the commit history, which the code tools read: the
 //! build in the schema PGHACKER_CODE_HISTORY names, else the history
 //! installed in `pghacker`.

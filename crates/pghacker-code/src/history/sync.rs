@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Applies new commits to a history: each new commit, in address order (the
 //! order a build walks), through the same walker as a build, with its files
 //! read from the tables and its changes written back. So a build up to some

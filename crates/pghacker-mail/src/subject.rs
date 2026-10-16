@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Subjects: the form threads display, and the key that matches a reply that
 //! lost its threading headers with its thread.
 

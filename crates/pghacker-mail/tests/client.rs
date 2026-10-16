@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The archive client against a local stand-in for the archive: retries,
 //! authentication, encoding, caching and month refreshes.
 

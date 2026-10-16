@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The ingestion pipelines the indexer's job workers run: a month's mbox, or
 //! a thread from its flat page and raw messages. Both are idempotent and
 //! commit in batches, so an interrupted run resumes where it stopped. So are

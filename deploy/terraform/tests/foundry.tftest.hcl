@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Azure AI Foundry: the private account, its deployments, its private
 # endpoint and DNS. Every provider is mocked, so runs apply to synthetic
 # state, never to Azure.

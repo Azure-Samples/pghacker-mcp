@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Mailing-list messages, threads, authors, patches, anchors and search chunks.
 
 CREATE TABLE authors (

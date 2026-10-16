@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Rebuilds files from the history and checks them against git: at each
 //! commit, the files alive must be exactly git's, and each text file's
 //! lines, in weave order, must hash to its blob's SHA.

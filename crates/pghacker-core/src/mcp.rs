@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The MCP server plumbing both services share: tool specs with JSON
 //! schemas, an rmcp handler over a [`Tools`] implementation, and the axum
 //! router with `/mcp` and `/healthz`.

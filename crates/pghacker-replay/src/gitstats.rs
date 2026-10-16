@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! A commit's statistics, as the study's data records them, to find which
 //! commit the study replayed: every tracked file counted; symlinks; blobs
 //! with a NUL byte are binary; blobs that are not UTF-8 are skipped; text

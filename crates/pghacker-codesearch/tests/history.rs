@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The code tools over the commit history of generated repositories: line
 //! reads, revisions, virtual folders that mount other commits, history
 //! search, blame, get_commit, search_commits and search_patches, checked

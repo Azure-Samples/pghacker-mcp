@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Duplicate candidates for find_duplicates. Each feature and decision, once
 //! it arrives, is compared with the live ones of its kind: by its embedding's
 //! nearest neighbours, on the HNSW index, and by its name's trigrams, on the

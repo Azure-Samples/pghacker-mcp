@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { FOUNDRY_PROXY, PORTS, databaseUrls, embedEnvironment, processEnvironments, readAzureConfig } from "./lib/azure.mjs";
 import { PLACEHOLDER_KEY, managedIdentityTokens, startFoundryProxy } from "./lib/foundry.mjs";
 import { psqlJson, run } from "./lib/psql.mjs";

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! `ingest_status`: what each source has retrieved, parsed, embedded and
 //! extracted, the extraction lanes, and the graph's size. Months are
 //! summarized per list, with the unfinished and latest ones in detail: a

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The query tool: one read-only SQL statement on pghacker's database, as
 //! pgh_reader.
 //!

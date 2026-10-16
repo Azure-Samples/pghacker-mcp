@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The order in which next_extraction_batch leases threads, and what
 //! extraction records of a thread whose mail changes, on fresh databases,
 //! without the network or an embeddings endpoint.

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Search modes: full text ranks by BM25 (pg_textsearch), semantic by
 //! pgvector cosine distance, and hybrid fuses both rankings with reciprocal
 //! rank fusion.

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! get_ontology: what's in the graph and the tables, how to query them, and
 //! what's loaded.
 

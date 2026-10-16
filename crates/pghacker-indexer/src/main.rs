@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pghacker-indexer's command line: `bootstrap` (as the database's
 //! administrator), `serve` (workers and the MCP server), `status`,
 //! `graph-reconcile`, `restore-addresses`, the local-only `reset`, and

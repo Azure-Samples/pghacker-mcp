@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The ingestion pipelines on a fresh database, with the archive's responses
 //! already in the cache: no network.
 

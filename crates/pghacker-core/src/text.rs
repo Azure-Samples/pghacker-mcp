@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Text helpers: truncation on character boundaries, whitespace-insensitive
 //! quote checks for citations, and recognizing the email redaction that
 //! ingest once applied.

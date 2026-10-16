@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The theme, before the first paint: a classic script that vite.config.ts
 // puts in <head> as a /static/ file named by its hash, since the page's CSP
 // allows no inline script. theme.ts has the same key and rules: light unless

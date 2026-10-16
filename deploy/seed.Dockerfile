@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The seed image: the app image plus a corpus to restore, which the restore
 # job runs (deploy/README.md, "First deployment", step 6). npm run corpus:dump
 # copies this file next to corpus.dump and manifest.json; build it there

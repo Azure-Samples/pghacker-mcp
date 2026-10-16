@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Sources the indexer retrieves, the jobs that retrieve and process them, and
 -- the log of reversible merges. Runs as pgh_indexer with search_path pghacker.
 

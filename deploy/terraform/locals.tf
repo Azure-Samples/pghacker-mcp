@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 locals {
   rg_name = azurerm_resource_group.this.name
   rg_id   = azurerm_resource_group.this.id

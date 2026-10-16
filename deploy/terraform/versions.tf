@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 terraform {
   # 1.9 for variable validations that refer to other variables.
   required_version = ">= 1.9"

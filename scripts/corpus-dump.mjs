@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, createReadStream, createWriteStream, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";

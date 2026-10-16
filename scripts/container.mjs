@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The Azure container's supervisor, run as root by tini (Dockerfile). It
 // prepares each user's directories and PilotSwarm's model catalog, runs the
 // Foundry proxy, which signs the services' model requests with the managed

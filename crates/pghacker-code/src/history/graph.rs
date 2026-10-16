@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The commit graph: master, the branches forked from it, and the tags.
 //!
 //! PostgreSQL's history is a tree: no merges, one root, and every branch

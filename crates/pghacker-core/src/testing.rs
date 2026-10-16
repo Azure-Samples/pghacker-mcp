@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Databases for integration tests: each [`TestDb`] is a fresh database on
 //! the local PostgreSQL, bootstrapped and migrated, and dropped with it.
 //!

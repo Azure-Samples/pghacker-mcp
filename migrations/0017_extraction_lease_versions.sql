@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Each leased thread's content version when it was leased, in thread_ids'
 -- order: what submit_extracts records as extracted. A thread whose mail
 -- changes during the lease stays changed, and is leased again. Leases from

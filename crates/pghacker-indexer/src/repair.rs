@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Repairs derived counts that a failed refresh left stale: concurrent
 //! ingests can deadlock a thread's refresh, which the next ingest of that
 //! thread would otherwise be the only one to fix.

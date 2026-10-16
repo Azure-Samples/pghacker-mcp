@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1.7
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # pghacker-mcp for Azure Container Apps (deploy/README.md): the Rust
 # services, PilotSwarm 0.8.2 with the app's agents, the home page,
 # oauth2-proxy, and the supervisor that runs each as its own user

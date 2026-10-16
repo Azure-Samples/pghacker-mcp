@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The first-class search operation: text, regex or identifier queries over a
 //! commit's lines, with scope, filters, output shapes, paging, coverage
 //! order, a time budget and similar names when nothing matches.

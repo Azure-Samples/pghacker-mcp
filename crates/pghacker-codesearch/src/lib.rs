@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Code search over pg_trgm: the search operation, grep command lines,
 //! read_file and list_files, over the commit history that pghacker-code
 //! builds: every commit's files and lines, stored once as file versions and

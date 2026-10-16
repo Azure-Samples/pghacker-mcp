@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The home page's server, and the local edge around it.
 //
 // createHomeHandler serves the built home page (home/dist): index.html, which

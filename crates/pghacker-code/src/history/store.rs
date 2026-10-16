@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Writes a build into a schema of its own, then swaps it into `pghacker`
 //! or keeps it there (the engine benchmark reads it in place).
 //!

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! grep's output for one file at a time, as GNU grep 3.11 prints it: line
 //! heads (`file:12:`, `-` on context lines, NUL after names with -Z),
 //! context with `--` between groups, -o, -c, -l, -L and -m.

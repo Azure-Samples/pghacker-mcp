@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The commit history that the code tools read, and how versions sort.
 
 use std::cmp::Ordering;

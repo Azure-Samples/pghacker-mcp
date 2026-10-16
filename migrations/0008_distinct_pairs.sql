@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Pairs of features or decisions judged to be different things: by an
 -- extractor that created one despite the other (its distinct_because), or by
 -- the deduplicator (mark_distinct). find_duplicates doesn't offer them again.

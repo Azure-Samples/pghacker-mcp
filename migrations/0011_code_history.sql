@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- The code's commit history: every line of every commit on every branch,
 -- stored once (crates/pghacker-code/src/history). A line instance or file
 -- version is alive at the commits whose addresses lie in [lo, hi), except

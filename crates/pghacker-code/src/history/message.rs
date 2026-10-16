@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Commit messages' trailers, such as `Discussion:` and `Reviewed-by:`.
 //!
 //! PostgreSQL's commits put them anywhere after the subject, often in a

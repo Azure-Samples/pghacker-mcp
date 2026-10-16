@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The routes through the real oauth2-proxy, as the container runs it: its
 // release binary for this machine (checked against the release's checksums,
 // the Linux ones the Dockerfile's), with the container's flags from

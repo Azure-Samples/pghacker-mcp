@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The test slices (`config/test-slices.toml`): which months and threads of a
 //! mailing list a source retrieves until wave 3 retrieves everything.
 

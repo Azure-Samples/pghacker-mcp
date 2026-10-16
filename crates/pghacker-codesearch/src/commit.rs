@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! get_commit: a commit as git show gives it, from the history: its message
 //! and trailers, the discussion threads its Discussion trailers name, its
 //! back-patch siblings on other branches, the first release on each branch

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search_threads and get_thread.
 
 use std::collections::HashMap;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { mkdirSync } from "node:fs";
 import { once } from "node:events";
 import path from "node:path";

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pghacker-replay: the exactness gate for code search. It replays the
 //! search study's recorded agent searches, and generated PG19 searches,
 //! through `search` and `grep`, and compares their lines with ripgrep's and

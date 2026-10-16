@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Starts one of the deployment's jobs, waits for it to finish, and prints its
 # one-line JSON report, which Log Analytics receives a few minutes later.
 #   deploy/scripts/run-job.sh probe | restore | history

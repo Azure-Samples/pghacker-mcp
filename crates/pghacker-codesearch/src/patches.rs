@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search_patches: lines of the patches posted to pgsql-hackers, found
 //! through patch_texts (each distinct line once, by kind) and each patch's
 //! text_ids, grouped by thread with the first and latest patch version that

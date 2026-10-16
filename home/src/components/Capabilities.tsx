@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { Database, FileCode2, History, Quote, UsersRound, type LucideIcon } from "lucide-react";
 import { CAPABILITIES, PRODUCT, type CapabilityIcon } from "../content.ts";
 import { ToolChips } from "./Examples.tsx";

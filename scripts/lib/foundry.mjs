@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // Azure AI Foundry with the app's managed identity rather than keys, which
 // the subscription's policy refuses. The supervisor runs this proxy on
 // loopback: it forwards /openai/ requests to the Foundry account with an

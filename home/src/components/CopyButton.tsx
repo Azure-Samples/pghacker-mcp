@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, Copy, TriangleAlert } from "lucide-react";
 

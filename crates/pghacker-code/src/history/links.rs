@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Links from commits to the pgsql-hackers threads that discussed them: the
 //! threads whose messages the commit's Discussion trailers name, and the
 //! threads whose messages cite the commit by SHA (mail's commit anchors).

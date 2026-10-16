@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The Azure deployment's PilotSwarm worker and portal, which the supervisor
 // (scripts/container.mjs) runs as pgh-agent with only their environment.
 // The portal listens on 127.0.0.1 behind oauth2-proxy, which signs users in

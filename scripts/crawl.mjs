@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { parseArgs } from "node:util";
 import { APP_ROOT, portalEnvironment, readLocalConfig, serviceUrl } from "./lib/config.mjs";
 import { lanesLine, memoryUsed, probeFoundry, runSession, watch } from "./lib/crawl.mjs";

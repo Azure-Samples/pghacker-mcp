@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Sources: the mailing lists the indexer retrieves, and the PostgreSQL
 //! versions of the commit history. Adding a list queues the jobs that
 //! retrieve it; adding a version loads nothing, since the history holds every

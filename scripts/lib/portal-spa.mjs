@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // PilotSwarm 0.8.2's portal server offers the "proxy" auth provider, which
 // takes the identity an authenticating proxy (here oauth2-proxy) puts on each
 // request. Its prebuilt SPA has no browser half for it, though (it knows only

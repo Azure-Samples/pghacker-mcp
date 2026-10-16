@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Sets up the remote state that Terraform's azurerm backend uses for
 # pghacker-mcp, in a resource group of its own, apart from the deployment:
 #

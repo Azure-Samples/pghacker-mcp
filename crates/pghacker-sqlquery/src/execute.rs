@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The read-only query path: one statement in a read-only transaction that is
 //! always rolled back, read in the text wire format and rendered as CSV.
 //!

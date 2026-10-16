@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import path from "node:path";
 
 /** The app's model catalog: GitHub Copilot models, including Luna for the crawler. */

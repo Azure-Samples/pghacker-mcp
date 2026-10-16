@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Azure AI Foundry: an AIServices account with the app's model deployments,
 # reachable only through its private endpoint. Key (local) authentication is
 # off, as the subscription's policy requires: the app's managed identity calls

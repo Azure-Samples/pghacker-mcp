@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The public archive at www.postgresql.org: monthly mbox archives, flat
 //! thread pages and raw messages, behind a rate limit shared by all clones of
 //! a client, retries with backoff, and a disk cache.

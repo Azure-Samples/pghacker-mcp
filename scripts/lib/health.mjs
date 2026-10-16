@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { LOCAL_HOST } from "./config.mjs";
 import { EXPECTED_TOOLS, listTools } from "./services.mjs";
 

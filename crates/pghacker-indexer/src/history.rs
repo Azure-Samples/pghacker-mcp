@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The hourly history sync: fetch every branch and tag of the history's
 //! repository into the indexer's clone, then apply the new commits.
 //!

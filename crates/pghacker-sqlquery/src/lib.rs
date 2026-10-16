@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The public MCP server's `query` tool: one read-only SQL statement, AGE's
 //! `cypher()` included, run as pgh_reader in a read-only transaction that is
 //! always rolled back, with a 10-second statement timeout, answered as CSV.

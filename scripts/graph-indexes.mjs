@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {

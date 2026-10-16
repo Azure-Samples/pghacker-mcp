@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Against the real archive: run with `cargo test -p pghacker-mail --test
 //! live -- --ignored`. Two requests, then the parsers must agree with what
 //! the archive serves.

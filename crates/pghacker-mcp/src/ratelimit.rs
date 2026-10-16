@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Per-client rate limiting for the public endpoint: a token bucket per IP
 //! address (an IPv6 client's /64), refilled continuously; and the check that
 //! requests came through the deployment's Front Door.

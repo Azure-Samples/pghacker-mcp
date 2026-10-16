@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Bookkeeping for projecting the tables into the AGE graph pghacker_graph:
 -- which vertex and edge each table row became, so a sync changes only what
 -- changed. The graph and its labels are created by bootstrap, as AGE requires.

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { Check, Monitor, Moon, Sun, type LucideIcon } from "lucide-react";
 import {
   useCallback,

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The author's own words: a body without quoted lines and their "On ...
 //! wrote:" attributions, forwarded or Outlook-quoted messages, inline diffs
 //! and diffstats, signatures after `-- `, and list footers. What search

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! What the tools share: search modes over chunk and extract rankings,
 //! resolving authors, and snippets.
 

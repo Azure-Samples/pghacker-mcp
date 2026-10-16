@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! blame: the commit that added each line of a file, as git blame gives it,
 //! following renames, and passing through the reformatting commits that
 //! PostgreSQL's .git-blame-ignore-revs names (pgindent runs), as

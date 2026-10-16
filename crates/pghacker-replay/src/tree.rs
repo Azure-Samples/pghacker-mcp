@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Serves one commit to the code tools from a commit history of its own,
 //! and writes its files out for ripgrep and GNU grep.
 //!

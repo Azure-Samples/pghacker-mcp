@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Bootstrap and migrations on a fresh database, and what each role may do.
 
 use pghacker_core::config::{Env, with_credentials, with_database};

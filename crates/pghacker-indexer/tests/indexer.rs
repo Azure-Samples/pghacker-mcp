@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The indexer's jobs, sources, graph projection and extraction workflow on
 //! fresh databases, without the network or an embeddings endpoint.
 

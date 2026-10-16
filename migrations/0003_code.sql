@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Source code snapshots, one row per line for pg_trgm code search.
 
 CREATE TABLE code_snapshots (

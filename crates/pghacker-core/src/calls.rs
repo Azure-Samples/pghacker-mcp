@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Tool calls that may be abandoned. When a call's client goes away, the
 //! server drops the call's future; but a statement that the call was waiting
 //! on would still run on the database, and its connection would go back to

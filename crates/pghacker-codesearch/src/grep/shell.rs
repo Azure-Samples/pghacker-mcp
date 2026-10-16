@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The subset of bash the grep tool reads: words with quotes and escapes,
 //! `$HOME`, brace expansion, redirections, one pipeline, an optional
 //! `cd DIR &&` before it and an optional `|| true` or `|| echo ...` after.

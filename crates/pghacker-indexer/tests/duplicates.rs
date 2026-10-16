@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! find_duplicates' candidates: the duplicates job compares each extract as
 //! it arrives, and find_duplicates lists what comparing every pair of live
 //! extracts listed, on synthetic embeddings shaped like the corpus's.

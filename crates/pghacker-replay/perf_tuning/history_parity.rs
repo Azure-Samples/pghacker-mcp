@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Checks a commit history build against git, on random commits and
 //! files: get_commit's diff against git show, file by file; its changed
 //! files against git show --numstat; and blame against git blame, plain and

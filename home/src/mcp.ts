@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /** The MCP endpoint's path, on the page's own origin. */
 export const MCP_PATH = "/mcp";
 

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # None of these is secret: passwords and keys stay in Key Vault.
 
 # --- Public endpoints -------------------------------------------------------------

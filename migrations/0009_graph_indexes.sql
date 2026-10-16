@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Populated databases must prepare these concurrently before upgrading.
 DO $$
 DECLARE

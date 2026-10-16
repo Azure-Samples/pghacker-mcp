@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The exact line matcher: Rust's regex crate (ripgrep's engine), or
 //! fancy-regex for backreferences and lookarounds.
 

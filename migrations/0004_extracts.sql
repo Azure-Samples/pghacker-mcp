@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Extracts that crawler sessions submit: features, decisions and positions,
 -- each citing messages with verbatim quotes; and the leases and drafts of the
 -- extraction workflow.

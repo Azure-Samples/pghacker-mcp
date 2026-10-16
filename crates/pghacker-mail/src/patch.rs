@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Patches: attachments that are patches (`.patch` and `.diff` files, patch
 //! content types, and diffs under other names such as `.txt` or `.nocfbot`,
 //! gzip'd or in tar archives) and unified or context diffs pasted into the

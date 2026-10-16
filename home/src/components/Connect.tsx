@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { Check, ChevronRight, PlugZap } from "lucide-react";
 import { CLIENTS, configPrefix } from "../clients.ts";

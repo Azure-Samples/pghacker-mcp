@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 use pghacker_core::graph_indexes::{self, Kind, State};
 use pghacker_core::{EDGE_LABELS, VERTEX_LABELS, migrate, testing::TestDb};
 

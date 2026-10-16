@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! GNU grep 3.11's command-line options, parsed as its getopt_long does:
 //! options may follow operands, short options bundle (`-rnE`), values
 //! attach (`-A3`, `-efoo`) or follow, long options take `=value` and may be

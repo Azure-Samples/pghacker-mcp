@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { PRODUCT } from "./content.ts";
 import { Capabilities } from "./components/Capabilities.tsx";
 import { ConnectPanel } from "./components/Connect.tsx";

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Threading, authors, addresses and thread statistics on a fresh database.
 
 use std::sync::LazyLock;

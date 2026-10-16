@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Values that the configuration reads back from azurerm, shaped like Azure's.
 # The provider still validates the IDs that one resource passes to another,
 # so every such ID is well formed here; the tests override the ones that

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Giving mail stored before ingest kept email addresses its addresses back.
 //! Ingest once stored text with each address replaced by `[email]`, and
 //! senders' names without addresses; it keeps no raw messages, so the mail

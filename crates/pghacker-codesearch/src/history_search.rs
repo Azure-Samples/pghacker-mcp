@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search over the commit history: every line that some commit in a range
 //! had (or any commit, for `all`), once per path and text, with the commit
 //! that added it, those that removed it, and the branch heads and releases

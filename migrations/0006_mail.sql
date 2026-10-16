@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Mail ingestion. The subject key matches a reply without threading headers
 -- (In-Reply-To, References) with its thread: the subject without reply
 -- prefixes, list tags and patch tags, lowercased. The References index finds

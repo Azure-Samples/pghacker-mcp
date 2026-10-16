@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! grep over /history: every line that some commit in a range had, once,
 //! printed as GNU grep prints a file's lines, at the first commit in the
 //! range that has it: `/commit/<sha12>/<path>:<line>:<text>`, a path the

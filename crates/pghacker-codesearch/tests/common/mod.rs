@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! A synthetic commit history for the integration tests: git repositories
 //! of PG-like files, built into the test database's commit history where
 //! the code tools read it.

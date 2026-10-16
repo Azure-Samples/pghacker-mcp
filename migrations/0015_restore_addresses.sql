@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Mail stored before ingest kept email addresses has `[email]` in their
 -- place, and senders' names without them. Ingest keeps no raw mail, so the
 -- mail is retrieved again (crates/pghacker-indexer/src/addresses.rs). This

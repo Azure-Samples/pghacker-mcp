@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The mail and graph tools on a synthetic corpus, as the read-only role.
 
 use pghacker_api::{extracts, ontology, people, threads};

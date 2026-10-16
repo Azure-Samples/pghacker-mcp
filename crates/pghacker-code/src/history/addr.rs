@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Commit addresses: int8 labels in pre-order that are never renumbered.
 //!
 //! Master commit k (the root is 0) gets k·2³². The n-th branch forked at

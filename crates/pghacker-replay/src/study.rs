@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The study replay: every recorded agent search with status `ok` in the
 //! study's data/trgm/replay.json, on the commits the study used, through
 //! `search` (arguments mapped from the parsed request) and, for grep command

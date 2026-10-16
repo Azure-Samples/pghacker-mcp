@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The extraction workflow crawler sessions follow: lease threads, read
 //! them, draft features and decisions, match the drafts against existing
 //! extracts, decide to reuse or create, and submit. The tools hold facts to

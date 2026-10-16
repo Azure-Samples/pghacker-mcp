@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The query tool against a fresh database, as pgh_reader: CSV, quoting,
 //! cuts, the timeout, what the read-only transaction and the grants refuse,
 //! the AGE graph, types without binary decoders, and connection hygiene.

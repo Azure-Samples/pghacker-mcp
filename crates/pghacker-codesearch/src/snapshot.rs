@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The commit a code tool reads and its file table: which files the commit
 //! has in the commit history, in tree order, and how tool paths map onto
 //! them.

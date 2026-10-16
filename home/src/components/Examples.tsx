@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { useState } from "react";
 import { Bot, ChevronDown, FileCode2, GitCommitHorizontal, MessageSquareQuote } from "lucide-react";
 import { EXAMPLES, PRODUCT, shortMessageId, type Citation, type Example } from "../content.ts";

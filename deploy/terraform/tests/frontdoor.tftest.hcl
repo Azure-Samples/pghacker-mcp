@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # Front Door: one uncached HTTPS route for every path to the app's own host
 # name, and with a custom domain, a route of its own for its public paths.
 # Every provider is mocked, so runs apply to synthetic state, never to Azure.

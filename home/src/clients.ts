@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /*
  * How to add the MCP server to each agent: the first thing to do, a command
  * to run when there is one, and a configuration file, which the page shows

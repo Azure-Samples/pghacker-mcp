@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // Checks that every source file starts with the MIT license header, or, with
 // --fix, adds the header to the files that lack it, after any #! line,
 // Dockerfile parser directive or HTML doctype (scripts/lib/license-headers.mjs).

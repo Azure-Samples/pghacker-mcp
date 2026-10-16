@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! File-name patterns: ripgrep's `-g` globs (gitignore conventions) for
 //! `search`, and GNU grep's `--include`, `--exclude` and `--exclude-dir`
 //! (fnmatch without FNM_PATHNAME) for `grep`.

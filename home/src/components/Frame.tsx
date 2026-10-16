@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { PRODUCT } from "../content.ts";
 import { ThemeMenu } from "./ThemeMenu.tsx";
 

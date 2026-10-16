@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The PG19 replay: serves the PG19 subset from a commit history of its own
 //! (schema `replay_pg19`, branch REL_19_STABLE), generates searches from its
 //! own code with a fixed seed, and checks each three ways: `search` and the

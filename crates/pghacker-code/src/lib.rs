@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! PostgreSQL's commit history, which the code tools read: every line of every
 //! commit on every branch, stored once. [`history`] builds it from a clone
 //! into a schema of its own and installs it in `pghacker`, where syncs apply

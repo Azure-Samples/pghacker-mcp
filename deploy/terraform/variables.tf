@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT license.
+
 # The settings of one pghacker-mcp deployment. Copy ../environments/example.tfvars
 # to a local ignored file; ../TERRAFORM.md tabulates the variables.
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { defineConfig, type Plugin } from "vite";

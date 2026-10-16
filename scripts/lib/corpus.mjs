@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // The corpus an Azure deployment starts with: what a dump of the local
 // corpus records (manifest.json) and the checks that a restore applies.
 // Only schema pghacker's rows move; the graph is rebuilt from them, so no

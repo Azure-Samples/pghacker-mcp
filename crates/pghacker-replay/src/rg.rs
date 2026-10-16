@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Ground truth from ripgrep, computed as the study computed it: the files a
 //! search covers, and ripgrep's matching lines in them.
 

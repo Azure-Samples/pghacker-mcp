@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! One RFC 822 message, decoded: its Message-ID, threading headers, sender,
 //! subject and date, the text body in UTF-8, and the attachments.
 //!

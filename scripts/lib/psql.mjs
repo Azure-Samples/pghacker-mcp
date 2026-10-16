@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 // psql, pg_restore and other commands for the Azure jobs (probe, restore),
 // whose image has postgresql-client-17.
 import { spawn } from "node:child_process";

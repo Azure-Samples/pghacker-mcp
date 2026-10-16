@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The MCP plumbing over HTTP, as clients use it: a legacy client's
 //! initialize then tools/list and tools/call without a session, structured
 //! results, tool errors, unknown tools, Host validation, ping from clients of

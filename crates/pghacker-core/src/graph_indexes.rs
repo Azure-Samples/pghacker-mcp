@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Catalog readiness for concrete AGE and mapping-table access paths.
 
 use anyhow::{Context, Result, bail};

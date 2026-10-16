@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! pghacker-mcp: the public MCP server. Stateless, read-only (pgh_reader),
 //! rate-limited per client, no LLM calls beyond query embeddings. An
 //! optional second listener, for agents in the same deployment, serves

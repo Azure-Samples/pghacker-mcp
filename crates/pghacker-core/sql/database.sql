@@ -1,3 +1,6 @@
+-- Copyright (c) Microsoft Corporation.
+-- Licensed under the MIT license.
+
 -- Run by the administrator in the target database after roles.sql, before
 -- the migrations and on every start: idempotent. Creates the extensions,
 -- the roles' settings of extension parameters, schema pghacker (owned by

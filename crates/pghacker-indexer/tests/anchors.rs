@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The indexer against the commit history: anchors resolved to virtual
 //! paths the code tools read, and full commit SHAs; and add_source answered
 //! from the history, which loads nothing.

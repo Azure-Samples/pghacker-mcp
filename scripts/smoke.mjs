@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 import { readLocalConfig } from "./lib/config.mjs";
 import { checkPortal, checkSite } from "./lib/health.mjs";
 import { checkServices } from "./lib/services.mjs";

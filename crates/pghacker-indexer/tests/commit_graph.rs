@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The commit history in the graph: a small git history installed beside
 //! the mail, then synced, regrouped, cited and resolved, with the authors
 //! changing under it. What the history's writers and the triggers record

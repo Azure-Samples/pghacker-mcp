@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! search_commits: commits as git log finds them in the history, newest
 //! first: in a range (or on every branch), by message, author, files and
 //! dates, and by their diffs, as git log -G finds commits that added or

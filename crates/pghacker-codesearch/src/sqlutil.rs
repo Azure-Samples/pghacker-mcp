@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! SQL helpers the commit and patch searches share: numbered parameters,
 //! path filters (paths, folders or ripgrep-style globs) and dates.
 

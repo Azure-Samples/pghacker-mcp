@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The grep, read_file and list_files tools against a synthetic commit
 //! history.
 //! The expected outputs are GNU grep 3.11's on the same files (LC_ALL=C.UTF-8).

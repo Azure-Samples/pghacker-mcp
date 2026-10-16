@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! Calls that can be abandoned, on a real database: an abandoned call's
 //! statement is cancelled and its connection closed rather than returned
 //! busy; a call that finishes gives its connection back; a pool waits a

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 //! The indexer's MCP tools, for crawler sessions: sources, progress,
 //! extraction and repair.
 
