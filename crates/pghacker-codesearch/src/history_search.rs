@@ -16,8 +16,8 @@ use tokio_postgres::types::ToSql;
 use crate::engine::{self, Budget, Candidates, LineQuery, MAX_CANDIDATES};
 use crate::history::{History, alive_at, checked, keys};
 use crate::range::{Range, death_at};
+use crate::revision::{Revision, tree_cmp};
 use crate::search::{Patterns, SearchArgs, SearchResult};
-use crate::snapshot::{Snapshot, tree_cmp};
 
 type Param = Box<dyn ToSql + Sync + Send>;
 
@@ -71,7 +71,7 @@ struct Instance {
 /// The commits `spec` names: None for all of history.
 pub(crate) async fn range_of(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     h: &History,
     spec: &str,
 ) -> Result<Option<Range>> {
@@ -80,7 +80,7 @@ pub(crate) async fn range_of(
         return Ok(None);
     }
     let at = |rev: String| {
-        let repo = snapshot.repo.clone();
+        let repo = revision.repo.clone();
         async move {
             crate::rev::resolve(client, &h.schema, &repo, Some(&rev))
                 .await
@@ -235,18 +235,18 @@ pub(crate) async fn lineages(
         .collect())
 }
 
-/// Searches the history of `snapshot`'s repository, in `args.history`.
+/// Searches the history of `revision`'s repository, in `args.history`.
 pub(crate) async fn search(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
     patterns: &Patterns<'_>,
     budget: &Budget,
 ) -> Result<SearchResult> {
-    let h = &snapshot.history;
+    let h = &revision.history;
     let spec = args.history.as_deref().unwrap_or("all");
     let s = checked(&h.schema)?;
-    let range = range_of(client, snapshot, h, spec).await?;
+    let range = range_of(client, revision, h, spec).await?;
     let filter = crate::glob::RgFilter::new(&args.include.to_vec(), &args.exclude.to_vec())
         .map_err(|e| anyhow!(e))?;
     let raw_paths: Vec<String> = args
@@ -411,10 +411,10 @@ pub(crate) async fn search(
         ));
     }
     Ok(SearchResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         total_lines: total,
         total_files,
         total_matches: None,

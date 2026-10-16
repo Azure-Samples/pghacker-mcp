@@ -16,7 +16,7 @@ use tokio_postgres::GenericClient;
 /// A commit in the commit history, as the code tools read it: its
 /// repository, the major version and ref it is read as, and its SHA.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Snapshot {
+pub struct Revision {
     pub repo: String,
     pub version: Option<String>,
     #[serde(rename = "ref")]
@@ -36,11 +36,11 @@ pub struct Snapshot {
 /// date (`REL_17_STABLE@2024-06-01`) or commits back (`master~3`). Without
 /// one, the head of the newest numbered release line. Every commit in the
 /// history is readable.
-pub async fn resolve_snapshot(
+pub async fn resolve_revision(
     client: &impl GenericClient,
     repo: &str,
     version: Option<&str>,
-) -> Result<Snapshot> {
+) -> Result<Revision> {
     crate::rev::resolve(client, pghacker_core::code::history_schema(), repo, version).await
 }
 
@@ -114,11 +114,11 @@ impl FileTable {
     /// paths don't exist.
     pub async fn view(
         client: &impl GenericClient,
-        snapshot: &Snapshot,
+        revision: &Revision,
         paths: &[String],
     ) -> Result<Arc<FileTable>> {
-        let base = FileTable::load(client, snapshot).await?;
-        let h = &snapshot.history;
+        let base = FileTable::load(client, revision).await?;
+        let h = &revision.history;
         let mut mounts: Vec<(String, String)> = paths.iter().filter_map(|p| mount_of(p)).collect();
         mounts.sort();
         mounts.dedup();
@@ -128,7 +128,7 @@ impl FileTable {
         let mut files = base.files.clone();
         for (root, name) in mounts {
             let mounted =
-                match crate::rev::resolve_mount(client, &h.schema, &snapshot.repo, &root, &name)
+                match crate::rev::resolve_mount(client, &h.schema, &revision.repo, &root, &name)
                     .await
                 {
                     Ok(mounted) => mounted,
@@ -181,8 +181,8 @@ static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl FileTable {
     /// The commit's file table, cached per build.
-    pub async fn load(client: &impl GenericClient, snapshot: &Snapshot) -> Result<Arc<FileTable>> {
-        let h = &snapshot.history;
+    pub async fn load(client: &impl GenericClient, revision: &Revision) -> Result<Arc<FileTable>> {
+        let h = &revision.history;
         let key: CacheKey = (h.build.clone(), format!("{}@{}", h.schema, h.addr));
         if let Some(table) = cached(&key) {
             return Ok(table);

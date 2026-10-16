@@ -19,7 +19,7 @@ use tokio_postgres::GenericClient;
 use tokio_postgres::types::ToSql;
 
 use crate::engine::{Budget, Candidates, LineQuery, Row, is_timeout};
-use crate::snapshot::FileEntry;
+use crate::revision::FileEntry;
 
 pub use pghacker_core::code::HISTORY_ENV;
 
@@ -532,7 +532,7 @@ async fn in_tree_order(
                 .iter()
                 .map(|r| (r.get(0), r.get(1)))
                 .collect();
-            all.sort_by(|a, b| crate::snapshot::tree_cmp(&a.1, &b.1));
+            all.sort_by(|a, b| crate::revision::tree_cmp(&a.1, &b.1));
             all.into_iter().map(|(id, _)| id).collect()
         }
     };

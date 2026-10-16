@@ -291,9 +291,9 @@ async fn main() -> Result<()> {
     let mut agree = [0usize; 2];
     for k in 0..n_files {
         let head = heads[k % heads.len()].as_str();
-        let snapshot =
+        let revision =
             pghacker_codesearch::rev::resolve(&client, schema, "postgres", Some(head)).await?;
-        let addr = snapshot.history.addr;
+        let addr = revision.history.addr;
         let path: String = client
             .query_one(
                 &format!(
@@ -308,7 +308,7 @@ async fn main() -> Result<()> {
             .get(0);
         let ignore_list = git(
             git_dir,
-            &["show", &format!("{}:.git-blame-ignore-revs", snapshot.sha)],
+            &["show", &format!("{}:.git-blame-ignore-revs", revision.sha)],
         )
         .ok();
         for (mode, ignore) in [(0usize, false), (1, true)] {
@@ -317,7 +317,7 @@ async fn main() -> Result<()> {
             }
             let ours = blame(
                 &client,
-                &snapshot,
+                &revision,
                 &BlameArgs {
                     path: path.clone(),
                     start_line: Some(1),
@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
                 git_args.push("--ignore-revs-file");
                 git_args.push(list_file.to_str().unwrap());
             }
-            git_args.push(&snapshot.sha);
+            git_args.push(&revision.sha);
             git_args.push("--");
             git_args.push(&path);
             let porcelain = String::from_utf8_lossy(&git(git_dir, &git_args)?).into_owned();

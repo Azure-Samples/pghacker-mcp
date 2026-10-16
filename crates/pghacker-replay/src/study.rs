@@ -24,7 +24,7 @@ use pghacker_codesearch::grep::options::Options;
 use pghacker_codesearch::grep::shell::{self, Word};
 use pghacker_codesearch::grep::{self as grep_tool, Limits};
 use pghacker_codesearch::search::{MatchMode, OutputMode, Strings};
-use pghacker_codesearch::{SearchArgs, Snapshot, search};
+use pghacker_codesearch::{Revision, SearchArgs, search};
 use pghacker_core::db;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
@@ -332,7 +332,7 @@ fn ground_truth(
 /// with the lines paged through.
 async fn search_lines(
     client: &Client,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
 ) -> Result<(Lines, bool, bool, f64)> {
     let mut args = args.clone();
@@ -341,7 +341,7 @@ async fn search_lines(
     let mut first_ms = None;
     loop {
         let t = Instant::now();
-        let r = search(client, snapshot, &args).await?;
+        let r = search(client, revision, &args).await?;
         first_ms.get_or_insert(t.elapsed().as_secs_f64() * 1e3);
         complete &= r.complete && !r.budget_exceeded;
         for h in r.lines {
@@ -693,7 +693,7 @@ fn compare(truth: &Lines, got: &Lines, r: &mut PathResult) {
 }
 
 struct Repo {
-    snapshot: Snapshot,
+    revision: Revision,
     tree: PathBuf,
     tracked: HashSet<String>,
     /// Folders of tracked files.
@@ -767,7 +767,7 @@ async fn serve_repo(
     let started = Instant::now();
     let (git_dir, commit, t) = (
         served.git_dir.clone(),
-        served.snapshot.sha.clone(),
+        served.revision.sha.clone(),
         tree.clone(),
     );
     let written =
@@ -798,7 +798,7 @@ async fn serve_repo(
         }
     }
     Ok(Repo {
-        snapshot: served.snapshot,
+        revision: served.revision,
         tree,
         tracked,
         dirs,
@@ -1100,7 +1100,7 @@ async fn replay_case(
     let client: &Client = &client;
 
     let args = search_args(case);
-    match search_lines(client, &repo.snapshot, &args).await {
+    match search_lines(client, &repo.revision, &args).await {
         Ok((got, complete, totals_agree, first_ms)) => {
             rec.search.ms = first_ms;
             compare(&truth, &got, &mut rec.search);
@@ -1141,7 +1141,7 @@ async fn replay_case(
         Ok(command) => {
             rec.grep.command = Some(command.clone());
             let t = Instant::now();
-            match grep_tool::select(client, &repo.snapshot, &command, 10_000).await {
+            match grep_tool::select(client, &repo.revision, &command, 10_000).await {
                 Ok((searched, incomplete)) => {
                     rec.grep.ms = t.elapsed().as_secs_f64() * 1e3;
                     let got: Lines = searched
@@ -1156,7 +1156,7 @@ async fn replay_case(
                         budget_ms: 10_000,
                         max_output: usize::MAX,
                     };
-                    if let Ok(out) = grep_tool::run(client, &repo.snapshot, &command, limits).await
+                    if let Ok(out) = grep_tool::run(client, &repo.revision, &command, limits).await
                     {
                         rec.grep_output = Some(out.stdout);
                     }
@@ -1252,7 +1252,7 @@ fn summarize(records: &[&Record]) {
 mod tests {
     use super::*;
     use crate::tree::fixture;
-    use pghacker_codesearch::snapshot::FileTable;
+    use pghacker_codesearch::revision::FileTable;
     use pghacker_core::testing::TestDb;
 
     #[test]
@@ -1289,32 +1289,32 @@ mod tests {
             &sha,
         )
         .await?;
-        let snapshot = &repo.snapshot;
-        assert_eq!(snapshot.repo, "fixture");
-        assert_eq!(snapshot.git_ref, "main");
-        assert_eq!(snapshot.version, None);
-        assert_eq!(snapshot.history.schema, "replay_study_fixture");
+        let revision = &repo.revision;
+        assert_eq!(revision.repo, "fixture");
+        assert_eq!(revision.git_ref, "main");
+        assert_eq!(revision.version, None);
+        assert_eq!(revision.history.schema, "replay_study_fixture");
 
         // The source commit's very tree, so its very blobs.
         let tree_of = |dir: &Path, rev: &str| {
             fixture::text(dir, &["rev-parse", "--verify", &format!("{rev}^{{tree}}")])
         };
         let served = scratch.path().join("served/replay_study_fixture.git");
-        assert_eq!(tree_of(&served, &snapshot.sha)?, tree_of(&source, &sha)?);
+        assert_eq!(tree_of(&served, &revision.sha)?, tree_of(&source, &sha)?);
 
         // grep prints each text file's lines as committed: CRLF kept, LF
         // not converted, the export-ignore and filtered files there.
         for path in fixture::TEXT {
             let out = grep_tool::run(
                 &reader,
-                snapshot,
+                revision,
                 &format!("grep '' {path}"),
                 Limits::default(),
             )
             .await?;
             assert_eq!(out.stdout, fixture::blob(&source, &sha, path)?, "{path}");
         }
-        let table = FileTable::load(&reader, snapshot).await?;
+        let table = FileTable::load(&reader, revision).await?;
         assert_eq!(table.files.len(), 8, "every file but the symlink");
         let binary: Vec<&str> = table
             .files
@@ -1349,7 +1349,7 @@ mod tests {
             &sha,
         )
         .await?;
-        assert_eq!(again.snapshot, repo.snapshot);
+        assert_eq!(again.revision, repo.revision);
         Ok(())
     }
 

@@ -29,8 +29,8 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use gix::ObjectId;
 use gix::bstr::ByteSlice;
 use pghacker_code::history::{BuildOptions, build, store};
-use pghacker_codesearch::Snapshot;
-use pghacker_codesearch::snapshot::FileTable;
+use pghacker_codesearch::Revision;
+use pghacker_codesearch::revision::FileTable;
 use tokio_postgres::Client;
 
 /// Where the source commit comes from.
@@ -64,7 +64,7 @@ pub struct Spec {
 pub struct Served {
     /// The commit as the code tools read it; its SHA is the one-commit
     /// repository's.
-    pub snapshot: Snapshot,
+    pub revision: Revision,
     /// The one-commit repository.
     pub git_dir: PathBuf,
     /// The history was built now, not found built.
@@ -423,22 +423,22 @@ pub async fn serve(
         );
     }
 
-    let snapshot =
+    let revision =
         pghacker_codesearch::rev::resolve(reader, &schema, &spec.repo, Some(&spec.branch)).await?;
     ensure!(
-        snapshot.sha == commit,
+        revision.sha == commit,
         "{} resolves to {}, not {commit}",
         spec.branch,
-        snapshot.sha
+        revision.sha
     );
-    let table = FileTable::load(reader, &snapshot).await?;
+    let table = FileTable::load(reader, &revision).await?;
     let text_files = table.files.iter().filter(|f| !f.is_binary).count() as u64;
     Ok(Served {
         files: table.files.len() as u64,
         text_files,
         binary_files: table.files.len() as u64 - text_files,
         lines: table.files.iter().map(|f| f.line_count as u64).sum(),
-        snapshot,
+        revision,
         git_dir,
         built,
     })
@@ -664,8 +664,8 @@ mod tests {
         };
         let served = serve(&db.admin_url, &reader, scratch.path(), &spec).await?;
         assert!(served.built);
-        assert_eq!(served.snapshot.git_ref, "REL_19_STABLE");
-        assert_eq!(served.snapshot.version.as_deref(), Some("19"));
+        assert_eq!(served.revision.git_ref, "REL_19_STABLE");
+        assert_eq!(served.revision.version.as_deref(), Some("19"));
         assert_eq!(
             served.git_dir,
             scratch.path().join("served/replay_test_prefixes.git")
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(ours, theirs);
         assert_eq!(ours.len(), 7);
 
-        let table = FileTable::load(&reader, &served.snapshot).await?;
+        let table = FileTable::load(&reader, &served.revision).await?;
         let mut paths: Vec<&str> = table.files.iter().map(|f| f.path.as_str()).collect();
         paths.sort();
         assert_eq!(
@@ -716,10 +716,10 @@ mod tests {
         // The same source commit and prefixes give the same commit.
         let again = serve(&db.admin_url, &reader, scratch.path(), &spec).await?;
         assert!(!again.built);
-        assert_eq!(again.snapshot, served.snapshot);
+        assert_eq!(again.revision, served.revision);
 
         let tree = scratch.path().join("tree");
-        let commit = &served.snapshot.sha;
+        let commit = &served.revision.sha;
         assert_eq!(materialize(&served.git_dir, commit, &tree)?, 4);
         for (path, _, content) in FILES {
             let written = std::fs::read(tree.join(path)).ok();
@@ -752,7 +752,7 @@ mod tests {
         // grep reads the commit as the branch has it.
         let out = grep::run(
             &reader,
-            &served.snapshot,
+            &served.revision,
             "grep -rn 'int' src",
             Limits::default(),
         )

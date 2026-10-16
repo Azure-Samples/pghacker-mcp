@@ -19,9 +19,9 @@ use pghacker_codesearch::glob::fnmatch;
 use pghacker_codesearch::grep::{self as grep_tool, Limits};
 use pghacker_codesearch::pattern::Dialect;
 use pghacker_codesearch::pattern::gnu::gnu_to_rust;
+use pghacker_codesearch::revision::FileTable;
 use pghacker_codesearch::search::{MatchMode, OutputMode, Strings};
-use pghacker_codesearch::snapshot::FileTable;
-use pghacker_codesearch::{SearchArgs, Snapshot, search};
+use pghacker_codesearch::{Revision, SearchArgs, search};
 use pghacker_core::db;
 use regex::Regex;
 use serde::Serialize;
@@ -719,8 +719,8 @@ fn tree_dir(ctx: &Ctx) -> PathBuf {
 /// The commit's text files, in the order the database sorts paths: the
 /// order the corpus has always been read in, so that a seed gives the same
 /// searches.
-async fn text_files(client: &Client, snapshot: &Snapshot) -> Result<Vec<String>> {
-    let table = FileTable::load(client, snapshot).await?;
+async fn text_files(client: &Client, revision: &Revision) -> Result<Vec<String>> {
+    let table = FileTable::load(client, revision).await?;
     let paths: Vec<String> = table
         .files
         .iter()
@@ -741,7 +741,7 @@ async fn text_files(client: &Client, snapshot: &Snapshot) -> Result<Vec<String>>
 /// Every line `search` returns, page by page, and the time it took.
 async fn search_lines(
     client: &Client,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
 ) -> Result<(Lines, f64)> {
     let mut args = args.clone();
@@ -749,7 +749,7 @@ async fn search_lines(
     let mut ms = None;
     loop {
         let t = Instant::now();
-        let r = search(client, snapshot, &args).await?;
+        let r = search(client, revision, &args).await?;
         // The latency of one call: the first page, what an agent waits for.
         ms.get_or_insert(t.elapsed().as_secs_f64() * 1e3);
         if !r.complete {
@@ -801,7 +801,7 @@ fn diff(want: &Lines, got: &Lines) -> String {
 
 async fn check(
     pool: &deadpool_postgres::Pool,
-    snapshot: &Snapshot,
+    revision: &Revision,
     rg: &Path,
     tree: &Path,
     corpus: &Corpus,
@@ -819,7 +819,7 @@ async fn check(
     let client = pool.get().await?;
     let client: &Client = &client;
     match (&truth, search_args(c, corpus)) {
-        (Some(truth), Ok(args)) => match search_lines(client, snapshot, &args).await {
+        (Some(truth), Ok(args)) => match search_lines(client, revision, &args).await {
             Ok((got, ms)) => {
                 o.search = diff(truth, &got);
                 o.search_ms = ms;
@@ -830,7 +830,7 @@ async fn check(
         (_, Err(e)) => o.search = format!("error: {e:#}"),
     }
     let t = Instant::now();
-    match grep_tool::select(client, snapshot, &c.command, 10_000).await {
+    match grep_tool::select(client, revision, &c.command, 10_000).await {
         Ok((searched, _)) => {
             o.grep_ms = t.elapsed().as_secs_f64() * 1e3;
             let got: Lines = searched
@@ -848,7 +848,7 @@ async fn check(
         budget_ms: 10_000,
         max_output: usize::MAX,
     };
-    match grep_tool::run(client, snapshot, &c.command, limits).await {
+    match grep_tool::run(client, revision, &c.command, limits).await {
         Ok(out) => o.ours = Some(out),
         Err(e) => o.gnu = format!("error: {e:#}"),
     }
@@ -861,23 +861,23 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
     let t = Instant::now();
     let served = tree::serve(&ctx.admin_url()?, &reader, &ctx.runtime, &spec()).await?;
     let load_s = t.elapsed().as_secs_f64();
-    let snapshot = served.snapshot.clone();
+    let revision = served.revision.clone();
     println!(
         "PG19 subset: {} history in {SCHEMA}, commit {} on {REF}: {} files ({} text, {} binary), {} lines in {load_s:.1}s",
         if served.built { "built" } else { "reused" },
-        &snapshot.sha[..12],
+        &revision.sha[..12],
         served.files,
         served.text_files,
         served.binary_files,
         served.lines
     );
     let tree = tree_dir(ctx);
-    let (git_dir, commit, tr) = (served.git_dir.clone(), snapshot.sha.clone(), tree.clone());
+    let (git_dir, commit, tr) = (served.git_dir.clone(), revision.sha.clone(), tree.clone());
     let written =
         tokio::task::spawn_blocking(move || crate::tree::materialize(&git_dir, &commit, &tr))
             .await??;
     println!("materialized {written} files");
-    let files = text_files(&reader, &snapshot).await?;
+    let files = text_files(&reader, &revision).await?;
     let corpus = Arc::new(read_corpus(&tree, &files).context("cannot read the tree")?);
     let cases = generate(&corpus, count, seed);
     println!(
@@ -890,16 +890,16 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
     let pool = db::pool(&ctx.reader_url()?, jobs, "pghacker-replay")?;
     let rg = Arc::new(ctx.rg.clone());
     let tree_arc = Arc::new(tree.clone());
-    let snapshot_arc = Arc::new(snapshot.clone());
+    let revision_arc = Arc::new(revision.clone());
     let mut outcomes: Vec<Outcome> = stream::iter(cases.iter().cloned().map(|c| {
-        let (pool, rg, tree, corpus, snapshot) = (
+        let (pool, rg, tree, corpus, revision) = (
             pool.clone(),
             rg.clone(),
             tree_arc.clone(),
             corpus.clone(),
-            snapshot_arc.clone(),
+            revision_arc.clone(),
         );
-        async move { check(&pool, &snapshot, &rg, &tree, &corpus, &c).await }
+        async move { check(&pool, &revision, &rg, &tree, &corpus, &c).await }
     }))
     .buffer_unordered(jobs)
     .collect::<Vec<Result<Outcome>>>()
@@ -997,9 +997,9 @@ pub async fn run(ctx: &Ctx, count: usize, seed: u64, jobs: usize) -> Result<()> 
         .filter(|o| o.search != "exact" || o.grep_lines != "exact" || o.gnu != "exact")
         .collect();
     let summary = serde_json::json!({
-        "snapshot": {
+        "revision": {
             "ref": REF, "sha": SHA, "paths": PATHS, "schema": SCHEMA,
-            "commit": snapshot.sha, "files": served.files,
+            "commit": revision.sha, "files": served.files,
             "text_files": served.text_files, "binary_files": served.binary_files,
             "lines": served.lines, "load_seconds": load_s, "reused": !served.built,
         },

@@ -8,7 +8,7 @@ mod common;
 
 use anyhow::Result;
 use pghacker_codesearch::search::{GroupBy, MatchMode, Order, OutputMode, Strings};
-use pghacker_codesearch::{SearchArgs, resolve_snapshot, search};
+use pghacker_codesearch::{SearchArgs, resolve_revision, search};
 use pghacker_core::testing::TestDb;
 
 fn hits(result: &pghacker_codesearch::SearchResult) -> Vec<(String, u32)> {
@@ -24,7 +24,7 @@ fn at(path: &str, line: u32) -> (String, u32) {
 }
 
 async fn resolved(reader: &tokio_postgres::Client, version: Option<&str>) -> Result<String> {
-    Ok(resolve_snapshot(reader, "postgres", version).await?.git_ref)
+    Ok(resolve_revision(reader, "postgres", version).await?.git_ref)
 }
 
 #[tokio::test]
@@ -75,7 +75,7 @@ async fn versions_resolve_to_their_branch_heads() -> Result<()> {
     assert_eq!(resolved(&reader, Some("REL_18_6")).await?, "REL_18_6");
     assert_eq!(resolved(&reader, Some("rel_19_0")).await?, "REL_19_0");
     // A SHA names its commit on its branch.
-    let by_sha = resolve_snapshot(&reader, "postgres", Some(&shas["REL_18_6"][..7])).await?;
+    let by_sha = resolve_revision(&reader, "postgres", Some(&shas["REL_18_6"][..7])).await?;
     assert_eq!(
         (by_sha.git_ref.as_str(), by_sha.sha.as_str()),
         ("REL_18_STABLE", shas["REL_18_6"].as_str())
@@ -101,10 +101,10 @@ async fn text_and_regex_searches() -> Result<()> {
     let db = TestDb::create().await?;
     common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
-    let snapshot = resolve_snapshot(&reader, "postgres", Some("PG19")).await?;
-    assert_eq!(snapshot.version.as_deref(), Some("19"));
+    let revision = resolve_revision(&reader, "postgres", Some("PG19")).await?;
+    assert_eq!(revision.version.as_deref(), Some("19"));
 
-    let result = search(&reader, &snapshot, &SearchArgs::new("makeNode(")).await?;
+    let result = search(&reader, &revision, &SearchArgs::new("makeNode(")).await?;
     assert_eq!(
         hits(&result),
         vec![
@@ -121,7 +121,7 @@ async fn text_and_regex_searches() -> Result<()> {
     args.case_sensitive = Some(false);
     args.whole_word = true;
     args.paths = Strings::One("./src/backend/utils/".into());
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(
         hits(&result),
         vec![
@@ -134,7 +134,7 @@ async fn text_and_regex_searches() -> Result<()> {
     // A regex with alternation, as ripgrep reads it.
     let mut args = SearchArgs::new(r"^(Datum|float4)$|\bT_\w+Stmt\b");
     args.match_mode = MatchMode::Regex;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(
         hits(&result),
         vec![
@@ -150,7 +150,7 @@ async fn text_and_regex_searches() -> Result<()> {
     args.match_mode = MatchMode::Regex;
     args.output = OutputMode::Lines;
     args.group_by = GroupBy::Match;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     let parts: Vec<&str> = result.lines.iter().map(|h| h.text.as_str()).collect();
     assert_eq!(parts, vec!["json_in", "json_out", "json_to_cstring"]);
     Ok(())
@@ -159,18 +159,18 @@ async fn text_and_regex_searches() -> Result<()> {
 #[tokio::test]
 async fn scope_filters_and_paging() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let mut args = SearchArgs::new("T_");
     args.include = Strings::One("*.h".into());
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(result.total_lines, 5);
     assert!(result.lines.iter().all(|h| h.path.ends_with(".h")));
 
     let mut args = SearchArgs::new("make");
     args.exclude = Strings::Many(vec!["parser".into(), "*.h".into()]);
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(
         hits(&result),
         vec![
@@ -185,18 +185,18 @@ async fn scope_filters_and_paging() -> Result<()> {
         "contrib/**/*.c".into(),
     ]);
     args.limit = Some(1);
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(hits(&result), vec![at("contrib/pg_trgm/trgm_op.c", 8)]);
     assert!(result.cut);
     assert_eq!(result.total_lines, 2);
     args.offset = 1;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(hits(&result), vec![at("src/include/nodes/nodes.h", 11)]);
     assert!(!result.cut);
 
     let mut args = SearchArgs::new("x");
     args.paths = Strings::One("src/nowhere".into());
-    let error = search(&reader, &snapshot, &args).await.unwrap_err();
+    let error = search(&reader, &revision, &args).await.unwrap_err();
     assert!(error.to_string().contains("no such file or folder"));
 
     // Context, and filters on the line (| grep, | grep -v).
@@ -204,7 +204,7 @@ async fn scope_filters_and_paging() -> Result<()> {
     args.paths = Strings::One("src/backend".into());
     args.context = 1;
     args.not = Strings::One("Select".into());
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(hits(&result), vec![at("src/backend/parser/gram.y", 15)]);
     assert_eq!(result.lines[0].before, vec!["    {"]);
     assert_eq!(result.lines[0].after, vec!["        $$ = (Node *) n;"]);
@@ -213,7 +213,7 @@ async fn scope_filters_and_paging() -> Result<()> {
     let mut args = SearchArgs::new("");
     args.paths = Strings::One("src/include/nodes/nodes.h".into());
     args.not = Strings::Many(vec!["T_".into(), "#".into()]);
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!(result.total_lines, 6);
     Ok(())
 }
@@ -221,14 +221,14 @@ async fn scope_filters_and_paging() -> Result<()> {
 #[tokio::test]
 async fn identifiers_counts_coverage_and_similar_names() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let mut args = SearchArgs::new("make json value");
     args.match_mode = MatchMode::Identifier;
     args.output = OutputMode::Counts;
     args.group_by = GroupBy::Match;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     let counts: Vec<(&str, u64)> = result
         .matches
         .iter()
@@ -251,7 +251,7 @@ async fn identifiers_counts_coverage_and_similar_names() -> Result<()> {
     ]));
     args.output = OutputMode::Files;
     args.order = Order::Coverage;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     let files: Vec<(&str, Option<u32>)> = result
         .files
         .iter()
@@ -265,7 +265,7 @@ async fn identifiers_counts_coverage_and_similar_names() -> Result<()> {
         ]
     );
 
-    let result = search(&reader, &snapshot, &SearchArgs::new("make_json_values")).await?;
+    let result = search(&reader, &revision, &SearchArgs::new("make_json_values")).await?;
     assert_eq!(result.total_lines, 0);
     let similar = result.similar.expect("similar names");
     assert!(
@@ -284,7 +284,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         .collect();
     let mut files: Vec<(&str, Option<&str>)> = common::files();
     files.push(("src/backend/filler.c", Some(&filler)));
-    let snapshot = common::load(&db, "postgres", "19", &files).await?;
+    let revision = common::load(&db, "postgres", "19", &files).await?;
     let reader = db.reader().await?;
     let compiled =
         pghacker_codesearch::pattern::compile(&pghacker_codesearch::pattern::PatternSpec {
@@ -296,7 +296,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
             semantics: pghacker_codesearch::pattern::Semantics::LeftmostFirst,
         })
         .map_err(anyhow::Error::msg)?;
-    let h = &snapshot.history;
+    let h = &revision.history;
     let mut lineages: Vec<i32> = pghacker_codesearch::history::lineage_map(&reader, h)
         .await?
         .keys()
@@ -321,7 +321,7 @@ async fn literal_searches_use_the_trigram_index() -> Result<()> {
         .get(0);
     let plan = plan.to_string();
     assert!(plan.contains("code_line_instances_trgm"), "{plan}");
-    let result = search(&reader, &snapshot, &SearchArgs::new("json_lex_string")).await?;
+    let result = search(&reader, &revision, &SearchArgs::new("json_lex_string")).await?;
     assert_eq!(result.total_lines, 1);
     Ok(())
 }
@@ -335,7 +335,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     let db = TestDb::create().await?;
     // Another version's loops fill the trigram index.
     let other = "for (int i = 0; i < 10; i++) {}\n".repeat(50_000);
-    let snapshot = common::load_versions(
+    let revision = common::load_versions(
         &db,
         "postgres",
         &[
@@ -366,7 +366,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     })
     .map_err(anyhow::Error::msg)?;
     let q = LineQuery {
-        history: &snapshot.history,
+        history: &revision.history,
         mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
@@ -374,7 +374,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
         cap: 100,
         scope_first: true,
     };
-    let (sql, params) = line_sql(&q, &snapshot.history, &[])?;
+    let (sql, params) = line_sql(&q, &revision.history, &[])?;
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|p| p.as_ref() as _).collect();
     let plan: serde_json::Value = reader
@@ -391,7 +391,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     args.paths = "src/backend/access/heap".into();
     args.output = OutputMode::Counts;
     args.group_by = GroupBy::Match;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!((result.total_lines, result.total_matches), (2, Some(3)));
     assert_eq!(
         (result.matches[0].text.as_str(), result.matches[0].count),
@@ -399,12 +399,12 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
     );
     assert!(result.complete && !result.budget_exceeded);
     args.query = vec!["for (".into(), "while (".into()].into();
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!((result.total_lines, result.total_matches), (3, Some(4)));
     assert!(result.complete && !result.budget_exceeded);
     args.query = r"^\s*for\s*\(".into();
     args.match_mode = MatchMode::Regex;
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert_eq!((result.total_lines, result.total_matches), (2, Some(2)));
     assert!(result.complete);
     Ok(())
@@ -413,7 +413,7 @@ async fn scoped_loop_searches_avoid_the_global_trigram_index() -> Result<()> {
 #[tokio::test]
 async fn commit_and_history_searches_use_the_shared_budget() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(
+    let revision = common::load(
         &db,
         "postgres",
         "19",
@@ -431,7 +431,7 @@ async fn commit_and_history_searches_use_the_shared_budget() -> Result<()> {
                         || ' budget_probe' AS line
              FROM {s}.budget_probe_lines;
              GRANT SELECT ON {s}.code_line_instances TO pgh_reader;",
-            s = snapshot.history.schema,
+            s = revision.history.schema,
         ))
         .await?;
     let reader = db.reader().await?;
@@ -450,7 +450,7 @@ async fn commit_and_history_searches_use_the_shared_budget() -> Result<()> {
                 history: history.map(str::to_owned),
                 ..SearchArgs::default()
             };
-            let result = search(&reader, &snapshot, &args).await?;
+            let result = search(&reader, &revision, &args).await?;
             assert_eq!(result.total_lines, 1);
             assert!(result.complete && !result.budget_exceeded);
             let text = if history.is_some() {
@@ -476,12 +476,12 @@ async fn commit_and_history_searches_use_the_shared_budget() -> Result<()> {
 #[tokio::test]
 async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result<()> {
     use pghacker_codesearch::grep::{Limits, run};
-    use pghacker_codesearch::snapshot::FileTable;
+    use pghacker_codesearch::revision::FileTable;
 
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
-    FileTable::load(&reader, &snapshot).await?;
+    FileTable::load(&reader, &revision).await?;
     reader
         .batch_execute("SET statement_timeout = '1739ms'")
         .await?;
@@ -489,14 +489,14 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     blocker
         .batch_execute(&format!(
             "BEGIN; LOCK TABLE {}.code_line_instances IN ACCESS EXCLUSIVE MODE",
-            snapshot.history.schema
+            revision.history.schema
         ))
         .await?;
     let budget = pghacker_codesearch::engine::Budget::new(Some(500));
     let old = pghacker_codesearch::engine::set_timeout(&reader, budget.remaining_ms()).await?;
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     let q = pghacker_codesearch::engine::LineQuery {
-        history: &snapshot.history,
+        history: &revision.history,
         mounted: false,
         file_ids: None,
         require: vec![],
@@ -510,7 +510,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     pghacker_codesearch::engine::restore_timeout(&reader, &old).await;
     let mut args = SearchArgs::new("makeNode");
     args.budget_ms = Some(80);
-    let result = search(&reader, &snapshot, &args).await?;
+    let result = search(&reader, &revision, &args).await?;
     assert!(result.budget_exceeded && !result.complete);
     assert_eq!(result.total_lines, 0);
     assert!(
@@ -521,11 +521,11 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     );
     args.query = "".into();
     args.not = "makeNode".into();
-    let error = search(&reader, &snapshot, &args).await.unwrap_err();
+    let error = search(&reader, &revision, &args).await.unwrap_err();
     assert!(error.to_string().contains("inverted results"), "{error:#}");
     let output = run(
         &reader,
-        &snapshot,
+        &revision,
         "grep -r makeNode src 2>/dev/null | wc -l || echo none",
         Limits {
             budget_ms: 80,
@@ -539,7 +539,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     assert!(!output.stderr.is_empty());
     let error = pghacker_codesearch::grep(
         &reader,
-        &snapshot,
+        &revision,
         &pghacker_codesearch::GrepArgs {
             command: "grep -r makeNode src | wc -l".into(),
             budget_ms: Some(80),

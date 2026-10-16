@@ -10,13 +10,13 @@ mod common;
 use anyhow::Result;
 use pghacker_codesearch::grep::{Limits, run};
 use pghacker_codesearch::{
-    GrepArgs, ListFilesArgs, ReadFileArgs, Snapshot, grep, list_files, read_file,
+    GrepArgs, ListFilesArgs, ReadFileArgs, Revision, grep, list_files, read_file,
 };
 use pghacker_core::testing::TestDb;
 use tokio_postgres::Client;
 
-async fn out(client: &Client, snapshot: &Snapshot, command: &str) -> (String, Vec<String>, i32) {
-    let o = run(client, snapshot, command, Limits::default())
+async fn out(client: &Client, revision: &Revision, command: &str) -> (String, Vec<String>, i32) {
+    let o = run(client, revision, command, Limits::default())
         .await
         .unwrap_or_else(|e| panic!("{command}: {e:#}"));
     (String::from_utf8(o.stdout).unwrap(), o.stderr, o.status)
@@ -32,14 +32,14 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
 
     let db = TestDb::create().await?;
     let loops = "for (int i = 0; i < 10; i++) {}\n".repeat(MAX_CANDIDATES + 2);
-    let snapshot = common::load(&db, "postgres", "19", &[("src/loops.c", Some(&loops))]).await?;
+    let revision = common::load(&db, "postgres", "19", &[("src/loops.c", Some(&loops))]).await?;
     let reader = db.reader().await?;
     for command in [
         "grep -rF 'for (' src | wc -l",
         "grep -rF 'for (' src | sort | uniq -c",
         "grep -rvc 'for (' src | wc -l || echo none",
     ] {
-        let output = run(&reader, &snapshot, command, Limits::default()).await?;
+        let output = run(&reader, &revision, command, Limits::default()).await?;
         assert!(output.incomplete, "{command}");
         assert_eq!(output.status, 2, "{command}");
         assert!(output.stdout.is_empty(), "{command}");
@@ -47,7 +47,7 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
     }
     let error = grep(
         &reader,
-        &snapshot,
+        &revision,
         &GrepArgs {
             command: "grep -rF 'for (' src | wc -l".into(),
             budget_ms: None,
@@ -61,7 +61,7 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
         "{error:#}"
     );
     let (selected, incomplete) =
-        pghacker_codesearch::grep::select(&reader, &snapshot, "grep -rv 'for (' src", 10_000)
+        pghacker_codesearch::grep::select(&reader, &revision, "grep -rv 'for (' src", 10_000)
             .await?;
     assert!(incomplete);
     assert!(selected.iter().all(|file| file.lines.is_empty()));
@@ -71,9 +71,9 @@ async fn incomplete_searches_cannot_turn_into_pipeline_counts() -> Result<()> {
 #[tokio::test]
 async fn grep_prints_like_gnu_grep() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
-    let s = &snapshot;
+    let s = &revision;
 
     let (o, e, rc) = out(&reader, s, "grep -rn makeNode .").await;
     assert_eq!(
@@ -208,9 +208,9 @@ async fn grep_prints_like_gnu_grep() -> Result<()> {
 #[tokio::test]
 async fn grep_paths_pipelines_and_errors() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
-    let s = &snapshot;
+    let s = &revision;
 
     // Absolute and home paths into a checkout, and a cd prefix.
     let (o, _, _) = out(
@@ -306,12 +306,12 @@ async fn grep_paths_pipelines_and_errors() -> Result<()> {
 #[tokio::test]
 async fn read_file_and_list_files() -> Result<()> {
     let db = TestDb::create().await?;
-    let snapshot = common::load(&db, "postgres", "19", &common::files()).await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
     let reader = db.reader().await?;
 
     let r = read_file(
         &reader,
-        &snapshot,
+        &revision,
         &ReadFileArgs {
             path: "./src/include/nodes/nodes.h".into(),
             start_line: Some(12),
@@ -334,7 +334,7 @@ async fn read_file_and_list_files() -> Result<()> {
     );
     let error = read_file(
         &reader,
-        &snapshot,
+        &revision,
         &ReadFileArgs {
             path: "src/backend/parser/json.c".into(),
             ..ReadFileArgs::default()
@@ -348,7 +348,7 @@ async fn read_file_and_list_files() -> Result<()> {
     );
     let error = read_file(
         &reader,
-        &snapshot,
+        &revision,
         &ReadFileArgs {
             path: "src/backend".into(),
             ..ReadFileArgs::default()
@@ -358,7 +358,7 @@ async fn read_file_and_list_files() -> Result<()> {
     .unwrap_err();
     assert!(error.to_string().contains("list_files"));
 
-    let l = list_files(&reader, &snapshot, &ListFilesArgs::default()).await?;
+    let l = list_files(&reader, &revision, &ListFilesArgs::default()).await?;
     let entries: Vec<(&str, &str, Option<u32>)> = l
         .entries
         .iter()
@@ -371,7 +371,7 @@ async fn read_file_and_list_files() -> Result<()> {
     assert_eq!(l.loaded_paths, vec!["src", "contrib"]);
     let l = list_files(
         &reader,
-        &snapshot,
+        &revision,
         &ListFilesArgs {
             path: Some("contrib/pg_trgm".into()),
             depth: Some(2),
@@ -396,7 +396,7 @@ async fn read_file_and_list_files() -> Result<()> {
     );
     let l = list_files(
         &reader,
-        &snapshot,
+        &revision,
         &ListFilesArgs {
             glob: Some("*.[ch]".into()),
             limit: Some(2),

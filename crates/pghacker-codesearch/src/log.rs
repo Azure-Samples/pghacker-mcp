@@ -161,7 +161,7 @@ async fn range_of(
     let addr = |rev: Option<String>| async move {
         crate::rev::resolve(client, s, repo, rev.as_deref())
             .await
-            .map(|snapshot| snapshot.history.addr)
+            .map(|revision| revision.history.addr)
     };
     let range = match spec.split_once("..") {
         Some((since, upto)) => {

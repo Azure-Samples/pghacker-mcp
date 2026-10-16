@@ -19,7 +19,7 @@ use crate::engine::Budget;
 use crate::history::{alive_at, checked, keys};
 use crate::history_search::{lineages, matching, range_of};
 use crate::pattern::Compiled;
-use crate::snapshot::{FileTable, Snapshot, tree_cmp};
+use crate::revision::{FileTable, Revision, tree_cmp};
 
 /// Whether a grep operand is in /history.
 pub fn is_history(op: &str) -> bool {
@@ -39,7 +39,7 @@ struct Found {
 /// A /history operand's range (None for all of history) and path.
 async fn operand(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     table: &FileTable,
     op: &str,
 ) -> Result<(Option<String>, String)> {
@@ -58,13 +58,13 @@ async fn operand(
     if !range_like && table.exists(first) {
         return Ok((None, rest.clone()));
     }
-    let h = &snapshot.history;
+    let h = &revision.history;
     let names = match first.split_once("..") {
         Some((a, b)) => vec![a.to_owned(), b.to_owned()],
         None => vec![first.to_owned()],
     };
     for name in &names {
-        if crate::rev::resolve(client, &h.schema, &snapshot.repo, Some(name))
+        if crate::rev::resolve(client, &h.schema, &revision.repo, Some(name))
             .await
             .is_err()
         {
@@ -78,23 +78,23 @@ async fn operand(
 /// status, or None when the search stopped early.
 pub(crate) async fn grep(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     opts: &Options,
     compiled: &Compiled,
     budget: &Budget,
 ) -> Result<Option<(Vec<u8>, Vec<String>, i32)>> {
-    let h = &snapshot.history;
+    let h = &revision.history;
     if opts.invert || opts.before > 0 || opts.after > 0 || opts.mode == Mode::FilesWithoutMatch {
         bail!("grep: in /history, -v, -L and context lines aren't supported");
     }
     let s = checked(&h.schema)?;
-    let table = FileTable::load(client, snapshot).await?;
+    let table = FileTable::load(client, revision).await?;
     // Every file found: (path, commit) → its lines.
     let mut files: Vec<Found> = Vec::new();
     for op in &opts.operands {
-        let (spec, path) = operand(client, snapshot, &table, op).await?;
+        let (spec, path) = operand(client, revision, &table, op).await?;
         let range = match &spec {
-            Some(spec) => range_of(client, snapshot, h, spec).await?,
+            Some(spec) => range_of(client, revision, h, spec).await?,
             None => None,
         };
         let scope = if path.is_empty() {

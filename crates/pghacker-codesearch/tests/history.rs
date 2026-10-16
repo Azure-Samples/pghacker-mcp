@@ -14,7 +14,7 @@ use common::git;
 use pghacker_code::history::{BuildOptions, build};
 use pghacker_codesearch::grep::{Limits, run};
 use pghacker_codesearch::{
-    ListFilesArgs, ReadFileArgs, SearchArgs, Snapshot, list_files, read_file, search,
+    ListFilesArgs, ReadFileArgs, Revision, SearchArgs, list_files, read_file, search,
 };
 use pghacker_core::testing::TestDb;
 use serde_json::{Value, json};
@@ -264,7 +264,7 @@ async fn candidate_reads_agree_at_every_commit() {
     use pghacker_codesearch::engine::MAX_CANDIDATES;
     use pghacker_codesearch::pattern::{Compiled, Dialect, PatternSpec, Semantics, compile};
     use pghacker_codesearch::rev::resolve;
-    use pghacker_codesearch::snapshot::{FileTable, tree_cmp};
+    use pghacker_codesearch::revision::{FileTable, tree_cmp};
 
     let dir = tempfile::tempdir().unwrap();
     let commits = repository(dir.path());
@@ -516,7 +516,7 @@ async fn virtual_folders_mount_other_commits() {
     let (s19, s18, s17) = (snap("19").await, snap("18").await, snap("REL_17_0").await);
     // Mounts are read from master's head.
     let hist = s19.clone();
-    let out = |s: &Snapshot, command: &str| {
+    let out = |s: &Revision, command: &str| {
         let (reader, s, command) = (&reader, s.clone(), command.to_owned());
         async move {
             let o = run(reader, &s, &command, Limits::default()).await.unwrap();
@@ -585,7 +585,7 @@ async fn virtual_folders_mount_other_commits() {
     );
 
     // read_file, search and list_files.
-    let read = |s: &Snapshot, path: &str| {
+    let read = |s: &Revision, path: &str| {
         let (reader, s, path) = (&reader, s.clone(), path.to_owned());
         async move {
             read_file(
@@ -886,7 +886,7 @@ async fn blame_agrees_with_git_blame() {
                 .unwrap()
         }
     };
-    let ours = |snap: Snapshot, path: &str, ignore: bool, reverse: bool| {
+    let ours = |snap: Revision, path: &str, ignore: bool, reverse: bool| {
         let (reader, path) = (&reader, path.to_owned());
         async move {
             let args = BlameArgs {
@@ -1591,12 +1591,12 @@ async fn search_patches_finds_lines_by_thread() {
     .await
     .unwrap();
     // Where each line was first proposed.
-    let snapshot = pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", Some("master"))
+    let revision = pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", Some("master"))
         .await
         .unwrap();
     let blamed = pghacker_codesearch::blame(
         &reader,
-        &snapshot,
+        &revision,
         &pghacker_codesearch::BlameArgs {
             path: "src/a.c".into(),
             proposals: true,

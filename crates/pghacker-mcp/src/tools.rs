@@ -208,8 +208,8 @@ impl Server {
             "get_ontology" => ontology::get_ontology(client).await,
             "search" => {
                 let args: code::SearchArgs = parse(name, arguments)?;
-                match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
-                    Ok(snapshot) => code::search(client, &snapshot, &args)
+                match code::resolve_revision(client, "postgres", args.version.as_deref()).await {
+                    Ok(revision) => code::search(client, &revision, &args)
                         .await
                         .and_then(|result| Ok(serde_json::to_value(result)?)),
                     Err(error) => Err(error),
@@ -217,8 +217,8 @@ impl Server {
             }
             "read_file" => {
                 let args: code::ReadFileArgs = parse(name, arguments)?;
-                match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
-                    Ok(snapshot) => code::read_file(client, &snapshot, &args)
+                match code::resolve_revision(client, "postgres", args.version.as_deref()).await {
+                    Ok(revision) => code::read_file(client, &revision, &args)
                         .await
                         .and_then(|result| Ok(serde_json::to_value(result)?)),
                     Err(error) => Err(error),
@@ -226,8 +226,8 @@ impl Server {
             }
             "list_files" => {
                 let args: code::ListFilesArgs = parse(name, arguments)?;
-                match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
-                    Ok(snapshot) => code::list_files(client, &snapshot, &args)
+                match code::resolve_revision(client, "postgres", args.version.as_deref()).await {
+                    Ok(revision) => code::list_files(client, &revision, &args)
                         .await
                         .and_then(|result| Ok(serde_json::to_value(result)?)),
                     Err(error) => Err(error),
@@ -253,8 +253,8 @@ impl Server {
             }
             "blame" => {
                 let args: code::BlameArgs = parse(name, arguments)?;
-                match code::resolve_snapshot(client, "postgres", args.version.as_deref()).await {
-                    Ok(snapshot) => code::blame(client, &snapshot, &args)
+                match code::resolve_revision(client, "postgres", args.version.as_deref()).await {
+                    Ok(revision) => code::blame(client, &revision, &args)
                         .await
                         .and_then(|result| Ok(serde_json::to_value(result)?)),
                     Err(error) => Err(error),
@@ -289,10 +289,10 @@ impl Tools for Server {
                     }
                 };
                 let result =
-                    match code::resolve_snapshot(&**client, "postgres", args.version.as_deref())
+                    match code::resolve_revision(&**client, "postgres", args.version.as_deref())
                         .await
                     {
-                        Ok(snapshot) => code::grep(&**client, &snapshot, &args).await,
+                        Ok(revision) => code::grep(&**client, &revision, &args).await,
                         Err(error) => Err(error),
                     };
                 Ok(match result {

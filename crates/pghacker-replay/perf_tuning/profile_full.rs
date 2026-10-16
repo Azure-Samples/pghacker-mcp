@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
     };
     let served = tree::serve(&db.admin_url, &reader, &runtime, &spec).await?;
     let dir = runtime.join("profile-full/tree");
-    tree::materialize(&served.git_dir, &served.snapshot.sha, &dir)?;
-    let snapshot = served.snapshot;
+    tree::materialize(&served.git_dir, &served.revision.sha, &dir)?;
+    let revision = served.revision;
     let cases = [
         (
             "full_text",
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             budget_ms: Some(10_000),
             ..SearchArgs::default()
         };
-        let result = search(&reader, &snapshot, &args).await?;
+        let result = search(&reader, &revision, &args).await?;
         ensure!(
             result.complete && !result.budget_exceeded,
             "{label}: incomplete at {}ms",
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
         let start = Instant::now();
         let result = grep::run(
             &reader,
-            &snapshot,
+            &revision,
             grep_command,
             Limits {
                 budget_ms,

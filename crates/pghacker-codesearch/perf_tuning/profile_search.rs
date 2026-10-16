@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     let reader = db.reader().await?;
-    let snapshot =
+    let revision =
         pghacker_codesearch::rev::resolve(&reader, SCHEMA, "postgres", Some("19")).await?;
     let mut cases = Vec::new();
     let compiled =
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg)?;
     let q = pghacker_codesearch::engine::LineQuery {
-        history: &snapshot.history,
+        history: &revision.history,
         mounted: false,
         file_ids: None,
         require: vec![&compiled.filter],
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
         cap: pghacker_codesearch::engine::MAX_CANDIDATES,
         scope_first: true,
     };
-    let (sql, params) = pghacker_codesearch::history::line_sql(&q, &snapshot.history, &[])?;
+    let (sql, params) = pghacker_codesearch::history::line_sql(&q, &revision.history, &[])?;
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|p| p.as_ref() as _).collect();
     let plan: serde_json::Value = reader
@@ -195,9 +195,9 @@ async fn main() -> Result<()> {
             ..SearchArgs::default()
         };
         let mut times = Vec::new();
-        let mut result = search(&reader, &snapshot, &args).await?;
+        let mut result = search(&reader, &revision, &args).await?;
         for _ in 0..3 {
-            result = search(&reader, &snapshot, &args).await?;
+            result = search(&reader, &revision, &args).await?;
             times.push(result.elapsed_ms);
         }
         times.sort_unstable();
@@ -210,7 +210,7 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let output = grep::run(
         &reader,
-        &snapshot,
+        &revision,
         "grep -rF 'for (' src/backend/access/heap | wc -l",
         Limits {
             budget_ms: 10_000,

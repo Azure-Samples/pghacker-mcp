@@ -12,7 +12,7 @@ use std::process::Command;
 
 use anyhow::Result;
 use pghacker_code::history::{BuildOptions, build};
-use pghacker_codesearch::{Snapshot, resolve_snapshot};
+use pghacker_codesearch::{Revision, resolve_revision};
 use pghacker_core::code::{DEFAULT_HISTORY_SCHEMA, history_schema};
 use pghacker_core::testing::TestDb;
 
@@ -88,7 +88,7 @@ pub async fn install(db: &TestDb, git_dir: &Path, paths: &[&str]) -> Result<()> 
 /// A history of `repo` with these files committed on the branch
 /// REL_<version>_STABLE: version `version`'s commit, as the code tools read
 /// it.
-pub async fn load(db: &TestDb, repo: &str, version: &str, files: &Files<'_>) -> Result<Snapshot> {
+pub async fn load(db: &TestDb, repo: &str, version: &str, files: &Files<'_>) -> Result<Revision> {
     load_versions(db, repo, &[(version, files)]).await
 }
 
@@ -100,7 +100,7 @@ pub async fn load_versions(
     db: &TestDb,
     repo: &str,
     versions: &[(&str, &Files<'_>)],
-) -> Result<Snapshot> {
+) -> Result<Revision> {
     let dir = tempfile::tempdir()?;
     let d = dir.path();
     git(d, 0, &["init", "-q", "-b", "master"]);
@@ -118,7 +118,7 @@ pub async fn load_versions(
     }
     install(db, d, &PATHS).await?;
     let reader = db.reader().await?;
-    resolve_snapshot(&reader, repo, Some(versions[0].0)).await
+    resolve_revision(&reader, repo, Some(versions[0].0)).await
 }
 
 pub const GRAM: &str = "\

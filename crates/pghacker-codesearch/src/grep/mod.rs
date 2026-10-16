@@ -21,7 +21,7 @@ use tokio_postgres::GenericClient;
 use crate::engine::{self, Budget, LineQuery, MAX_CANDIDATES};
 use crate::glob::fnmatch;
 use crate::pattern::{self, Compiled, Dialect, PatternSpec, Semantics};
-use crate::snapshot::{FileTable, Snapshot};
+use crate::revision::{FileTable, Revision};
 use format::Printer;
 use options::{Directories, Mode, Options};
 use shell::Word;
@@ -84,12 +84,12 @@ pub struct Searched {
 /// output, then any error messages.
 pub async fn grep(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &GrepArgs,
 ) -> Result<String> {
     let out = run(
         client,
-        snapshot,
+        revision,
         &args.command,
         Limits {
             budget_ms: args.budget_ms.unwrap_or(engine::DEFAULT_BUDGET_MS),
@@ -111,13 +111,13 @@ pub async fn grep(
 /// Runs a command line with explicit limits.
 pub async fn run(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     command: &str,
     limits: Limits,
 ) -> Result<Output> {
     let budget = Budget::new(Some(limits.budget_ms));
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
-    let result = run_inner(client, snapshot, command, limits, &budget).await;
+    let result = run_inner(client, revision, command, limits, &budget).await;
     engine::restore_timeout(client, &old).await;
     result
 }
@@ -126,7 +126,7 @@ pub async fn run(
 /// printing: what grep would select, every line (no -m, no context).
 pub async fn select(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     command: &str,
     budget_ms: u32,
 ) -> Result<(Vec<Searched>, bool)> {
@@ -134,17 +134,17 @@ pub async fn select(
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
     let result = async {
         let script = shell::parse(command).map_err(|e| anyhow!(e))?;
-        let table = FileTable::view(client, snapshot, &mount_words(&script)).await?;
-        let cwd = cwd_of(&script, &table, &snapshot.repo)?;
-        let words = expand(&script.stages[0].words, &table, &snapshot.repo, &cwd);
+        let table = FileTable::view(client, revision, &mount_words(&script)).await?;
+        let cwd = cwd_of(&script, &table, &revision.repo)?;
+        let words = expand(&script.stages[0].words, &table, &revision.repo, &cwd);
         check_program(&words)?;
         let mut opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
         opts.max_count = None;
-        let prepared = prepare(&opts, &table, &snapshot.repo, &cwd)?;
+        let prepared = prepare(&opts, &table, &revision.repo, &cwd)?;
         let compiled = compile(&opts)?;
         let selection = selection(
             client,
-            (snapshot, &table),
+            (revision, &table),
             &opts,
             &compiled,
             &prepared,
@@ -157,7 +157,7 @@ pub async fn select(
             .iter()
             .map(|item| Searched {
                 display: item.display.clone(),
-                path: crate::snapshot::shown(&table.files[item.file].path),
+                path: crate::revision::shown(&table.files[item.file].path),
                 lines: selection.selected(item.file),
             })
             .collect();
@@ -403,7 +403,7 @@ fn prepare(opts: &Options, table: &FileTable, repo: &str, cwd: &str) -> Result<P
             );
             continue;
         }
-        if crate::snapshot::bare_root(op) {
+        if crate::revision::bare_root(op) {
             message(
                 &mut p,
                 format!(
@@ -542,14 +542,14 @@ enum Need {
 
 async fn selection(
     client: &impl GenericClient,
-    source: (&Snapshot, &FileTable),
+    source: (&Revision, &FileTable),
     opts: &Options,
     compiled: &Compiled,
     prepared: &Prepared,
     need: Need,
     budget: &Budget,
 ) -> Result<Selection> {
-    let (snapshot, table) = source;
+    let (revision, table) = source;
     let need_lines = need == Need::Texts;
     let mut files: Vec<usize> = prepared.items.iter().map(|i| i.file).collect();
     files.sort_unstable();
@@ -583,7 +583,7 @@ async fn selection(
         .sum();
     let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
-        history: &snapshot.history,
+        history: &revision.history,
         mounted: files.iter().any(|&k| k >= table.own),
         file_ids: Some(&ids),
         require,
@@ -658,23 +658,23 @@ async fn selection(
 
 async fn run_inner(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     command: &str,
     limits: Limits,
     budget: &Budget,
 ) -> Result<Output> {
     let script = shell::parse(command).map_err(|e| anyhow!(e))?;
-    let table = FileTable::view(client, snapshot, &mount_words(&script)).await?;
-    let cwd = cwd_of(&script, &table, &snapshot.repo)?;
+    let table = FileTable::view(client, revision, &mount_words(&script)).await?;
+    let cwd = cwd_of(&script, &table, &revision.repo)?;
     let first = &script.stages[0];
-    let words = expand(&first.words, &table, &snapshot.repo, &cwd);
+    let words = expand(&first.words, &table, &revision.repo, &cwd);
     check_program(&words)?;
     let opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
     let compiled = compile(&opts)?;
     // Later stages are checked before the search runs.
     let mut later = Vec::new();
     for stage in &script.stages[1..] {
-        let words = expand(&stage.words, &table, &snapshot.repo, &cwd);
+        let words = expand(&stage.words, &table, &revision.repo, &cwd);
         check_stage(&words)?;
         later.push(words);
     }
@@ -687,12 +687,12 @@ async fn run_inner(
         if history_operands < opts.operands.len() {
             bail!("grep: /history can't be searched with other files");
         }
-        match history::grep(client, snapshot, &opts, &compiled, budget).await? {
+        match history::grep(client, revision, &opts, &compiled, budget).await? {
             Some(printed) => printed,
             None => return Ok(incomplete_output()),
         }
     } else {
-        let prepared = prepare(&opts, &table, &snapshot.repo, &cwd)?;
+        let prepared = prepare(&opts, &table, &revision.repo, &cwd)?;
         // GNU grep gives up at once when nothing can be selected: -m 0, or -v
         // with one empty pattern.
         let hopeless = (opts.max_count == Some(0)
@@ -716,7 +716,7 @@ async fn run_inner(
         };
         let sel = selection(
             client,
-            (snapshot, &table),
+            (revision, &table),
             &opts,
             &compiled,
             &prepared,
@@ -747,7 +747,7 @@ async fn run_inner(
             }
             for ((id, n), text) in engine::line_ranges(
                 client,
-                &snapshot.history,
+                &revision.history,
                 &engine::merge_ranges(ranges),
                 budget,
             )
@@ -824,7 +824,7 @@ async fn run_inner(
     if status != 0
         && let Some(fallback) = &script.fallback
     {
-        let words = expand(&fallback.words, &table, &snapshot.repo, &cwd);
+        let words = expand(&fallback.words, &table, &revision.repo, &cwd);
         match words[0].as_str() {
             "true" | ":" => status = 0,
             "echo" => {
@@ -946,7 +946,7 @@ fn grep_stage(args: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::FileEntry;
+    use crate::revision::FileEntry;
 
     #[test]
     fn arguments_expose_an_optional_budget() {

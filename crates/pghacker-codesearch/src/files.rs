@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::GenericClient;
 
-use crate::snapshot::{FileTable, Snapshot, shown};
+use crate::revision::{FileTable, Revision, shown};
 
 /// The most lines and bytes read_file returns; the first line comes whole.
 pub const MAX_READ_LINES: u32 = 2_000;
@@ -158,13 +158,13 @@ fn not_found(table: &FileTable, raw: &str, path: Option<&str>) -> anyhow::Error 
 /// Reads lines of a file.
 pub async fn read_file(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &ReadFileArgs,
 ) -> Result<ReadFileResult> {
-    let table = FileTable::view(client, snapshot, std::slice::from_ref(&args.path)).await?;
-    let path = table.normalize(&snapshot.repo, &args.path);
+    let table = FileTable::view(client, revision, std::slice::from_ref(&args.path)).await?;
+    let path = table.normalize(&revision.repo, &args.path);
     let Some(path) = path.filter(|p| table.exists(p)) else {
-        let normalized = table.normalize(&snapshot.repo, &args.path);
+        let normalized = table.normalize(&revision.repo, &args.path);
         return Err(not_found(&table, &args.path, normalized.as_deref()));
     };
     let Some(k) = table.file(&path) else {
@@ -178,10 +178,10 @@ pub async fn read_file(
     let start = args.start_line.unwrap_or(1).max(1);
     if total == 0 {
         return Ok(ReadFileResult {
-            repo: snapshot.repo.clone(),
-            version: snapshot.version.clone(),
-            git_ref: snapshot.git_ref.clone(),
-            sha: snapshot.sha.clone(),
+            repo: revision.repo.clone(),
+            version: revision.version.clone(),
+            git_ref: revision.git_ref.clone(),
+            sha: revision.sha.clone(),
             path: shown(&path),
             start_line: 1,
             end_line: 0,
@@ -200,7 +200,7 @@ pub async fn read_file(
     let end = wanted_end.min(start + MAX_READ_LINES - 1);
     let mut rows: Vec<(i32, String)> = crate::history::line_ranges(
         client,
-        &snapshot.history,
+        &revision.history,
         &[(file.id, start as i32, end as i32)],
     )
     .await
@@ -220,10 +220,10 @@ pub async fn read_file(
         last = n as u32;
     }
     Ok(ReadFileResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         path: shown(&path),
         start_line: start,
         end_line: last,
@@ -236,23 +236,23 @@ pub async fn read_file(
 /// Lists folders and files.
 pub async fn list_files(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &ListFilesArgs,
 ) -> Result<ListFilesResult> {
     let raw = args.path.as_deref().unwrap_or("").trim();
-    if crate::snapshot::bare_root(raw) {
+    if crate::revision::bare_root(raw) {
         let root = raw.trim_matches('/');
-        return virtual_listing(client, snapshot, root, args).await;
+        return virtual_listing(client, revision, root, args).await;
     }
-    let table = FileTable::view(client, snapshot, &[raw.to_owned()]).await?;
+    let table = FileTable::view(client, revision, &[raw.to_owned()]).await?;
     let base = if raw.is_empty() || raw == "." || raw == "/" {
         String::new()
     } else {
         table
-            .normalize(&snapshot.repo, raw)
+            .normalize(&revision.repo, raw)
             .filter(|p| table.exists(p))
             .ok_or_else(|| {
-                let normalized = table.normalize(&snapshot.repo, raw);
+                let normalized = table.normalize(&revision.repo, raw);
                 not_found(&table, raw, normalized.as_deref())
             })?
     };
@@ -310,16 +310,16 @@ pub async fn list_files(
                 subject: None,
             });
         }
-        entries.sort_by(|a, b| crate::snapshot::tree_cmp(&a.path, &b.path));
+        entries.sort_by(|a, b| crate::revision::tree_cmp(&a.path, &b.path));
     }
     let total = entries.len() as u64;
     let cut = entries.len() > limit;
     entries.truncate(limit);
     Ok(ListFilesResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         loaded_paths: table.loaded_paths.clone(),
         path: shown(&base),
         total,
@@ -328,7 +328,7 @@ pub async fn list_files(
     })
 }
 
-fn file_entry(f: &crate::snapshot::FileEntry) -> Entry {
+fn file_entry(f: &crate::revision::FileEntry) -> Entry {
     Entry {
         path: shown(&f.path),
         kind: "file",
@@ -344,11 +344,11 @@ fn file_entry(f: &crate::snapshot::FileEntry) -> Entry {
 /// can be mounted.
 async fn virtual_listing(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     root: &str,
     args: &ListFilesArgs,
 ) -> Result<ListFilesResult> {
-    let s = crate::history::checked(&snapshot.history.schema)?;
+    let s = crate::history::checked(&revision.history.schema)?;
     let limit = args
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -409,10 +409,10 @@ async fn virtual_listing(
         })
         .collect();
     Ok(ListFilesResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         loaded_paths: Vec::new(),
         path: format!("/{root}"),
         cut: total > entries.len() as u64,

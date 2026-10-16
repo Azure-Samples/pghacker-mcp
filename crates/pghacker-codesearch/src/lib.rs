@@ -26,8 +26,8 @@ pub mod patches;
 pub mod pattern;
 pub mod range;
 pub mod rev;
+pub mod revision;
 pub mod search;
-pub mod snapshot;
 mod sqlutil;
 
 pub use blame::{BlameArgs, BlameResult, blame};
@@ -38,8 +38,8 @@ pub use files::{
 pub use grep::{GrepArgs, grep};
 pub use log::{SearchCommitsArgs, SearchCommitsResult, search_commits};
 pub use patches::{SearchPatchesArgs, SearchPatchesResult, search_patches};
+pub use revision::{Revision, resolve_revision};
 pub use search::{SearchArgs, SearchResult, search};
-pub use snapshot::{Snapshot, resolve_snapshot};
 
 /// The search tool's description, for agents.
 pub const SEARCH_DESCRIPTION: &str = "\

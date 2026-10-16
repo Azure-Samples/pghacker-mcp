@@ -24,7 +24,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use regex::Regex;
 use tokio_postgres::GenericClient;
 
-use crate::snapshot::Snapshot;
+use crate::revision::Revision;
 
 const MASTER_STEP: i64 = 1 << 32;
 const BRANCH_BLOCK: i64 = 1 << 24;
@@ -213,7 +213,7 @@ pub async fn resolve(
     schema: &str,
     repo: &str,
     version: Option<&str>,
-) -> Result<Snapshot> {
+) -> Result<Revision> {
     let s = crate::history::checked(schema)?;
     let refs: Vec<Ref> = client
         .query(
@@ -304,7 +304,7 @@ pub async fn resolve(
     }
     // A ref names the commit as given; a SHA, a date or steps name its lane.
     let named = (spec.date.is_none() && spec.back == 0 && git_ref.len() != 40).then_some(git_ref);
-    snapshot_at(client, s, repo, addr, named).await
+    revision_at(client, s, repo, addr, named).await
 }
 
 /// The commit a virtual root names: `/commit/<rev>` any revision,
@@ -315,7 +315,7 @@ pub async fn resolve_mount(
     repo: &str,
     root: &str,
     name: &str,
-) -> Result<Snapshot> {
+) -> Result<Revision> {
     let s = crate::history::checked(schema)?;
     match root {
         "commit" => resolve(client, s, repo, Some(name)).await,
@@ -328,20 +328,20 @@ pub async fn resolve_mount(
                 .await?
                 .with_context(|| format!("no {root} {name}"))?
                 .get(0);
-            snapshot_at(client, s, repo, addr, Some(name.to_owned())).await
+            revision_at(client, s, repo, addr, Some(name.to_owned())).await
         }
         other => bail!("/{other} is not a virtual root"),
     }
 }
 
 /// The commit at `addr`, named by `named` or else by its lane.
-async fn snapshot_at(
+async fn revision_at(
     client: &impl GenericClient,
     s: &str,
     repo: &str,
     addr: i64,
     named: Option<String>,
-) -> Result<Snapshot> {
+) -> Result<Revision> {
     let row = client
         .query_one(
             &format!(
@@ -353,7 +353,7 @@ async fn snapshot_at(
         )
         .await?;
     let git_ref = named.unwrap_or_else(|| row.get(1));
-    Ok(Snapshot {
+    Ok(Revision {
         repo: repo.to_owned(),
         version: version_of(&git_ref),
         git_ref,

@@ -15,7 +15,7 @@ use tokio_postgres::GenericClient;
 use crate::engine::{self, Budget, LineQuery, MAX_CANDIDATES};
 use crate::glob::RgFilter;
 use crate::pattern::{self, Compiled, Dialect, PatternSpec, Semantics};
-use crate::snapshot::{FileTable, Snapshot};
+use crate::revision::{FileTable, Revision};
 
 /// Default and largest page sizes, and the most context lines.
 pub const DEFAULT_LIMIT: u32 = 100;
@@ -300,7 +300,7 @@ impl Patterns<'_> {
 /// match.
 pub(crate) async fn find_lines(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     table: &FileTable,
     files: &[usize],
     whole: bool,
@@ -329,7 +329,7 @@ pub(crate) async fn find_lines(
         .sum();
     let scope_first = engine::scope_first(scope_lines, &require);
     let q = LineQuery {
-        history: &snapshot.history,
+        history: &revision.history,
         mounted: files.iter().any(|&k| k >= table.own),
         file_ids: if whole { None } else { Some(&ids) },
         require,
@@ -361,16 +361,16 @@ pub(crate) async fn find_lines(
     })
 }
 
-/// Searches `snapshot`. Pass a client in autocommit mode: the budget is a
+/// Searches `revision`. Pass a client in autocommit mode: the budget is a
 /// statement timeout, and a timeout inside a caller's transaction aborts it.
 pub async fn search(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
 ) -> Result<SearchResult> {
     let budget = Budget::new(args.budget_ms);
     let old = engine::set_timeout(client, budget.remaining_ms()).await?;
-    let result = search_inner(client, snapshot, args, &budget).await;
+    let result = search_inner(client, revision, args, &budget).await;
     engine::restore_timeout(client, &old).await;
     result
 }
@@ -496,7 +496,7 @@ pub(crate) fn search_scope(
         if raw.contains(['*', '?', '[', '{']) {
             let glob = path_glob(table, repo, raw)?;
             // A glob reaches into a mounted tree only when it names one.
-            let range = if crate::snapshot::mount_of(raw).is_some() {
+            let range = if crate::revision::mount_of(raw).is_some() {
                 table.own..table.files.len()
             } else {
                 0..table.own
@@ -648,7 +648,7 @@ fn cut_text(text: &str, notes: &mut BTreeMap<&'static str, ()>) -> String {
 
 async fn search_inner(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
     budget: &Budget,
 ) -> Result<SearchResult> {
@@ -667,7 +667,7 @@ async fn search_inner(
             .paths
             .to_vec()
             .iter()
-            .any(|p| crate::snapshot::mount_of(p).is_some())
+            .any(|p| crate::revision::mount_of(p).is_some())
         {
             bail!("a history search takes paths from the root, such as src/backend");
         }
@@ -676,12 +676,12 @@ async fn search_inner(
             also: &plan.also,
             not: plan.not.as_ref(),
         };
-        return crate::history_search::search(client, snapshot, args, &patterns, budget).await;
+        return crate::history_search::search(client, revision, args, &patterns, budget).await;
     }
-    let table = FileTable::view(client, snapshot, &args.paths.to_vec()).await?;
+    let table = FileTable::view(client, revision, &args.paths.to_vec()).await?;
     let (files, whole) = search_scope(
         &table,
-        &snapshot.repo,
+        &revision.repo,
         &args.paths.to_vec(),
         &args.include.to_vec(),
         &args.exclude.to_vec(),
@@ -692,14 +692,14 @@ async fn search_inner(
             files: &files,
             whole,
         };
-        return complement(client, snapshot, args, &plan, &scope, budget).await;
+        return complement(client, revision, args, &plan, &scope, budget).await;
     }
     let patterns = Patterns {
         query: &plan.query,
         also: &plan.also,
         not: plan.not.as_ref(),
     };
-    let found = find_lines(client, snapshot, &table, &files, whole, &patterns, budget).await?;
+    let found = find_lines(client, revision, &table, &files, whole, &patterns, budget).await?;
     let mut notes: BTreeMap<&'static str, ()> = BTreeMap::new();
     let hits = found.hits;
     let total_lines = hits.len() as u64;
@@ -734,10 +734,10 @@ async fn search_inner(
         .collect();
 
     let mut result = SearchResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         total_lines,
         total_files,
         total_matches: None,
@@ -779,7 +779,7 @@ async fn search_inner(
                     .collect();
                 context_lines = engine::line_ranges(
                     client,
-                    &snapshot.history,
+                    &revision.history,
                     &engine::merge_ranges(ranges),
                     budget,
                 )
@@ -804,7 +804,7 @@ async fn search_inner(
                     Vec::new()
                 };
                 result.lines.push(LineHit {
-                    path: crate::snapshot::shown(&table.files[*f].path),
+                    path: crate::revision::shown(&table.files[*f].path),
                     line: *n as u32,
                     text: cut_text(text, &mut notes),
                     before,
@@ -831,7 +831,7 @@ async fn search_inner(
             result.cut = offset + limit < parts.len();
             for (f, n, text) in parts.into_iter().skip(offset).take(limit) {
                 result.lines.push(LineHit {
-                    path: crate::snapshot::shown(&table.files[f].path),
+                    path: crate::revision::shown(&table.files[f].path),
                     line: n as u32,
                     text: cut_text(&text, &mut notes),
                     before: Vec::new(),
@@ -843,7 +843,7 @@ async fn search_inner(
             result.cut = offset + limit < per_file.len();
             for (f, n) in per_file.iter().skip(offset).take(limit) {
                 result.files.push(FileHit {
-                    path: crate::snapshot::shown(&table.files[*f].path),
+                    path: crate::revision::shown(&table.files[*f].path),
                     lines: *n,
                     terms: terms_of(f),
                 });
@@ -877,7 +877,7 @@ async fn search_inner(
     result.returned = (result.lines.len() + result.files.len() + result.matches.len()) as u32;
     if total_lines == 0 && !plan.every_line && result.complete && !budget.exceeded() {
         let (similar, timed_out) =
-            similar_names(client, &table, &files, whole, snapshot, args, budget).await?;
+            similar_names(client, &table, &files, whole, revision, args, budget).await?;
         result.similar = similar;
         result.budget_exceeded |= timed_out;
     }
@@ -909,7 +909,7 @@ struct Scope<'a> {
 /// the totals, and only the page's lines are read.
 async fn complement(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
     plan: &Plan,
     scope: &Scope<'_>,
@@ -928,7 +928,7 @@ async fn complement(
         };
         let found = find_lines(
             client,
-            snapshot,
+            revision,
             table,
             scope.files,
             scope.whole,
@@ -957,10 +957,10 @@ async fn complement(
         .collect();
     let total_lines: u64 = per_file.iter().map(|(_, n)| n).sum();
     let mut result = SearchResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         total_lines,
         total_files: per_file.len() as u64,
         total_matches: None,
@@ -1021,7 +1021,7 @@ async fn complement(
             .collect();
         let text = engine::line_ranges(
             client,
-            &snapshot.history,
+            &revision.history,
             &engine::merge_ranges(ranges),
             budget,
         )
@@ -1034,7 +1034,7 @@ async fn complement(
                     .map(|t| cut_text(t, &mut BTreeMap::new()))
             };
             result.lines.push(LineHit {
-                path: crate::snapshot::shown(&table.files[k].path),
+                path: crate::revision::shown(&table.files[k].path),
                 line: n as u32,
                 text: cut_text(text.get(&(id, n)).map_or("", String::as_str), &mut notes),
                 before: ((n - context).max(1)..n).filter_map(get).collect(),
@@ -1045,7 +1045,7 @@ async fn complement(
         result.cut = offset + limit < per_file.len();
         for (k, n) in per_file.iter().skip(offset).take(limit) {
             result.files.push(FileHit {
-                path: crate::snapshot::shown(&table.files[*k].path),
+                path: crate::revision::shown(&table.files[*k].path),
                 lines: *n,
                 terms: None,
             });
@@ -1069,7 +1069,7 @@ async fn similar_names(
     table: &FileTable,
     files: &[usize],
     whole: bool,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &SearchArgs,
     budget: &Budget,
 ) -> Result<(Option<Similar>, bool)> {
@@ -1094,7 +1094,7 @@ async fn similar_names(
     let ids: Vec<i32> = files.iter().map(|&k| table.files[k].id).collect();
     // $1 is the commit (or the files) and $2 the pattern; $3 is the files'
     // lineages.
-    let h = &snapshot.history;
+    let h = &revision.history;
     let lineages = if whole {
         Vec::new()
     } else {

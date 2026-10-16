@@ -16,7 +16,7 @@ use tokio_postgres::GenericClient;
 
 use crate::files::MAX_READ_LINES;
 use crate::history::{Spans, alive_at, checked, keys, line_ranges};
-use crate::snapshot::{FileTable, MOUNTS, Snapshot, mount_of, shown};
+use crate::revision::{FileTable, MOUNTS, Revision, mount_of, shown};
 
 /// The file PostgreSQL lists its reformatting commits in.
 pub const IGNORE_REVS_FILE: &str = ".git-blame-ignore-revs";
@@ -267,15 +267,15 @@ async fn ignored(
 /// Blames lines of a file in the history.
 pub async fn blame(
     client: &impl GenericClient,
-    snapshot: &Snapshot,
+    revision: &Revision,
     args: &BlameArgs,
 ) -> Result<BlameResult> {
-    let h = &snapshot.history;
+    let h = &revision.history;
     let s = checked(&h.schema)?;
     let mount = mount_of(&args.path);
-    let table = FileTable::view(client, snapshot, std::slice::from_ref(&args.path)).await?;
+    let table = FileTable::view(client, revision, std::slice::from_ref(&args.path)).await?;
     let path = table
-        .normalize(&snapshot.repo, &args.path)
+        .normalize(&revision.repo, &args.path)
         .filter(|p| table.exists(p))
         .with_context(|| format!("no such file: {}", args.path))?;
     let Some(k) = table.file(&path) else {
@@ -290,10 +290,10 @@ pub async fn blame(
     let wanted_end = args.end_line.unwrap_or(u32::MAX).min(total);
     let end = wanted_end.min(start.saturating_add(MAX_READ_LINES - 1));
     let mut result = BlameResult {
-        repo: snapshot.repo.clone(),
-        version: snapshot.version.clone(),
-        git_ref: snapshot.git_ref.clone(),
-        sha: snapshot.sha.clone(),
+        repo: revision.repo.clone(),
+        version: revision.version.clone(),
+        git_ref: revision.git_ref.clone(),
+        sha: revision.sha.clone(),
         path: shown(&path),
         start_line: start,
         end_line: end.max(start.saturating_sub(1)),
@@ -342,7 +342,7 @@ pub async fn blame(
         // The commit this version is read at: the call's, or its mount's.
         let at = match &mount {
             Some((root, name)) => {
-                crate::rev::resolve_mount(client, s, &snapshot.repo, root, name)
+                crate::rev::resolve_mount(client, s, &revision.repo, root, name)
                     .await?
                     .history
                     .addr
