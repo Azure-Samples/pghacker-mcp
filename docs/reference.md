@@ -133,7 +133,7 @@ The commit history stores every line of every commit of every branch once, and i
 - `history verify --git-dir .runtime/postgres.git --schema pghacker --heads --sample 40` rebuilds every file of the branch heads and of 40 random commits, and compares them with git;
 - `history sync` and `history regroup` do by hand what the hourly `code_history_sync` job does: apply new commits, and refresh the back-patch groups and the links from commits to threads.
 
-The `patch_lines` job indexes the mail's patches for `search_patches`, even before a history is installed. `add_source` for a PostgreSQL version loads nothing: it names the history's commit, or starts the sync when the history lacks it. In `crates/pghacker-replay/perf_tuning/`, `history_parity` compares `get_commit` and `blame` with git on random commits, and `profile_history` times one code-tool call.
+The `patch_lines` job indexes the mail's patches for `search_patches`, even before a history is installed. The history isn't a source: `sources` lists the mailing lists, and there is no version to add, since the history holds every branch, tag and commit. `list_sources.history`, `ingest_status.code.history` and `get_ontology.loaded.code` report its repository, head and last sync. In `crates/pghacker-replay/perf_tuning/`, `history_parity` compares `get_commit` and `blame` with git on random commits, and `profile_history` times one code-tool call.
 
 ## The graph
 

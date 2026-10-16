@@ -37,9 +37,9 @@ flowchart LR
   - Application Insights derives a country, region and city from each client's address, then discards the address.
   - `usage_enabled = false` turns it off ([PRIVACY.md](../PRIVACY.md)).
 - **Production mode**:
-  - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads) and any branch, tag or commit of PostgreSQL.
+  - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads).
     - A list added without months, `follow` included, queues the whole archive.
-    - A version needs no loading: the code tools read any branch, tag or commit of the [commit history](#commit-history), and `add_source` for one says which commit it names, or starts the history's sync when it has none.
+    - PostgreSQL's code isn't a source: the code tools read any branch, tag or commit of the [commit history](#commit-history), which its hourly sync keeps current, and `list_sources.history` reports it.
   - `follow` retrieves a list's current month again every hour.
   - The indexer's job workers have lanes: worker 0 runs the recurring jobs, and the others run anything.
   - The crawl scheduler keeps extraction sessions busy as long as threads wait, as fast as Foundry allows: it starts 8, adds one a minute while saturated, halves on a 429, and stops at `crawl_max_sessions`. It runs deduplication as extracts arrive.
@@ -192,8 +192,9 @@ Startup applies the migrations a database lacks, and refuses one that changed af
 | `0017_extraction_lease_versions` | The thread versions each extraction lease read |
 | `0018_feature_release_at` | When a feature's release was stated |
 | `0019_patch_series_text` | Patches' series versions as text, parsed again ([Patch series](#patch-series)) |
+| `0020_retire_version_sources` | Deletes the PostgreSQL versions the snapshot loader left in `sources`, and its jobs ([Commit history](#commit-history)) |
 
-Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)).
+Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version.
 
 ### Patch series
 
@@ -327,7 +328,7 @@ It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.gi
 
 Check `tools/list` (First deployment, step 9) and run the evaluation.
 
-**Retired snapshots.** Migration `0016_retire_snapshots` drops the snapshots' tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and cancels unfinished `code_snapshot` jobs. It records the graph keys of their files and of the history's, so that the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history without a full sync: a File is `loaded` when the history has its path.
+**Retired snapshots.** Migration `0016_retire_snapshots` drops the snapshots' tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and cancels unfinished `code_snapshot` jobs. It records the graph keys of their files and of the history's, so that the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history without a full sync: a File is `loaded` when the history has its path. Migration `0020_retire_version_sources` then deletes what their loader left: the 15 `postgres_version` rows in `sources` and its `code_snapshot` jobs, so `sources` lists mailing lists only.
 
 **The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph ([the graph](../docs/reference.md#the-graph)): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
 - The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each install.
@@ -431,9 +432,9 @@ describes validation, DNS and certificate rotation.
 
 Ask a **pghacker Crawler** session in the portal, for example:
 - "Index pgsql-hackers since 2025-01 and follow it."
-- "Add the PG18 source."
+- "Is the code current?"
 
-It confirms the scope of large requests, since a whole archive is decades of mail. It reports what `add_source` queued, and follows retrieval and extraction with `ingest_status`.
+It confirms the scope of large requests, since a whole archive is decades of mail. It reports what `add_source` queued, and follows retrieval and extraction with `ingest_status`. For the code, it reports the commit history's head and last sync from `list_sources.history`: there is no version to add.
 
 The crawl scheduler's progress is in the container's log, with `[crawl]` lines. To stop extraction, set `app_env = { PGHACKER_CRAWL = "off" }` and apply. The other knobs are `crawl_start_sessions`, `crawl_max_sessions` and the Foundry capacities in `foundry_deployments`.
 

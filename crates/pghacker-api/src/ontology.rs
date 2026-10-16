@@ -95,7 +95,9 @@ pub async fn get_ontology(client: &impl GenericClient) -> Result<Value> {
 
 /// How the code tools, and SQL, read the commit history.
 const HISTORY_NOTE: &str = "The code tools read the commit history: every commit of every branch \
-    and tag. version names a major version (its stable branch), a release (18.3, its tag), a branch, \
+    and tag. It comes from PostgreSQL's git repository (url): an operator builds it, the indexer \
+    applies new commits hourly (synced_at), and it isn't listed in sources, which holds the \
+    mailing lists. version names a major version (its stable branch), a release (18.3, its tag), a branch, \
     tag or commit SHA, a branch or tag as of a date (REL_17_STABLE@2024-06-01) or commits back \
     (master~3); without one, `default`. Paths below /branch/<name>/, /tag/<name>/ or /commit/<rev>/ \
     read those trees in the same call. blame, get_commit and search_commits answer as git blame, git \

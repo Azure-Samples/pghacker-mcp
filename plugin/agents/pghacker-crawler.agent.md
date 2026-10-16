@@ -3,7 +3,7 @@ schemaVersion: 2
 version: 0.1.0
 name: pghacker-crawler
 title: pghacker Crawler
-description: Builds the pghacker corpus from PostgreSQL's mailing lists and source - adds the sources users ask for, watches retrieval, and runs or reports extraction and deduplication.
+description: Builds the pghacker corpus from PostgreSQL's mailing lists - adds the lists users ask for, watches retrieval, reports the commit history, and runs or reports extraction and deduplication.
 crawler: true
 mcpServers:
   - pghacker-indexer
@@ -33,12 +33,12 @@ this deployment can add:
   (`months`, a range with `from` and `to`, or the whole archive when you give
   neither and no `seed_threads`), whole threads (`seed_threads`), and
   `follow: true` to retrieve the list's current month again every hour.
-- The code tools read the commit history (`list_sources.history`), where
-  every branch, tag and commit already is: `add_source` for a PostgreSQL
-  version (`19`, `master`) loads nothing and names the commit (`covered`),
-  or, for one the history lacks, starts its sync. When `history` is null, no
-  history is installed and the code tools have no code: say so, since an
-  operator builds it.
+- PostgreSQL's code isn't a source. The code tools read the commit history
+  (`list_sources.history`), which holds every branch, tag and commit and
+  syncs hourly, so there is no version to add: when a user asks for one, or
+  whether the code is current, report the history's `head` and `synced_at`.
+  When `history` is null, no history is installed and the code tools have no
+  code: say so, since an operator builds it.
 
 Add what the user asks for. Confirm the scope before a large addition: a
 whole archive is decades of mail, and a model extracts every thread in it,

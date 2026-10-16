@@ -31,9 +31,10 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     database and returns CSV: a header row, up to max_rows rows and 1 MiB, and the row count, with \
     a banner above when rows are cut. Tables, in schema pghacker: threads, messages, authors, \
     author_names, patches, patch_texts, anchors, message_chunks, features, decisions, positions, \
-    citations, feature_threads, feature_files, sources, and the commit history's below. Text keeps \
-    the email addresses written in it; the table of senders' addresses (author_emails) is not \
-    readable. Query the AGE graph pghacker_graph with SELECT * FROM cypher('pghacker_graph', $$ MATCH \
+    citations, feature_threads, feature_files, sources (the mailing lists retrieved), and the \
+    commit history's below. Text keeps the email addresses written in it; the table of senders' \
+    addresses (author_emails) is not readable. Query the AGE graph pghacker_graph with SELECT * \
+    FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
     Call get_ontology for the graph's labels and edges and the tables' columns. Takes one \
     SELECT, WITH, VALUES, TABLE, EXPLAIN or SHOW statement of at most 64 KiB, run read-only with \
@@ -42,8 +43,9 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
 /// The commit history's tables, which pghacker-mcp adds to the description.
 pub const HISTORY_NOTE: &str = "The commit history's tables: code_commits, code_commit_files, \
     code_commit_threads, code_refs, code_lanes, code_lineages, code_file_versions, \
-    code_line_instances and code_history; get_ontology shows how to read a commit's files and \
-    lines.";
+    code_line_instances and code_history (the git repository it comes from, its head and last \
+    sync: PostgreSQL's code isn't in sources); get_ontology shows how to read a commit's files \
+    and lines.";
 
 /// The tool's arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -95,6 +97,7 @@ mod tests {
             "banner",
             "Text keeps the email addresses written in it",
             "NULL reads as None",
+            "sources (the mailing lists retrieved)",
         ] {
             assert!(DESCRIPTION.contains(needed), "{needed}");
         }
@@ -103,5 +106,7 @@ mod tests {
             "the snapshots are retired"
         );
         assert!(HISTORY_NOTE.contains("code_line_instances"));
+        assert!(HISTORY_NOTE.contains("code_history (the git repository it comes from"));
+        assert!(HISTORY_NOTE.contains("PostgreSQL's code isn't in sources"));
     }
 }

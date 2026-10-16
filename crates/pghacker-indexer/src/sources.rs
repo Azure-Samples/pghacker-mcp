@@ -1,10 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Sources: the mailing lists the indexer retrieves, and the PostgreSQL
-//! versions of the commit history. Adding a list queues the jobs that
-//! retrieve it; adding a version loads nothing, since the history holds every
-//! branch, tag and commit, and names the commit it has ([`in_history`]).
+//! Sources: the mailing lists the indexer retrieves. Adding one queues the
+//! jobs that retrieve it. PostgreSQL's code isn't a source: the code tools
+//! read the commit history, which an operator builds and the hourly
+//! `code_history_sync` job keeps current ([`crate::history`]); list_sources
+//! reports it.
 //!
 //! `PGHACKER_SOURCES` decides which lists can be added. `test-slices`, the
 //! default, retrieves only the configured test slices. `open` retrieves any
@@ -54,15 +55,12 @@ impl FromStr for SourcesMode {
 pub enum SourceKind {
     /// A mailing list, such as pgsql-hackers.
     MailingList,
-    /// A PostgreSQL major version's source code, such as 19.
-    PostgresVersion,
 }
 
 impl SourceKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MailingList => "mailing_list",
-            Self::PostgresVersion => "postgres_version",
         }
     }
 }
@@ -70,8 +68,7 @@ impl SourceKind {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AddSourceArgs {
     pub kind: SourceKind,
-    /// The list's name (`pgsql-hackers`), or the PostgreSQL major version
-    /// (`19`, or `master` for the development branch).
+    /// The list's name, such as pgsql-hackers.
     pub name: String,
     /// mailing_list: the months to retrieve, YYYY-MM. Without months,
     /// from, to or seed_threads, the whole archive of the list.
@@ -93,15 +90,6 @@ pub struct AddSourceArgs {
     /// again every hour (true), or stop (false). Unchanged when omitted.
     #[serde(default)]
     pub follow: Option<bool>,
-    /// postgres_version: the branch or tag to look up in the commit history
-    /// (default: REL_<name>_STABLE, or master while the version has no
-    /// stable branch).
-    #[serde(default)]
-    pub branch: Option<String>,
-    /// postgres_version: a full commit SHA to look up instead of a branch or
-    /// tag's current commit.
-    #[serde(default)]
-    pub sha: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
@@ -139,11 +127,6 @@ pub async fn add_source(indexer: &Indexer, args: AddSourceArgs) -> Result<Value>
     let name = args.name.trim().to_owned();
     ensure!(!name.is_empty(), "name is empty");
     let source_kind = args.kind;
-    if source_kind == SourceKind::PostgresVersion {
-        let client = indexer.tools.get().await?;
-        let schema = pghacker_core::code::history_schema();
-        return in_history(&**client, schema, &name, &args).await;
-    }
     let plan = match indexer.settings.sources {
         SourcesMode::TestSlices => test_list_plan(indexer, &name, &args)?,
         SourcesMode::Open => list_plan(indexer, &name, &args).await?,
@@ -361,136 +344,6 @@ fn is_month(month: &str) -> bool {
             .is_ok_and(|m| (1..=12).contains(&m))
 }
 
-/// A major version's stable branch: `REL_19_STABLE`; master's is master.
-fn stable_branch(name: &str) -> String {
-    if name == "master" {
-        "master".to_owned()
-    } else {
-        format!("REL_{name}_STABLE")
-    }
-}
-
-/// A PostgreSQL version, from the commit history in `schema` that the code
-/// tools read: it holds every branch, tag and commit, so nothing is loaded.
-/// The commit the version names (its `sha`, else its `branch`, else its
-/// stable branch, else master), or, when the history lacks it, the history
-/// sync is asked to run now.
-pub async fn in_history(
-    client: &impl GenericClient,
-    schema: &str,
-    name: &str,
-    args: &AddSourceArgs,
-) -> Result<Value> {
-    ensure!(
-        name == "master" || (name.len() <= 2 && name.bytes().all(|b| b.is_ascii_digit())),
-        "name must be a major version, such as 19, or master"
-    );
-    let s = pghacker_code::history::store::readable_schema(schema)?;
-    let history = client
-        .query_opt(&format!("SELECT url, paths FROM {s}.code_history"), &[])
-        .await
-        .with_context(|| format!("cannot read the commit history in schema {s}"))?
-        .with_context(|| format!("schema {s} has no commit history installed"))?;
-    let (url, paths): (Option<String>, Vec<String>) = (history.get(0), history.get(1));
-    let (wanted, found) = match (&args.sha, &args.branch) {
-        (Some(sha), _) => {
-            let sha = sha.trim().to_ascii_lowercase();
-            ensure!(
-                is_full_sha(&sha),
-                "sha must be a full 40-character commit SHA"
-            );
-            let found = client
-                .query_opt(
-                    &format!("SELECT sha, sha, committed_at FROM {s}.code_commits WHERE sha = $1"),
-                    &[&sha],
-                )
-                .await?;
-            (format!("commit {sha}"), found)
-        }
-        (None, branch) => {
-            let refs = match branch {
-                Some(branch) => {
-                    validate_ref(branch)?;
-                    vec![branch.clone()]
-                }
-                None => vec![stable_branch(name), "master".to_owned()],
-            };
-            let found = client
-                .query_opt(
-                    &format!(
-                        "SELECT r.name, c.sha, c.committed_at FROM {s}.code_refs r \
-                         JOIN {s}.code_commits c ON c.addr = r.addr WHERE r.name = ANY($1) \
-                         ORDER BY array_position($1, r.name), r.kind LIMIT 1"
-                    ),
-                    &[&refs],
-                )
-                .await?;
-            (refs[0].clone(), found)
-        }
-    };
-    let whole = |paths: &[String]| {
-        if paths.is_empty() {
-            json!("the whole tree")
-        } else {
-            json!(paths)
-        }
-    };
-    match found {
-        Some(row) => {
-            let (revision, sha, at): (String, String, DateTime<Utc>) =
-                (row.get(0), row.get(1), row.get(2));
-            Ok(json!({
-                "covered": true,
-                "revision": revision,
-                "sha": sha,
-                "committed_at": at,
-                "paths": whole(&paths),
-                "jobs_queued": 0,
-                "note": format!(
-                    "The commit history already holds every branch, tag and commit of PostgreSQL, \
-                     so nothing is loaded: the code tools read {revision} at {}.", &sha[..12]
-                ),
-                "next": "Name the version (a major version, release, branch, tag or commit SHA) \
-                         in search, grep, read_file, list_files or blame.",
-            }))
-        }
-        None => {
-            jobs::wake(client, kind::CODE_HISTORY_SYNC).await?;
-            Ok(json!({
-                "covered": false,
-                "jobs_queued": 0,
-                "note": format!(
-                    "The commit history has no {wanted}. Its sync runs now, fetching every new \
-                     branch, tag and commit from {}; if {wanted} is there, the code tools read it \
-                     afterwards. list_sources shows the last sync.",
-                    url.as_deref().unwrap_or("its clone")
-                ),
-            }))
-        }
-    }
-}
-
-/// A full, lower-case commit SHA.
-fn is_full_sha(sha: &str) -> bool {
-    sha.len() == 40
-        && sha
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-
-fn validate_ref(name: &str) -> Result<()> {
-    ensure!(
-        !name.is_empty()
-            && !name.starts_with('-')
-            && !name.contains("..")
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/')),
-        "{name:?} isn't a branch or tag name"
-    );
-    Ok(())
-}
-
 /// Queues the refresh of the current month of every followed list (and of
 /// the previous month too in a month's first two days, for late mail).
 /// Returns the keys queued.
@@ -617,15 +470,15 @@ pub async fn list_sources(indexer: &Indexer) -> Result<Value> {
             })
         })
         .collect();
-    let versions = "Any branch, tag or commit of PostgreSQL in the commit history (this reply's history): \
-        a major version (19: its REL_19_STABLE branch, or master while it has none) or master, at a branch \
-        or tag's current commit or a given sha. Nothing is loaded: add_source names the commit, or starts \
-        the history's sync when the history lacks it.";
+    let code = "PostgreSQL's code isn't a source, and there is no version to add: the code tools read \
+        the commit history (this reply's history), which holds every branch, tag and commit of \
+        PostgreSQL's git repository. An operator builds it, and the hourly code_history_sync job \
+        fetches new commits. history is null until one is installed.";
     let available = match indexer.settings.sources {
         SourcesMode::TestSlices => json!({
             "mode": "test-slices",
             "mailing_lists": [indexer.slices.mail.list],
-            "postgres_versions": versions,
+            "code": code,
             "note": "This deployment retrieves the configured test slices of mail only.",
         }),
         SourcesMode::Open => json!({
@@ -633,7 +486,7 @@ pub async fn list_sources(indexer: &Indexer) -> Result<Value> {
             "mailing_lists": "Any list at https://www.postgresql.org/list/, such as pgsql-hackers, \
                 pgsql-bugs, pgsql-committers or pgsql-general: chosen months, a range (from, to), or the \
                 whole archive; seed threads; and follow, to retrieve the current month again every hour.",
-            "postgres_versions": versions,
+            "code": code,
         }),
     };
     let history = crate::history::summary(&**client).await?;
@@ -698,14 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn versions_name_valid_refs_and_shas() {
-        assert!(is_full_sha("0123456789abcdef0123456789abcdef01234567"));
-        assert!(!is_full_sha("0123456789ABCDEF0123456789abcdef01234567"));
-        assert!(!is_full_sha("0123456"));
-        assert!(validate_ref("REL_19_STABLE").is_ok());
-        assert!(validate_ref("--upload-pack=x").is_err());
-        assert!(validate_ref("a..b").is_err());
-        assert_eq!(stable_branch("19"), "REL_19_STABLE");
-        assert_eq!(stable_branch("master"), "master");
+    fn the_only_kind_is_a_mailing_list() {
+        let list: AddSourceArgs =
+            serde_json::from_value(json!({ "kind": "mailing_list", "name": "pgsql-hackers" }))
+                .unwrap();
+        assert_eq!(list.kind.as_str(), "mailing_list");
+        let version = serde_json::from_value::<AddSourceArgs>(
+            json!({ "kind": "postgres_version", "name": "19" }),
+        )
+        .unwrap_err();
+        assert!(version.to_string().contains("mailing_list"), "{version}");
     }
 }

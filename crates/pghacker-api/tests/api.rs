@@ -403,6 +403,9 @@ async fn describes_the_commit_history_the_code_tools_read() {
         "REL_17_STABLE@",
         "alive @> X",
         "git blame",
+        "git repository (url)",
+        "synced_at",
+        "isn't listed in sources",
     ] {
         assert!(note.contains(needed), "{needed}");
     }

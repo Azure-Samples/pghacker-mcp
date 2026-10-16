@@ -73,18 +73,9 @@ async fn find_duplicates(indexer: &Indexer, kind: &str) -> Value {
 }
 
 #[tokio::test]
-async fn workers_keep_their_lanes_and_leave_retired_kinds_alone() {
+async fn workers_keep_their_lanes() {
     let db = TestDb::create().await.unwrap();
     let client = db.indexer().await.unwrap();
-    // A database keeps the finished jobs of the retired code_snapshot kind.
-    client
-        .batch_execute(
-            "INSERT INTO jobs (kind, key, state) VALUES
-                 ('code_snapshot', 'postgres/a', 'done'), ('code_snapshot', 'postgres/b', 'failed'),
-                 ('code_snapshot', 'postgres/c', 'cancelled')",
-        )
-        .await
-        .unwrap();
     assert!(
         jobs::enqueue(
             &client,
@@ -122,26 +113,14 @@ async fn workers_keep_their_lanes_and_leave_retired_kinds_alone() {
     assert_eq!(jobs::lane(0, 1), None);
     assert_eq!(jobs::lane(1, 2), None);
 
-    // Neither a restart nor the recurring jobs bring the retired ones back.
+    // Neither a restart nor the recurring jobs queue a finished job again.
     assert_eq!(jobs::requeue_orphans(&client).await.unwrap(), 1);
     jobs::ensure_recurring(&client).await.unwrap();
     let mut claimed = 0;
-    while let Some(job) = jobs::claim(&client, "w1", None).await.unwrap() {
-        assert_ne!(job.kind, "code_snapshot");
+    while jobs::claim(&client, "w1", None).await.unwrap().is_some() {
         claimed += 1;
     }
     assert_eq!(claimed, 1 + jobs::RECURRING.len());
-    let retired: Vec<String> = client
-        .query(
-            "SELECT state FROM jobs WHERE kind = 'code_snapshot' ORDER BY key",
-            &[],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.get(0))
-        .collect();
-    assert_eq!(retired, ["done", "failed", "cancelled"]);
 }
 
 #[tokio::test]
@@ -226,41 +205,103 @@ async fn sources_queue_the_test_slices() {
         refused.to_string().contains("PGHACKER_SOURCES=open"),
         "{refused}"
     );
-    // A version comes from the commit history in this mode too, and loads
-    // nothing: there's none to read here.
-    let code = sources::add_source(
-        &indexer,
-        args(json!({ "kind": "postgres_version", "name": "19" })),
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        format!("{code:#}").contains("no commit history installed"),
-        "{code:#}"
-    );
     let removed = sources::remove_source(&indexer, args(list)).await.unwrap();
     assert_eq!(removed["jobs_cancelled"].as_u64().unwrap() as usize, queued);
     let listed = sources::list_sources(&indexer).await.unwrap();
     assert_eq!(listed["sources"].as_array().unwrap().len(), 1);
     assert_eq!(listed["available"]["mode"], "test-slices");
+    // PostgreSQL's code isn't a source: the commit history holds it, and
+    // there's none here.
     assert!(
-        listed["available"]["postgres_versions"]
+        listed["available"]["code"]
             .as_str()
             .unwrap()
             .contains("commit history")
     );
-    let jobs: i64 = db
-        .indexer()
+    assert_eq!(listed["history"], Value::Null);
+}
+
+#[tokio::test]
+async fn retiring_versions_keeps_the_mailing_lists() {
+    let db = TestDb::create().await.unwrap();
+    let client = db.indexer().await.unwrap();
+    // As before 0020: a list, and the versions the snapshot loader stored,
+    // with its jobs.
+    client
+        .batch_execute(
+            r#"ALTER TABLE sources DROP CONSTRAINT sources_kind_check,
+                   ADD CONSTRAINT sources_kind_check CHECK (kind IN ('mailing_list', 'postgres_version'));
+               COMMENT ON TABLE sources IS NULL;
+               INSERT INTO sources (id, kind, name, config) VALUES
+                   (1, 'mailing_list', 'pgsql-hackers', '{"follow": true}'),
+                   (2, 'postgres_version', '19', '{"branch": "REL_19_STABLE", "paths": []}'),
+                   (3, 'postgres_version', 'master', '{"branch": "master", "paths": []}');
+               INSERT INTO jobs (source_id, kind, key, state) VALUES
+                   (1, 'mbox_month', 'pgsql-hackers/2026-06', 'done'),
+                   (2, 'code_snapshot', 'postgres/a', 'done'),
+                   (3, 'code_snapshot', 'postgres/b', 'cancelled'),
+                   (NULL, 'code_snapshot', 'postgres/c', 'failed');
+               INSERT INTO threads (id, list, root_message_id) VALUES (1, 'pgsql-hackers', 'm@example.org');
+               INSERT INTO messages (id, message_id, list, thread_id, source_id)
+                   VALUES (1, 'm@example.org', 'pgsql-hackers', 1, 1);"#,
+        )
+        .await
+        .unwrap();
+    client
+        .batch_execute(include_str!(
+            "../../../migrations/0020_retire_version_sources.sql"
+        ))
+        .await
+        .unwrap();
+
+    let sources: Vec<(i64, String, String)> = client
+        .query("SELECT id, kind, name FROM sources ORDER BY id", &[])
         .await
         .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        sources,
+        [(1, "mailing_list".to_owned(), "pgsql-hackers".to_owned())]
+    );
+    let (snapshots, months): (i64, i64) = client
         .query_one(
-            "SELECT count(*) FROM jobs WHERE kind NOT IN ('mbox_month', 'seed_thread')",
+            "SELECT count(*) FILTER (WHERE kind = 'code_snapshot'),
+                    count(*) FILTER (WHERE kind = 'mbox_month' AND source_id = 1)
+             FROM jobs",
+            &[],
+        )
+        .await
+        .map(|row| (row.get(0), row.get(1)))
+        .unwrap();
+    assert_eq!((snapshots, months), (0, 1));
+    let source: Option<i64> = client
+        .query_one("SELECT source_id FROM messages WHERE id = 1", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(source, Some(1));
+    let refused = client
+        .execute(
+            "INSERT INTO sources (id, kind, name) VALUES (4, 'postgres_version', '18')",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION)
+    );
+    let comment: Option<String> = client
+        .query_one(
+            "SELECT obj_description('sources'::regclass, 'pg_class')",
             &[],
         )
         .await
         .unwrap()
         .get(0);
-    assert_eq!(jobs, 0, "nothing queued for the version");
+    assert!(comment.unwrap().contains("code_history"));
 }
 
 async fn graph_counts(client: &tokio_postgres::Client) -> (i64, i64) {
@@ -1252,20 +1293,14 @@ async fn open_sources_take_months_ranges_follows_and_commits() {
         .get(0);
     assert_eq!(refresh["refresh"], true);
 
-    // Any version comes from the commit history, which isn't installed here.
-    let sha = "0123456789abcdef0123456789abcdef01234567";
-    let code =
-        json!({ "kind": "postgres_version", "name": "18", "branch": "REL_18_STABLE", "sha": sha });
-    let error = sources::add_source(&indexer, args(code)).await.unwrap_err();
-    assert!(
-        format!("{error:#}").contains("no commit history installed"),
-        "{error:#}"
-    );
-    let bad = json!({ "kind": "postgres_version", "name": "REL_18_STABLE" });
-    let error = sources::add_source(&indexer, args(bad)).await.unwrap_err();
-    assert!(error.to_string().contains("major version"), "{error}");
     let listed = sources::list_sources(&indexer).await.unwrap();
     assert_eq!(listed["available"]["mode"], "open");
+    assert!(
+        listed["available"]["code"]
+            .as_str()
+            .unwrap()
+            .contains("no version to add")
+    );
     assert_eq!(listed["sources"].as_array().unwrap().len(), 1);
 
     let status = pghacker_indexer::status::ingest_status(&indexer)
@@ -1433,45 +1468,6 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     assert_eq!(again["commits"], 0);
     assert!(!graph::pending(&client).await.unwrap());
 
-    // add_source finds a version in the history, whatever the mode, and
-    // loads nothing.
-    let added = sources::add_source(
-        &indexer,
-        args(json!({ "kind": "postgres_version", "name": "master" })),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        (&added["covered"], &added["revision"], &added["jobs_queued"]),
-        (&json!(true), &json!("master"), &json!(0)),
-        "{added}"
-    );
-    let v1: String = client
-        .query_one(
-            "SELECT c.sha FROM code_refs r JOIN code_commits c ON c.addr = r.addr WHERE r.name = 'v1'",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    let tagged = sources::add_source(
-        &indexer,
-        args(json!({ "kind": "postgres_version", "name": "1", "branch": "v1" })),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        (&tagged["covered"], &tagged["sha"]),
-        (&json!(true), &json!(v1))
-    );
-    let missing = sources::add_source(
-        &indexer,
-        args(json!({ "kind": "postgres_version", "name": "1", "sha": "f".repeat(40) })),
-    )
-    .await
-    .unwrap();
-    assert_eq!(missing["covered"], false, "{missing}");
-
     let status = pghacker_indexer::status::ingest_status(&indexer)
         .await
         .unwrap();
@@ -1482,8 +1478,10 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
         (json!(1), json!(1))
     );
     assert!(history["synced_at"].is_string());
+    // list_sources reports the history, which isn't a source.
     let listed = sources::list_sources(&indexer).await.unwrap();
     assert_eq!(listed["history"], *history);
+    assert_eq!(listed["sources"], json!([]));
 }
 
 /// Erin's message from a month and Dave's from a thread page, each its
