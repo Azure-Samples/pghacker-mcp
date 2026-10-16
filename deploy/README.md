@@ -191,8 +191,35 @@ Startup applies the migrations a database lacks, and refuses one that changed af
 | `0016_retire_snapshots` | Drops the snapshots ([Commit history](#commit-history)) |
 | `0017_extraction_lease_versions` | The thread versions each extraction lease read |
 | `0018_feature_release_at` | When a feature's release was stated |
+| `0019_patch_series_text` | Patches' series versions as text, parsed again ([Patch series](#patch-series)) |
 
-Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)).
+Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)).
+
+### Patch series
+
+An image with migration `0019_patch_series_text` stores a patch's series version as text, as its file name or subject writes it, and takes parts from file names only ([reference](../docs/reference.md#patch-series)).
+- The migration replaces the `series_version` column, which only changes the catalog, and queues the one-time `patch_series` job.
+- The job parses every thread's patch names and subjects again, 500 threads a run, and updates the rows that change: about 90,000 in production, whose lines go into the `text_ids` index again. `ingest_status` shows its state; its `result` counts the threads, patches and changes.
+- Until it finishes, `search_patches` and `get_commit` show no version for the threads it hasn't reached.
+
+Images before `0019`, such as `aad595a` and `33616a4`, read the column as a number. While the old revision overlaps the new one during the upgrade, its `search_patches` and `get_commit` fail; its ingest still works. To roll back to one, as `pgh_indexer`, give it an empty number column, and stop the job, which it doesn't know:
+
+```sql
+ALTER TABLE pghacker.patches DROP COLUMN series_version;
+ALTER TABLE pghacker.patches ADD COLUMN series_version int;
+UPDATE pghacker.jobs SET state = 'cancelled'
+WHERE kind = 'patch_series' AND state IN ('queued', 'running');
+```
+
+It then shows versions only for the mail it stores. `0019` is recorded and doesn't run again: after rolling forward, put the text column back and queue the job:
+
+```sql
+ALTER TABLE pghacker.patches DROP COLUMN series_version;
+ALTER TABLE pghacker.patches ADD COLUMN series_version text;
+UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_after = now(),
+       last_error = NULL, result = NULL, finished_at = NULL
+WHERE kind = 'patch_series';
+```
 
 ### Email addresses
 
@@ -310,13 +337,14 @@ Check `tools/list` (First deployment, step 9) and run the evaluation.
 ### Rolling back to 33616a4
 
 `33616a4`, the previous production image, reads the history only and
-predates `0014`. After rolling back to it, as `pgh_indexer`, cancel the jobs
-of kinds it doesn't know, which would fail and retry, drop the graph changes
-of labels it doesn't know, and ask for a full sync:
+predates `0014`. Give it patches' number column first ([Patch series](#patch-series)).
+After rolling back to it, as `pgh_indexer`, cancel the jobs of kinds it
+doesn't know, which would fail and retry, drop the graph changes of labels it
+doesn't know, and ask for a full sync:
 
 ```sql
 UPDATE pghacker.jobs SET state = 'cancelled'
-WHERE kind IN ('duplicates', 'restore_addresses') AND state IN ('queued', 'running');
+WHERE kind IN ('duplicates', 'restore_addresses', 'patch_series') AND state IN ('queued', 'running');
 DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
 SELECT pghacker.graph_request_full('rolled back past 0014');
 ```

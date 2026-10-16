@@ -42,7 +42,7 @@ use crate::parse::{
     ParsedMessage, display_name, display_name_without_addresses, normalize_message_id, sanitize,
 };
 use crate::patch::{self, PatchFile};
-use crate::{chunk, clean, subject};
+use crate::{chunk, clean, series, subject};
 
 /// Where messages come from.
 #[derive(Clone, Debug)]
@@ -375,6 +375,7 @@ async fn restore(
         .into_iter()
         .map(|r| (r.get(0), r.get(1), r.get(2)))
         .collect();
+    let mut renamed = false;
     for (patch, (once_name, once_content)) in now.patches.iter().zip(&once.patches) {
         match patches
             .iter()
@@ -393,9 +394,14 @@ async fn restore(
                 )
                 .await?;
                 restoring.restored = true;
+                renamed |= *name != patch.filename;
             }
             _ => restoring.differs = true,
         }
+    }
+    // Names and the subject give the patches' series.
+    if !patches.is_empty() && (renamed || subject != stored_subject) {
+        series::refresh(tx, &[thread_id]).await?;
     }
 
     // The chunks follow the subject and the cleaned body; the embed job
@@ -569,7 +575,7 @@ async fn insert(
             &[
                 (&id, Type::INT8),
                 (&p.filename, Type::TEXT),
-                (&p.series_version, Type::INT4),
+                (&p.series_version, Type::TEXT),
                 (&p.part, Type::INT4),
                 (&p.paths, Type::TEXT_ARRAY),
                 (&p.added, Type::INT4),
@@ -622,6 +628,16 @@ async fn insert(
         &[(&thread_id, Type::INT8), (&msg.sent_at, Type::TIMESTAMPTZ)],
     )
     .await?;
+    // A name numbered like a version (`fix-3.patch`) is one if the thread's
+    // posts of it rise; this one may make it so for earlier posts. The
+    // thread's row, locked above, keeps concurrent posts in order.
+    if d.patches.iter().any(|p| {
+        series::name_series(&p.filename, msg.sent_at)
+            .sequence
+            .is_some()
+    }) {
+        series::refresh(tx, &[thread_id]).await?;
+    }
     Ok(Some(Stored {
         message_row_id: id,
         thread_id,
@@ -932,6 +948,8 @@ async fn merge_thread(tx: &Transaction<'_>, from: i64, into: i64) -> Result<bool
             tx.batch_execute("RELEASE SAVEPOINT pghacker_merge_thread")
                 .await?;
             tracing::info!(from, into, moved, "merged threads");
+            // Names numbered like versions may rise across the merged posts.
+            series::refresh(tx, &[into]).await?;
             Ok(true)
         }
         Err(error) if error.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) => {

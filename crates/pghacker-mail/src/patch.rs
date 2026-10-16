@@ -4,9 +4,8 @@
 //! Patches: attachments that are patches (`.patch` and `.diff` files, patch
 //! content types, and diffs under other names such as `.txt` or `.nocfbot`,
 //! gzip'd or in tar archives) and unified or context diffs pasted into the
-//! body. Each with its series version and part from names such as
-//! `v3-0001-foo.patch` (or the subject's `[PATCH v3 1/4]` for pasted diffs),
-//! the paths it touches, and its added and removed lines.
+//! body. Each with its series version and part ([`crate::series`]), the paths
+//! it touches, and its added and removed lines.
 
 use std::collections::HashSet;
 use std::io::Read;
@@ -16,15 +15,17 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::parse::{Attachment, ParsedMessage};
+use crate::series::{ThreadPatch, thread_series};
 
 /// A patch in a message.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PatchFile {
     /// The attachment's name, or `inline-<n>` for a diff in the body.
     pub filename: String,
-    /// 3 for `v3-0001-foo.patch`.
-    pub series_version: Option<i32>,
-    /// 1 for `v3-0001-foo.patch`.
+    /// The posted version it belongs to, as written: `3` for
+    /// `v3-0001-foo.patch` ([`crate::series`]).
+    pub series_version: Option<String>,
+    /// Its number in the set: 1 for `v3-0001-foo.patch`.
     pub part: Option<i32>,
     /// The files it touches, as paths in the tree, in order.
     pub paths: Vec<String>,
@@ -36,22 +37,14 @@ pub struct PatchFile {
 /// Decompressed attachments larger than this are skipped.
 const MAX_DECOMPRESSED: usize = 64 << 20;
 
-static VERSION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:^|[^a-z0-9])v(\d{1,9})[a-z]?(?:[-_.]|$)").unwrap());
-static PART: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|[^0-9])(0\d{3})-").unwrap());
-static SUBJECT_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\[PATCH(?:ES)?\b([^\]]*)\]").unwrap());
-static SUBJECT_VERSION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)v(\d{1,9})\b").unwrap());
-static SUBJECT_PART: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?:^|\s)(\d{1,4})/(\d{1,4})\b").unwrap());
 static HUNK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap());
 static CONTEXT_RANGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\*\*\*|---) \d+(?:,\d+)? (?:\*\*\*\*|----)\s*$").unwrap());
 
 /// The patches of a message: its patch attachments, then the diffs pasted
-/// into its body outside quotes.
+/// into its body outside quotes, each with the series its name and the
+/// message's subject give.
 pub fn extract(msg: &ParsedMessage) -> Vec<PatchFile> {
     let mut patches = Vec::new();
     for attachment in &msg.attachments {
@@ -62,7 +55,6 @@ pub fn extract(msg: &ParsedMessage) -> Vec<PatchFile> {
         .iter()
         .map(|line| if is_quoted(line) { ">" } else { line })
         .collect();
-    let (series_version, part) = subject_series(&msg.subject);
     let mut inline = 0;
     for block in diff_blocks(&masked) {
         let content = lines[block].join("\n") + "\n";
@@ -73,12 +65,11 @@ pub fn extract(msg: &ParsedMessage) -> Vec<PatchFile> {
         inline += 1;
         patches.push(PatchFile {
             filename: format!("inline-{inline}"),
-            series_version,
-            part,
             paths: stats.paths,
             added: stats.added,
             removed: stats.removed,
             content,
+            ..Default::default()
         });
     }
     let mut names = HashSet::new();
@@ -90,6 +81,19 @@ pub fn extract(msg: &ParsedMessage) -> Vec<PatchFile> {
             n += 1;
         }
         patch.filename = name;
+    }
+    let posted: Vec<ThreadPatch<'_>> = patches
+        .iter()
+        .map(|patch| ThreadPatch {
+            message: 0,
+            sent_at: msg.sent_at,
+            subject: &msg.subject,
+            filename: &patch.filename,
+        })
+        .collect();
+    let series = thread_series(&posted);
+    for (patch, series) in patches.iter_mut().zip(series) {
+        (patch.series_version, patch.part) = (series.version, series.part);
     }
     patches
 }
@@ -164,19 +168,17 @@ fn candidate(name: &str, content_type: &str, text: Option<String>) -> Option<Pat
         return None;
     }
     let stats = diff_stats(&text);
-    let (series_version, part) = series(name);
     Some(PatchFile {
         filename: if name.is_empty() {
             "attachment.patch".to_owned()
         } else {
             name.to_owned()
         },
-        series_version,
-        part,
         paths: stats.paths,
         added: stats.added,
         removed: stats.removed,
         content: text,
+        ..Default::default()
     })
 }
 
@@ -186,32 +188,6 @@ fn text_of(bytes: &[u8]) -> Option<String> {
         ..Default::default()
     }
     .text()
-}
-
-/// The series version and part of a patch file name.
-pub fn series(name: &str) -> (Option<i32>, Option<i32>) {
-    let version = VERSION
-        .captures(name)
-        .and_then(|caps| caps[1].parse::<i32>().ok());
-    let part = PART
-        .captures(name)
-        .and_then(|caps| caps[1].parse::<i32>().ok());
-    (version, part)
-}
-
-/// The series version and part of a subject's `[PATCH v3 2/7]` tag.
-pub fn subject_series(subject: &str) -> (Option<i32>, Option<i32>) {
-    let Some(tag) = SUBJECT_TAG.captures(subject) else {
-        return (None, None);
-    };
-    let inside = &tag[1];
-    let version = SUBJECT_VERSION
-        .captures(inside)
-        .and_then(|caps| caps[1].parse().ok());
-    let part = SUBJECT_PART
-        .captures(inside)
-        .and_then(|caps| caps[1].parse().ok());
-    (version, part)
 }
 
 /// Whether text contains a unified or context diff.

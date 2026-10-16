@@ -32,7 +32,7 @@ INSERT INTO messages (id, message_id, list, thread_id, parent_message_id, author
 INSERT INTO message_chunks (message_id, thread_id, ord, content)
 SELECT id, thread_id, 0, subject || E'\n' || body_clean FROM messages;
 INSERT INTO patches (message_id, filename, series_version, part, paths, added, removed, content) VALUES
-    (100, 'v1-0001-json-table-plan.patch', 1, 1, '{src/backend/parser/parse_jsontable.c}', 120, 4, 'diff');
+    (100, 'v1-0001-json-table-plan.patch', '1', 1, '{src/backend/parser/parse_jsontable.c}', 120, 4, 'diff');
 INSERT INTO anchors (message_id, kind, value, origin) VALUES
     (100, 'file', 'src/backend/parser/parse_jsontable.c', 'patch'), (100, 'release', '19', 'body');
 INSERT INTO features (id, slug, name, description, status, release) VALUES

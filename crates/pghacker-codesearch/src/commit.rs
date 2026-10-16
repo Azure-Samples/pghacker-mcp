@@ -80,8 +80,9 @@ pub struct CommittedPatch {
     pub date: String,
     pub author: String,
     pub filename: String,
+    /// The posted version it belongs to, as written: `49`, `3.1`, `20261003`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<i32>,
+    pub version: Option<String>,
     /// The share of the commit's distinct added lines the patch adds.
     pub share: f64,
 }

@@ -8,28 +8,6 @@ const MULTIPART: &[u8] = include_bytes!("../../tests/fixtures/multipart_patch.em
 const COMPRESSED: &[u8] = include_bytes!("../../tests/fixtures/compressed_patches.eml");
 
 #[test]
-fn series_come_from_file_names() {
-    assert_eq!(series("v3-0001-Fix-foo.patch"), (Some(3), Some(1)));
-    assert_eq!(series("0002-Fix-foo.patch"), (None, Some(2)));
-    assert_eq!(series("postgres_fdw-fix-v2.patch"), (Some(2), None));
-    assert_eq!(
-        series("v20260601-0007-View.patch"),
-        (Some(20260601), Some(7))
-    );
-    assert_eq!(series("v6a-0001-Add-CI.patch"), (Some(6), Some(1)));
-    assert_eq!(series("nocfbot-v47-0001-refactor.txt"), (Some(47), Some(1)));
-    assert_eq!(series("vXXX1-0001-Draft.cfbotignorepatch"), (None, Some(1)));
-    assert_eq!(series("fix.patch"), (None, None));
-    assert_eq!(series("report-2026-06-01.diff"), (None, None));
-    assert_eq!(
-        subject_series("Re: [PATCH v3 2/7] Fix foo"),
-        (Some(3), Some(2))
-    );
-    assert_eq!(subject_series("[PATCH] Fix foo"), (None, None));
-    assert_eq!(subject_series("Fix foo v3"), (None, None));
-}
-
-#[test]
 fn counts_unified_diffs_by_hunk() {
     let diff = "\
 diff --git a/src/backend/a.c b/src/backend/a.c
@@ -140,7 +118,10 @@ fn extracts_attached_patches() {
     assert_eq!(patches.len(), 2, "{patches:?}");
     let first = &patches[0];
     assert_eq!(first.filename, "v3-0001-Fix-the-frobnicator.patch");
-    assert_eq!((first.series_version, first.part), (Some(3), Some(1)));
+    assert_eq!(
+        (first.series_version.as_deref(), first.part),
+        (Some("3"), Some(1))
+    );
     assert_eq!(
         first.paths,
         ["src/backend/utils/adt/frob.c", "src/include/utils/frob.h"]
@@ -148,7 +129,10 @@ fn extracts_attached_patches() {
     assert_eq!((first.added, first.removed), (3, 1));
     assert!(first.content.starts_with("From 89abcdef"));
     let second = &patches[1];
-    assert_eq!((second.series_version, second.part), (Some(3), Some(2)));
+    assert_eq!(
+        (second.series_version.as_deref(), second.part),
+        (Some("3"), Some(2))
+    );
     assert_eq!(second.paths, ["src/test/regress/sql/frob.sql"]);
     assert_eq!((second.added, second.removed), (2, 0));
 }
@@ -172,8 +156,8 @@ fn extracts_compressed_and_misnamed_patches() {
         assert_eq!((patch.added, patch.removed), (1, 1));
     }
     assert_eq!(
-        (patches[1].series_version, patches[1].part),
-        (Some(5), Some(1))
+        (patches[1].series_version.as_deref(), patches[1].part),
+        (Some("5"), Some(1))
     );
 }
 
@@ -232,9 +216,11 @@ fn extracts_inline_diffs_outside_quotes() {
     assert_eq!(patches.len(), 2);
     assert_eq!(patches[0].filename, "inline-1");
     assert_eq!(patches[0].paths, ["src/a.c"]);
+    // A reply's diff isn't the version its subject names, and a part comes
+    // from file names only.
     assert_eq!(
-        (patches[0].series_version, patches[0].part),
-        (Some(7), Some(3))
+        (patches[0].series_version.as_deref(), patches[0].part),
+        (None, None)
     );
     assert_eq!(patches[0].content, SMALL_DIFF);
     assert_eq!(patches[1].filename, "inline-2");

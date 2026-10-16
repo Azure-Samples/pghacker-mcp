@@ -109,6 +109,21 @@ Text keeps the email addresses written in it: subjects, bodies, patches and send
 
 Mail stored before ingest kept addresses has `[email]` in their place. With the indexer running, `cargo run --release -p pghacker-indexer -- restore-addresses` (with `.env`'s settings in the environment), or `SELECT * FROM pghacker.restore_addresses()` as `pgh_indexer`, queues jobs that read that mail from the archive again. They restore only text still as ingest stored it, and embed changed chunks again; `ingest_status` shows them.
 
+## Patch series
+
+A patch's series version is the label it was posted under, as its file name or its message's subject writes it, without the `v`: `3`, `3.1`, `6a`, `01`, `20261003`, `12-pg13`. Its part is its number in the set, from the file name only: 1 for `v3-0001-…`. `search_patches` and `get_commit` show the version; `query` reads both in `patches`.
+
+The rules (`crates/pghacker-mail/src/series.rs`) keep only the forms names use reliably and leave the rest out:
+
+- a label before a part number (`v3-0001-…`, `v20220130-2-0001-…`, `vpg18-0001-…`);
+- a version first, last or inside a name someone wrote (`fix-v3`, `fix_v3.1`, `brin-inclusion-v05-…`);
+- a date (`fix-20251114`);
+- a `0.x` decimal;
+- a bare number where the thread's posts of that name rise with it (`psql-dp-3` … `psql-dp-5`);
+- else the subject's `[PATCH v3]` tag, unless the message is a reply.
+
+A release current when the patch was posted (`v9.6` in 2016) isn't a version, nor is `vN` glued to a word (`uuidv7`). `cargo run -p pghacker-mail --example patch_series -- <export.jsonl>` reports how every patch of an export parses, by rule. The one-time `patch_series` job parses every stored patch again ([upgrading](../deploy/README.md#patch-series)).
+
 ## Commit history
 
 The commit history stores every line of every commit of every branch once, and is the code tools' only source; the [search design](search-design.md) describes it. The [README](../README.md#load-the-data) builds it. The `history` commands run as the administrator (`DATABASE_URL` in the environment):

@@ -1421,7 +1421,7 @@ async fn search_patches_finds_lines_by_thread() {
     let insert_patch = |id: i64, message: i64, content: &str, path: &str| {
         format!(
             "INSERT INTO pghacker.patches (id, message_id, filename, series_version, paths, content) \
-             VALUES ({id}, {message}, 'v{id}-0001-x.patch', {id}, ARRAY['{path}'], $${content}$$);"
+             VALUES ({id}, {message}, 'v{id}-0001-x.patch', '{id}', ARRAY['{path}'], $${content}$$);"
         )
     };
     admin
@@ -1635,8 +1635,10 @@ async fn search_patches_finds_lines_by_thread() {
         (
             committed.message_id.as_str(),
             committed.thread_id,
+            committed.filename.as_str(),
+            committed.version.as_deref(),
             committed.share
         ),
-        ("v2@example.org", 1, 1.0)
+        ("v2@example.org", 1, "v2-0001-x.patch", Some("2"), 1.0)
     );
 }

@@ -1701,3 +1701,98 @@ async fn names_stay_counted_through_a_restore_then_a_merge() {
     assert_eq!(miscounted_names(&client).await, 0);
     assert_restored(&client).await;
 }
+
+#[tokio::test]
+async fn migrating_to_text_versions_parses_every_patch_again() {
+    use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let client = db.indexer().await.unwrap();
+    client
+        .batch_execute(
+            "INSERT INTO threads (id, list, root_message_id, subject) VALUES
+                 (1, 'pgsql-hackers', 'a@x', 'A'), (2, 'pgsql-hackers', 'c@x', 'B');
+             INSERT INTO messages (id, message_id, list, thread_id, subject, sent_at, has_patch, from_name) VALUES
+                 (10, 'a@x', 'pgsql-hackers', 1, 'Fix', '2025-01-01', true, 'A'),
+                 (11, 'b@x', 'pgsql-hackers', 1, 'Re: Fix', '2025-02-01', true, 'A'),
+                 (20, 'c@x', 'pgsql-hackers', 2, '[PATCH v4] Avoid shifts', '2025-03-01', true, 'B');
+             INSERT INTO patches (message_id, filename, series_version, part, content) VALUES
+                 (10, 'psql-dp-3.patch', NULL, NULL, 'x'),
+                 (11, 'psql-dp-4.patch', NULL, NULL, 'x'),
+                 (11, 'v20261003-0002-Fix.patch', '20261003', 2, 'x'),
+                 (20, 'inline-1', NULL, 3, 'x');",
+        )
+        .await
+        .unwrap();
+    // As an upgrade does: the column is replaced, and the job queued. Run in
+    // batches of one thread, it starts each run where the last one stopped.
+    client
+        .batch_execute(include_str!(
+            "../../../migrations/0019_patch_series_text.sql"
+        ))
+        .await
+        .unwrap();
+    client
+        .execute(
+            "UPDATE jobs SET payload = '{\"batch\": 1}' WHERE kind = 'patch_series'",
+            &[],
+        )
+        .await
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let workers = tokio::spawn(jobs::run(indexer.clone(), 2, shutdown.clone()));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let result: Value = loop {
+        let row = client
+            .query_one(
+                "SELECT state, result FROM jobs WHERE kind = 'patch_series' AND key = 'reparse'",
+                &[],
+            )
+            .await
+            .unwrap();
+        let state: String = row.get(0);
+        assert_ne!(state, "failed");
+        if state == "done" {
+            break row.get(1);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the patch_series job didn't finish"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(30), workers)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (&result["threads"], &result["patches"], &result["changed"]),
+        (&json!(2), &json!(4), &json!(4))
+    );
+    let series: Vec<(String, Option<String>, Option<i32>)> = client
+        .query(
+            "SELECT filename, series_version, part FROM patches ORDER BY filename",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    assert_eq!(
+        series,
+        [
+            ("inline-1".to_owned(), Some("4".to_owned()), None),
+            ("psql-dp-3.patch".to_owned(), Some("3".to_owned()), None),
+            ("psql-dp-4.patch".to_owned(), Some("4".to_owned()), None),
+            (
+                "v20261003-0002-Fix.patch".to_owned(),
+                Some("20261003".to_owned()),
+                Some(2)
+            ),
+        ]
+    );
+}

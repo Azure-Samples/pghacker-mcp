@@ -153,7 +153,6 @@ fn ignores_patch_versions_and_other_numbers() {
 fn a_message_s_own_patch_versions_are_not_releases() {
     let patch = PatchFile {
         filename: "v18-0001-Fix.patch".into(),
-        series_version: Some(18),
         paths: vec!["src/backend/a.c".into(), "lib/other.c".into()],
         ..Default::default()
     };

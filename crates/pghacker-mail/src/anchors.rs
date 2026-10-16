@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use chrono::{DateTime, Datelike, Utc};
 use regex::Regex;
 
-use crate::patch::{PatchFile, is_tree_path, subject_series};
+use crate::patch::{PatchFile, is_tree_path};
 
 /// A mention.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +121,15 @@ static V_BEFORE_PATCH: LazyLock<Regex> = LazyLock::new(|| {
 });
 static PATCH_NAME_VERSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[^a-z0-9])v(\d{1,3})[a-z]?-\d{4}").unwrap());
+/// Any `vNN` in a patch's name, and in a subject's `[PATCH vNN]`: broader
+/// than the series a patch is stored with, to keep a message's own patch
+/// versions from reading as releases.
+static FILE_VERSION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[^a-z0-9])v(\d{1,9})[a-z]?(?:[-_.]|$)").unwrap());
+static SUBJECT_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\[PATCH(?:ES)?\b([^\]]*)\]").unwrap());
+static SUBJECT_VERSION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|\s)v(\d{1,9})\b").unwrap());
 /// "In v13, I added ...": a sentence that starts with "In vNN," describes a
 /// patch version.
 static V_SENTENCE_IN: LazyLock<Regex> =
@@ -280,12 +289,20 @@ pub fn commitfest_entries(text: &str) -> Vec<String> {
     out
 }
 
-/// The patch versions a message itself shows: its patches' series, `vNN-0001`
-/// names and the subject's `[PATCH vNN]`. A bare `vNN` among them is a patch
-/// version, not a release.
+/// The patch versions a message itself shows: any `vNN` in its patches'
+/// names, `vNN-0001` names in its body and the subject's `[PATCH vNN]`. A
+/// bare `vNN` among them is a patch version, not a release.
 fn patch_versions(subject: &str, body: &str, patches: &[PatchFile]) -> BTreeSet<i32> {
-    let mut versions: BTreeSet<i32> = patches.iter().filter_map(|p| p.series_version).collect();
-    versions.extend(subject_series(subject).0);
+    let number = |re: &Regex, text: &str| -> Option<i32> {
+        re.captures(text).and_then(|caps| caps[1].parse().ok())
+    };
+    let mut versions: BTreeSet<i32> = patches
+        .iter()
+        .filter_map(|p| number(&FILE_VERSION, &p.filename))
+        .collect();
+    if let Some(tag) = SUBJECT_TAG.captures(subject) {
+        versions.extend(number(&SUBJECT_VERSION, &tag[1]));
+    }
     for caps in PATCH_NAME_VERSION.captures_iter(body) {
         if let Ok(version) = caps[1].parse() {
             versions.insert(version);

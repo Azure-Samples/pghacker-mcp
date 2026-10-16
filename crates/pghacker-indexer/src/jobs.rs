@@ -29,6 +29,9 @@ pub mod kind {
     /// Gives mail stored before ingest kept email addresses its addresses
     /// back: a month, or messages from thread pages ([`crate::addresses`]).
     pub const RESTORE_ADDRESSES: &str = "restore_addresses";
+    /// Parses every patch's series version and part again, a batch of
+    /// threads at a time; queued once by migration 0019.
+    pub const PATCH_SERIES: &str = "patch_series";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -54,6 +57,9 @@ const DUPLICATES_BUDGET: Duration = Duration::from_secs(10);
 
 /// Patches a patch_lines run indexes.
 const PATCH_LINES_BATCH: i64 = 200;
+/// How many threads a patch_series job parses the patches of per run,
+/// unless its payload's `batch` says.
+const PATCH_SERIES_THREADS: i64 = 500;
 
 /// Attempts of an ingest job whose messages partly failed (a deadlock with a
 /// concurrent ingest, say) before it settles for what it stored.
@@ -415,6 +421,43 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             Ok(Outcome::Again {
                 after,
                 result: serde_json::to_value(report)?,
+            })
+        }
+        kind::PATCH_SERIES => {
+            let client = indexer.pool.get().await?;
+            let after = job
+                .payload
+                .get("after_thread")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let limit = job
+                .payload
+                .get("batch")
+                .and_then(Value::as_i64)
+                .unwrap_or(PATCH_SERIES_THREADS);
+            let batch = pghacker_mail::series::reparse(&**client, after, limit).await?;
+            let total =
+                |name: &str, n: u64| job.payload.get(name).and_then(Value::as_u64).unwrap_or(0) + n;
+            let progress = json!({
+                "batch": limit,
+                "after_thread": batch.last_thread.unwrap_or(after),
+                "threads": total("threads", batch.refreshed.threads),
+                "patches": total("patches", batch.refreshed.patches),
+                "changed": total("changed", batch.refreshed.changed),
+            });
+            if !batch.more {
+                return Ok(Outcome::Done(progress));
+            }
+            // The next run starts after the last thread done.
+            client
+                .execute(
+                    "UPDATE jobs SET payload = $2 WHERE id = $1",
+                    &[&job.id, &progress],
+                )
+                .await?;
+            Ok(Outcome::Again {
+                after: Duration::ZERO,
+                result: progress,
             })
         }
         other => Err(anyhow!("unknown job kind {other}")),
