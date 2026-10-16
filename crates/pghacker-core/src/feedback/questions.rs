@@ -76,8 +76,10 @@ struct Client {
 #[derive(Default)]
 pub(super) struct Questions {
     clients: HashMap<Key, Client>,
-    /// When full of clients none of which is idle: when the first could be,
-    /// before which looking for one is no use (unix milliseconds).
+    /// Set when the table is full and a search for idle clients to forget
+    /// found none: the earliest time (unix milliseconds) that any of them
+    /// could become idle. Until then, a new client isn't followed, and the
+    /// table isn't searched again.
     next_sweep: u64,
 }
 
@@ -172,9 +174,11 @@ impl Questions {
         }
     }
 
-    /// Whether `key` is or can be followed at `now`, forgetting clients idle
-    /// for `session_gap` if there's no room. When none is, it doesn't look
-    /// again until one could be, so a newcomer's call doesn't search them all.
+    /// Whether `key` is or can be followed at `now`. When the table is full,
+    /// it forgets the clients idle for `session_gap` to make room. If none
+    /// is idle, it refuses new clients without searching again until one
+    /// could be (`next_sweep`), so that a flood of new clients doesn't make
+    /// every call search the whole table.
     fn room(&mut self, key: &Key, now: u64, session_gap: u64) -> bool {
         if self.clients.len() < MAX_CLIENTS || self.clients.contains_key(key) {
             return true;
