@@ -4,10 +4,16 @@
 /*
  * How to add the MCP server to each agent: the first thing to do, a command
  * to run when there is one, and a configuration file, which the page shows
- * collapsed. Each follows the client's documentation: VS Code's MCP: Add
- * Server and .vscode/mcp.json, Copilot CLI's `copilot mcp add` and
- * ~/.copilot/mcp-config.json, `claude mcp add` and .mcp.json, Cursor's
- * mcp.json, and `codex mcp add --url` and ~/.codex/config.toml.
+ * collapsed. Each follows the client's documentation: `claude mcp add` and
+ * .mcp.json, VS Code's MCP: Add Server and .vscode/mcp.json, `codex mcp add
+ * --url` and ~/.codex/config.toml, Cursor's mcp.json, Copilot CLI's
+ * `copilot mcp add` and ~/.copilot/mcp-config.json, and the GitHub Copilot
+ * app's Customize > MCP, which also loads Copilot CLI's servers.
+ *
+ * The agents come in order of use, by the Stack Overflow Developer Survey
+ * 2026's AI coding agents: Claude Code 66%, GitHub Copilot 59%, OpenAI Codex
+ * 30%, Cursor 26%. GitHub Copilot is VS Code first, then its CLI and app,
+ * which the survey counts with it.
  */
 
 /** The name each agent knows the server by. */
@@ -35,7 +41,26 @@ export interface Client {
 
 const json = (value: unknown): string => JSON.stringify(value, null, 2);
 
+/** Copilot CLI's configuration, which the GitHub Copilot app loads too. */
+const copilotConfig: ClientConfig = {
+  file: "~/.copilot/mcp-config.json",
+  language: "json",
+  text: (url) => json({ mcpServers: { [SERVER_NAME]: { type: "http", url, tools: ["*"] } } }),
+};
+
 export const CLIENTS: readonly Client[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    action: "Run in a terminal:",
+    command: (url) => `claude mcp add --transport http ${SERVER_NAME} ${url}`,
+    config: {
+      file: ".mcp.json",
+      prefix: "Or add it to a project's",
+      language: "json",
+      text: (url) => json({ mcpServers: { [SERVER_NAME]: { type: "http", url } } }),
+    },
+  },
   {
     id: "vscode",
     label: "VS Code",
@@ -47,26 +72,14 @@ export const CLIENTS: readonly Client[] = [
     },
   },
   {
-    id: "copilot-cli",
-    label: "Copilot CLI",
-    action: "Run in a terminal, or use /mcp add in the CLI:",
-    command: (url) => `copilot mcp add --transport http ${SERVER_NAME} ${url}`,
-    config: {
-      file: "~/.copilot/mcp-config.json",
-      language: "json",
-      text: (url) => json({ mcpServers: { [SERVER_NAME]: { type: "http", url, tools: ["*"] } } }),
-    },
-  },
-  {
-    id: "claude-code",
-    label: "Claude Code",
+    id: "codex",
+    label: "Codex",
     action: "Run in a terminal:",
-    command: (url) => `claude mcp add --transport http ${SERVER_NAME} ${url}`,
+    command: (url) => `codex mcp add ${SERVER_NAME} --url ${url}`,
     config: {
-      file: ".mcp.json",
-      prefix: "Or add it to a project's",
-      language: "json",
-      text: (url) => json({ mcpServers: { [SERVER_NAME]: { type: "http", url } } }),
+      file: "~/.codex/config.toml",
+      language: "toml",
+      text: (url) => `[mcp_servers.${SERVER_NAME}]\nurl = ${JSON.stringify(url)}`,
     },
   },
   {
@@ -81,15 +94,17 @@ export const CLIENTS: readonly Client[] = [
     },
   },
   {
-    id: "codex",
-    label: "Codex",
-    action: "Run in a terminal:",
-    command: (url) => `codex mcp add ${SERVER_NAME} --url ${url}`,
-    config: {
-      file: "~/.codex/config.toml",
-      language: "toml",
-      text: (url) => `[mcp_servers.${SERVER_NAME}]\nurl = ${JSON.stringify(url)}`,
-    },
+    id: "copilot-cli",
+    label: "Copilot CLI",
+    action: "Run in a terminal, or use /mcp add in the CLI:",
+    command: (url) => `copilot mcp add --transport http ${SERVER_NAME} ${url}`,
+    config: copilotConfig,
+  },
+  {
+    id: "copilot-app",
+    label: "Copilot app",
+    action: "In the GitHub Copilot app, click Customize in the sidebar, then MCP, and add a custom server with this URL.",
+    config: copilotConfig,
   },
   {
     id: "other",

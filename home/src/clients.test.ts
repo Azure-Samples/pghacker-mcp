@@ -12,8 +12,11 @@ const byId = (id: string) => {
   return client;
 };
 
-test("each agent has its own tab, and Other has nothing to paste", () => {
-  assert.deepEqual(CLIENTS.map((client) => client.id), ["vscode", "copilot-cli", "claude-code", "cursor", "codex", "other"]);
+test("each agent has its own tab, most used first, and Other has nothing to paste", () => {
+  assert.deepEqual(
+    CLIENTS.map((client) => client.id),
+    ["claude-code", "vscode", "codex", "cursor", "copilot-cli", "copilot-app", "other"],
+  );
   assert.equal(new Set(CLIENTS.map((client) => client.label)).size, CLIENTS.length);
   for (const client of CLIENTS) assert.ok(client.action.length > 0, client.id);
   const other = byId("other");
@@ -25,6 +28,7 @@ test("the JSON configurations are each client's shape, for the page's URL", () =
   const parse = (id: string) => JSON.parse(byId(id).config?.text(URL) ?? "null");
   assert.deepEqual(parse("vscode"), { servers: { [SERVER_NAME]: { type: "http", url: URL } } });
   assert.deepEqual(parse("copilot-cli"), { mcpServers: { [SERVER_NAME]: { type: "http", url: URL, tools: ["*"] } } });
+  assert.deepEqual(parse("copilot-app"), parse("copilot-cli"));
   assert.deepEqual(parse("claude-code"), { mcpServers: { [SERVER_NAME]: { type: "http", url: URL } } });
   assert.deepEqual(parse("cursor"), { mcpServers: { [SERVER_NAME]: { url: URL } } });
 });
@@ -46,4 +50,12 @@ test("every configuration file sits behind a disclosure that names it", () => {
     assert.ok(configPrefix(client.config).length > 0, client.id);
   }
   assert.equal(configPrefix({ file: "x", language: "json", text: () => "" }), "Or add it to");
+});
+
+test("the GitHub Copilot app adds the server in its UI, or from Copilot CLI's file, which it loads", () => {
+  const app = byId("copilot-app");
+  assert.equal(app.command, undefined);
+  assert.match(app.action, /Customize.*MCP/);
+  assert.equal(app.config?.file, "~/.copilot/mcp-config.json");
+  assert.equal(app.config?.file, byId("copilot-cli").config?.file);
 });
