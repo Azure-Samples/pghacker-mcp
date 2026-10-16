@@ -17,6 +17,7 @@ pub mod history;
 pub mod jobs;
 pub mod lanes;
 pub mod repair;
+pub mod rethread;
 pub mod settings;
 pub mod slices;
 pub mod sources;

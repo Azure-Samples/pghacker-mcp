@@ -200,8 +200,9 @@ Startup applies the migrations a database lacks, in name order and each in its o
 | `0019_patch_series_text` | Patches' series versions as text, parsed again ([Patch series](#patch-series)) |
 | `0020_retire_version_sources` | Deletes the PostgreSQL versions the snapshot loader left in `sources`, and its jobs ([Commit history](#commit-history)) |
 | `0021_shipped_releases` | Features' releases by the names they shipped as ([Shipped release names](#shipped-release-names)) |
+| `0022_rethread_mail` | `rethread_mail()` ([Threads](#threads)) |
 
-Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)).
+Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)).
 
 ### Patch series
 
@@ -262,6 +263,20 @@ SELECT * FROM pghacker.restore_addresses();
 - It queues a `restore_addresses` job per stored month, which downloads the month again, and one per 200 messages from thread pages, which are fetched one by one at the archive's rate (2 requests a second). `ingest_status` shows the jobs.
 - They change only text stored exactly as ingest once made it of the archive's, and count the rest as `differs`. Changed chunks are embedded again through Foundry, changed patches are indexed again by the `patch_lines` job, and the graph follows.
 - Running it again restores whatever is left; a job that's queued or running is left as it is.
+
+### Threads
+
+An image with migration `0022_rethread_mail` leaves senders' addresses and placeholders out of the IDs that thread mail, and gives a reply on a topic of its own a thread of its own ([threading](../docs/reference.md#threading)). Mail stored before it stays as it was threaded, glued together in places, until the `rethread_mail` job threads it again. The dry run, the apply and the extraction of the threads that change are separate approvals. As `pgh_indexer` from the operator environment:
+
+1. `SELECT pghacker.rethread_mail();` queues a dry run, which changes nothing. It downloads again the months whose stored IDs name a sender or a placeholder, plans, and records its report as the job's result: `SELECT jsonb_pretty(result) FROM pghacker.jobs WHERE kind = 'rethread_mail' AND key = 'dry-run';`. Review its summary and groups: for each, the threads it ends up with, the corrected IDs, and where extracts go.
+2. `SELECT pghacker.rethread_mail('<plan>');`, with the report's `plan`, applies the groups that are still as the dry run found them, each in a transaction. A group whose threads or extracts changed since, or that an extraction lease holds, is skipped with its reason: run a dry run again and review what's left. The graph follows, and commits' `DISCUSSED_IN` links are refreshed.
+3. The apply's `extract` lists the threads to extract again. The backfill leases those newer than its head soon; lease the older ones by `thread_ids`.
+
+A job that's queued or running is left as it is. To roll back to an image before `0022`, cancel its jobs first:
+
+```sql
+UPDATE pghacker.jobs SET state = 'cancelled' WHERE kind = 'rethread_mail' AND state IN ('queued', 'running');
+```
 
 ### Graph index preparation
 
@@ -374,7 +389,7 @@ doesn't know, and ask for a full sync:
 
 ```sql
 UPDATE pghacker.jobs SET state = 'cancelled'
-WHERE kind IN ('duplicates', 'restore_addresses', 'patch_series') AND state IN ('queued', 'running');
+WHERE kind IN ('duplicates', 'restore_addresses', 'patch_series', 'rethread_mail') AND state IN ('queued', 'running');
 DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
 SELECT pghacker.graph_request_full('rolled back past 0014');
 ```

@@ -26,6 +26,7 @@ pub mod mbox;
 pub mod parse;
 pub mod patch;
 pub mod patch_lines;
+pub mod rethread;
 pub mod series;
 pub mod store;
 pub mod subject;

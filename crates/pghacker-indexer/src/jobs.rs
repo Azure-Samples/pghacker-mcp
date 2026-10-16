@@ -33,6 +33,9 @@ pub mod kind {
     /// threads at a time: queued once by migration 0019 (key `reparse`), and
     /// by [`super::queue_series_rules`] once per version of the rules.
     pub const PATCH_SERIES: &str = "patch_series";
+    /// Threads stored mail again: a dry run, or the apply of its plan
+    /// ([`crate::rethread`]); queued by `rethread_mail()` (migration 0022).
+    pub const RETHREAD_MAIL: &str = "rethread_mail";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -477,6 +480,7 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
                 result: progress,
             })
         }
+        kind::RETHREAD_MAIL => Ok(Outcome::Done(crate::rethread::run(indexer, job).await?)),
         other => Err(anyhow!("unknown job kind {other}")),
     }
 }

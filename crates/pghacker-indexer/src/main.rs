@@ -3,8 +3,9 @@
 
 //! pghacker-indexer's command line: `bootstrap` (as the database's
 //! administrator), `serve` (workers and the MCP server), `status`,
-//! `graph-reconcile`, `restore-addresses`, the local-only `reset`, and
-//! `history` (building, syncing and checking the commit history).
+//! `graph-reconcile`, `restore-addresses`, `rethread-mail`, the local-only
+//! `reset`, and `history` (building, syncing and checking the commit
+//! history).
 
 use std::path::PathBuf;
 
@@ -16,7 +17,7 @@ use pghacker_core::config::Env;
 use pghacker_core::mcp::{McpServer, router, serve, shutdown_signal};
 use pghacker_core::{db, migrate, telemetry};
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, addresses, graph, jobs, status, tools};
+use pghacker_indexer::{Indexer, addresses, graph, jobs, rethread, status, tools};
 
 #[derive(Parser)]
 #[command(name = "pghacker-indexer", version, about)]
@@ -42,6 +43,14 @@ enum Command {
     /// its addresses back, retrieving it from the archive again: every
     /// stored month, and the messages from thread pages.
     RestoreAddresses,
+    /// Queues threading stored mail again (`rethread_mail()`): a dry run,
+    /// whose report the job records, or with --apply, the apply of the plan
+    /// it reported. The indexer's jobs run it.
+    RethreadMail {
+        /// The plan's ID from the dry run's report.
+        #[arg(long)]
+        apply: Option<String>,
+    },
     /// Drops schema pghacker and the graph, then bootstraps again. Local only.
     Reset {
         #[arg(long)]
@@ -159,6 +168,12 @@ async fn main() -> Result<()> {
                  the indexer's jobs restore them (ingest_status shows the jobs).",
                 queued.months, queued.batches, queued.messages
             );
+            Ok(())
+        }
+        Command::RethreadMail { apply } => {
+            let settings = Settings::from_env(&env)?;
+            let client = db::connect(&settings.database_url, "pghacker-indexer").await?;
+            println!("{}", rethread::queue(&client, apply.as_deref()).await?);
             Ok(())
         }
         Command::Reset { yes } => {
