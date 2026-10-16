@@ -34,7 +34,7 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 | Archive | `PGHACKER_ARCHIVE_BASE_URL` (`https://www.postgresql.org`), `PGHACKER_ARCHIVE_USER` and `PGHACKER_ARCHIVE_PASSWORD` (the published `archives` and `antispam`); `PGHACKER_HTTP_RATE` (2 requests a second), `PGHACKER_HTTP_USER_AGENT`; `PGHACKER_CACHE_DIR` (`.runtime/cache`), `PGHACKER_GIT_DIR` (`.runtime/git`), `PGHACKER_KEEP_DOWNLOADS` (true) |
 | Logs | `RUST_LOG`: the launchers set `info,tokio_postgres=warn,rmcp=warn` |
 | Usage telemetry | pghacker-mcp's `PGHACKER_USAGE_ENDPOINT`, the ingestion endpoint's origin (unset, no [telemetry](../PRIVACY.md); `npm start` never sets it); `PGHACKER_USAGE_IKEY`, the Application Insights resource's instrumentation key; `PGHACKER_USAGE_ID_KEY`, the key of the users' keyed hashes, at least 32 characters; `CONTAINER_APP_REVISION`, the instance |
-| Feedback | `PGHACKER_FEEDBACK_RATE`, the chance from 0 (off, the default) to 1 that a client's hour of use brings a request for [feedback](#feedback), with usage telemetry only; `PGHACKER_FEEDBACK_COMMENTS` (false), whether its form takes a comment |
+| Feedback | `PGHACKER_FEEDBACK_RATE`, the chance from 0 (off, the default) to 1 that an address's hour of use brings a request for [feedback](#feedback), with usage telemetry only; `PGHACKER_FEEDBACK_COMMENTS` (false), whether its form takes a comment; `PGHACKER_FEEDBACK_QUESTION_GAP` (180 seconds) and `PGHACKER_FEEDBACK_SESSION_GAP` (600), the pauses over which a call starts a question and under which a session stays active; `PGHACKER_FEEDBACK_MIN_QUESTIONS` (5), the questions before the first ask; `PGHACKER_FEEDBACK_CLIENTS`, the apps asked, by `clientInfo` name, separated by commas |
 
 `npm run crawl` reads `PGHACKER_CRAWL_MODEL` (`github-copilot:gpt-6-luna`), `PGHACKER_CRAWL_PER_SESSION` (8 threads) and, with `--watch`, `PGHACKER_CRAWL_START_SESSIONS` (else `--concurrency`) and `PGHACKER_CRAWL_MAX_SESSIONS` (16). Tests and local tools read the `.env` of the repository root, or of `PGHACKER_ROOT`.
 
@@ -136,12 +136,75 @@ Few clients load skills from MCP servers yet; the extension's [client matrix](ht
 
 ## Feedback
 
-Now and then, pghacker-mcp asks whether an answer helped, through the client's own prompt ([PRIVACY.md](../PRIVACY.md)). For each client (the usage identity) and UTC clock hour, a keyed draw arms the hour with the chance `PGHACKER_FEEDBACK_RATE` (Terraform's `feedback_rate_per_hour`, 0.1). In an armed hour, the first successful result of any tool gets a second text block, for the model, with a `feedback_id`: a random value sealed with the client's identity, valid for 6 hours. The server's instructions and the `user_feedback` tool's description ask the model, once it has written its answer and only if a person is reading, to call `user_feedback` with the id. That call answers `input_required` (MCP 2026-07-28's multi round-trip requests) with an `elicitation/create` form: helpful, not helpful or Skip, the default. The client asks the user and calls again with the answer, which is recorded; the model never passes a rating.
+Now and then, pghacker-mcp asks an interactive client's user whether the last answer helped, through the client's own form ([PRIVACY.md](../PRIVACY.md)). The model takes no part: the tools, the instructions and the results don't change.
 
-- **Who is asked:** only a client whose request declares form elicitation under the 2026-07-28 protocol, at most once an hour, and not for up to a day after declining. Never a request without a client identity (the internal listener), on an earlier protocol, or to a URL with `?feedback=off`, which also keeps `user_feedback` from recording anything. `PGHACKER_AGENT_MCP_URL` gets `feedback=off`.
-- **Events:** `McpFeedbackOffered`, with the same operation as the answer's `McpToolCall`, and `McpFeedback` (`outcome`: `rated`, `declined` or `dismissed`; `rating`: `up` or `down`) share a `feedbackId`. `McpFeedbackRejected` records an id that isn't the client's or has expired, or a limit, once a minute per client. `user_feedback`'s first call is an `McpToolCall` with `activityStatus` `InputRequired`.
-- **Limits:** 3 outcomes per client an hour, 60 a minute per replica; with comments on, 500 characters. What keeps the asks rare lives in memory, so a restart forgets it; the draw doesn't change.
-- **Off:** `PGHACKER_FEEDBACK_RATE=0`, or no usage telemetry: the tool isn't listed and no result has a note.
+- **Questions:** the server follows each client, an address (the usage identity) and an app (`clientInfo.name`), by the pauses between its tool calls. A call that comes more than `PGHACKER_FEEDBACK_QUESTION_GAP` (180 s) after the client's last call ended starts a new question; while a call runs, the next belongs to the same question. A pause under `PGHACKER_FEEDBACK_SESSION_GAP` (600 s) keeps the session active.
+- **The ask:** the server may hold a call that starts a question in an active session, when the client has asked `PGHACKER_FEEDBACK_MIN_QUESTIONS` (5) questions before it and the last one had a successful call. Instead of running it, it answers `input_required` (MCP 2026-07-28's multi round-trip requests) with an `elicitation/create` form, "pghacker-mcp asks: was the last answer that used it helpful?", whose required rating has no default: 👍 Helpful, 👎 Not helpful or Skip.
+  - For each address and UTC clock hour, a keyed draw arms the hour with the chance `PGHACKER_FEEDBACK_RATE` (Terraform's `feedback_rate_per_hour`, 0.1). An armed hour has at most one ask, at its first such question.
+  - The form's `requestState` is a random ask id sealed with the address and the tool, valid for 6 hours.
+  - The client asks the user and retries the call with the answer and the state. The server records the answer, then runs the call whatever it is: a rating, a Skip, a decline, a cancel, or a state that isn't valid.
+- **Who is asked:** only the apps in `PGHACKER_FEEDBACK_CLIENTS` whose requests declare form elicitation under 2026-07-28.
+  - The default list is `copilot-cli` (Copilot CLI and the GitHub Copilot app), `codex-mcp-client`, `Visual Studio Code`, `Visual Studio Code - Insiders`, `claude-code`, `claude-ai` (the Claude app) and `cursor-vscode`, matched ignoring case. A blank setting means this list.
+  - Never a request without a client identity (the internal listener), on an earlier protocol, or to a URL with `?feedback=off`, and such requests aren't followed either. `PGHACKER_AGENT_MCP_URL` gets `feedback=off`.
+  - A decline pauses asks at the address for a day.
+- **Events:**
+  - The held call is an `McpToolCall` with `activityStatus` `InputRequired`. With it, in the same operation, comes `McpFeedbackAsked`:
+    - properties `askId`, `toolName`, and the rated question's `questionStart` and `questionEnd`;
+    - measurements `question` (its number for the client), `questionCalls`, `questionFailed` and `gapSeconds`.
+  - The retry records `McpFeedback`, then its `McpToolCall`. `McpFeedback` has `askId`, `outcome` (`rated`, `skipped`, `declined` or `dismissed`) and `rating` (`up` or `down`).
+  - `McpFeedbackRejected` records a retry whose state isn't the client's or the tool's, has expired (`reason` `invalid`), or was used (`used`), or one over a limit (`limit`). A retry from a client that can't be asked records nothing.
+- **Limits:** one ask an hour per address; 3 outcomes per address an hour, 60 a minute per replica; rejections recorded once a minute per address, 60 a minute in all; with comments on, 500 characters. What follows the clients and keeps the asks rare lives in memory and is bounded, so a restart forgets it and the warm-up starts again; the draw doesn't change. When the memory is full of addresses still paused or asked, a new address isn't asked, rather than any pause being forgotten.
+- **Off:** `PGHACKER_FEEDBACK_RATE=0`, or no usage telemetry: no call is held.
+
+The rated question's calls are the `McpToolCall` events with the ask's `UserId` and `clientName`, from `questionStart` to `questionEnd`. These queries read the results in `AppEvents`. Give the command the window to read, such as `az monitor app-insights query --apps <usage_app_id> --offset 30d --analytics-query '<query>'`: without `--offset` it reads only the last hour. For the thumbs-down query, the window must reach back to the rated questions, a few minutes before their asks.
+
+```kql
+// Asks, and what came of them, by client
+let asks = AppEvents
+    | where tostring(Properties.action) == "McpFeedbackAsked"
+    | project askId = tostring(Properties.askId), client = tostring(Properties.clientName);
+let answers = AppEvents
+    | where tostring(Properties.action) == "McpFeedback"
+    | project askId = tostring(Properties.askId), outcome = tostring(Properties.outcome),
+              rating = tostring(Properties.rating);
+asks
+| join kind=leftouter answers on askId
+| summarize asks = count(), up = countif(rating == "up"), down = countif(rating == "down"),
+            skipped = countif(outcome == "skipped"), declined = countif(outcome == "declined"),
+            dismissed = countif(outcome == "dismissed"), unanswered = countif(isempty(outcome)) by client
+```
+
+```kql
+// The helpful rate by day
+AppEvents
+| where tostring(Properties.action) == "McpFeedback" and tostring(Properties.outcome) == "rated"
+| summarize up = countif(tostring(Properties.rating) == "up"),
+            down = countif(tostring(Properties.rating) == "down") by day = bin(TimeGenerated, 1d)
+| extend helpful = round(100.0 * up / (up + down), 1)
+```
+
+```kql
+// Thumbs-down, with the calls of the question each rated
+let downs = AppEvents
+    | where tostring(Properties.action) == "McpFeedback" and tostring(Properties.rating) == "down"
+    | project askId = tostring(Properties.askId);
+let asks = AppEvents
+    | where tostring(Properties.action) == "McpFeedbackAsked"
+    | project askId = tostring(Properties.askId), UserId, client = tostring(Properties.clientName),
+              startedAt = todatetime(Properties.questionStart), endedAt = todatetime(Properties.questionEnd);
+let calls = AppEvents
+    | where tostring(Properties.action) == "McpToolCall" and tostring(Properties.activityStatus) != "InputRequired"
+    | project TimeGenerated, UserId, client = tostring(Properties.clientName), tool = tostring(Properties.toolName),
+              query = tostring(Properties["arg.query"]), version = tostring(Properties["arg.version"]);
+downs
+| join kind=inner asks on askId
+| join kind=inner calls on UserId, client
+| where TimeGenerated between (startedAt .. endedAt)
+| project askId, TimeGenerated, tool, query, version
+| order by askId asc, TimeGenerated asc
+```
+
+A thumbs-down's calls can seed the evaluation: the maintainer words the question and finds its answer with the tools, then adds it to `eval/questions.json` by hand. No user text goes into the repository.
 
 ## Email addresses
 

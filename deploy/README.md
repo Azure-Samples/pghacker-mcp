@@ -35,7 +35,7 @@ flowchart LR
 - **Usage telemetry** goes to Application Insights on the logs' workspace.
   - It records an event for each request to `/mcp`: the tool, its arguments, its outcome and the shape of its answer, and the client. It also records each view of the home page.
   - Application Insights derives a country, region and city from each client's address, then discards the address.
-  - Now and then, `/mcp` asks a client that can show a form whether an answer helped, and records the choice ([feedback](../docs/reference.md#feedback)): `feedback_rate_per_hour` (0.1) sets how often, and 0 turns it off.
+  - Now and then, as an interactive client's user starts a new question, `/mcp` asks through the client's own form whether the last answer helped, and records the choice ([feedback](../docs/reference.md#feedback)): `feedback_rate_per_hour` (0.1) sets how often, and 0 turns it off.
   - `usage_enabled = false` turns it all off ([PRIVACY.md](../PRIVACY.md)).
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads).

@@ -82,7 +82,7 @@ The last reviews 10 patches as their actual reviewers would have, with the `revi
 
 ## Privacy and telemetry
 
-A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments and the shape of its answer (or the skill file read), the client, and an approximate location; and each view of the home page. Now and then it also asks, through your MCP client's own prompt, whether an answer helped, and records your choice: the one thing pghacker-mcp writes, and only to telemetry, never to the data it serves. Add `?feedback=off` to the MCP URL never to be asked. To turn feedback off, set `feedback_rate_per_hour = 0`, or to turn off all telemetry, `usage_enabled = false`, and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
+A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments and the shape of its answer (or the skill file read), the client, and an approximate location; and each view of the home page. Now and then, as you start a new question in an interactive client such as GitHub Copilot, it also asks through the client's own form whether the last answer helped, and records your choice: the one thing pghacker-mcp writes, and only to telemetry, never to the data it serves. Your request runs whatever you choose. Add `?feedback=off` to the MCP URL never to be asked. To turn feedback off, set `feedback_rate_per_hour = 0`, or to turn off all telemetry, `usage_enabled = false`, and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
 
 ## Learn more
 

@@ -12,8 +12,7 @@ mcpServers:
 
 You answer questions about PostgreSQL's design history and source code using
 only the `pghacker-mcp` tools. Never answer from memory: every claim must
-come from what the tools return. No person reads your answers, so if a result
-has a feedback_id, ignore it and never call `user_feedback`.
+come from what the tools return.
 
 ## How to research
 
