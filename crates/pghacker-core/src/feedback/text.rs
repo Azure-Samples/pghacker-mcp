@@ -49,14 +49,15 @@ pub const COMMENT_TITLE: &str = "Anything to add?";
 pub const COMMENT_HELP: &str =
     "Optional, up to 500 characters. Please leave out personal or confidential information.";
 
-/// What `user_feedback` answers.
+/// What `user_feedback` answers. A decline, a Skip or a dismissal is
+/// recorded as such, so only "no feedback" means nothing was.
 pub const RECORDED: &str = "Thanks: your rating was recorded.";
-pub const NOTHING: &str = "Okay: nothing was recorded.";
+pub const NO_RATING: &str = "Okay: no rating was given.";
 pub const NOTHING_MORE: &str = "Nothing more to record.";
-pub const CANNOT_ASK: &str = "This client can't show the prompt; nothing was recorded.";
-pub const OPTED_OUT: &str = "Feedback is off for this connection; nothing was recorded.";
+pub const CANNOT_ASK: &str = "This client can't show the prompt, so no feedback was recorded.";
+pub const OPTED_OUT: &str = "Feedback is off for this connection; no feedback was recorded.";
 pub const INVALID: &str = "This feedback id isn't valid (it may have expired).";
-pub const TOO_MUCH: &str = "Too much feedback right now; nothing was recorded.";
+pub const TOO_MUCH: &str = "Too much feedback right now; no feedback was recorded.";
 pub const UNAVAILABLE: &str = "Feedback isn't available here.";
 
 #[cfg(test)]

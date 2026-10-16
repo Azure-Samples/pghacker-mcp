@@ -379,26 +379,22 @@ async fn each_answer_is_recorded_as_what_the_user_chose() {
             answer("down"),
             "Thanks: your rating was recorded.",
         ),
-        (
-            "198.51.100.2",
-            answer("skip"),
-            "Okay: nothing was recorded.",
-        ),
+        ("198.51.100.2", answer("skip"), "Okay: no rating was given."),
         (
             "198.51.100.3",
             json!({ "feedback": { "action": "decline" } }),
-            "Okay: nothing was recorded.",
+            "Okay: no rating was given.",
         ),
         (
             "198.51.100.4",
             json!({ "feedback": { "action": "cancel" } }),
-            "Okay: nothing was recorded.",
+            "Okay: no rating was given.",
         ),
-        ("198.51.100.5", json!({}), "Okay: nothing was recorded."),
+        ("198.51.100.5", json!({}), "Okay: no rating was given."),
         (
             "198.51.100.6",
             json!({ "feedback": "garbage" }),
-            "Okay: nothing was recorded.",
+            "Okay: no rating was given.",
         ),
     ];
     for (n, (address, responses, expected)) in cases.into_iter().enumerate() {
@@ -484,7 +480,7 @@ async fn clients_that_cannot_show_a_form_are_never_asked() {
         .await;
     assert_eq!(
         text_of(&answered),
-        "This client can't show the prompt; nothing was recorded.",
+        "This client can't show the prompt, so no feedback was recorded.",
         "{answered}"
     );
     // A failed call gets no note.
@@ -566,7 +562,7 @@ async fn feedback_off_in_the_url_stops_offers_and_answers() {
             .await;
         assert_eq!(
             text_of(&answered),
-            "Feedback is off for this connection; nothing was recorded.",
+            "Feedback is off for this connection; no feedback was recorded.",
             "{answered}"
         );
     }

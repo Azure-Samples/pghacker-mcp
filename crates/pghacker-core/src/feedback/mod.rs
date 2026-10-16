@@ -646,7 +646,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            matches!(&declined, Reply::Done { text: text::NOTHING, outcome: Some(o) } if o.outcome == "declined"),
+            matches!(&declined, Reply::Done { text: text::NO_RATING, outcome: Some(o) } if o.outcome == "declined"),
             "{declined:?}"
         );
         // No ask for 24 hours, and an id issued earlier asks nothing.

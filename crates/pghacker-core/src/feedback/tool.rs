@@ -112,7 +112,7 @@ impl Answer {
         if self.rating.is_some() {
             text::RECORDED
         } else {
-            text::NOTHING
+            text::NO_RATING
         }
     }
 }
@@ -267,13 +267,13 @@ mod tests {
                 ("dismissed", None),
                 "{skipped}"
             );
-            assert_eq!(dismissed.text(), text::NOTHING);
+            assert_eq!(dismissed.text(), text::NO_RATING);
         }
         assert_eq!(answer(None, false).outcome, "dismissed");
         let declined = answer(Some(&json!({ "action": "decline" })), false);
         assert_eq!(
             (declined.outcome, declined.text()),
-            ("declined", text::NOTHING)
+            ("declined", text::NO_RATING)
         );
     }
 
