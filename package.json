@@ -13,6 +13,7 @@
     "stop": "node scripts/stop.mjs",
     "smoke": "node scripts/smoke.mjs",
     "check:public": "node scripts/check-public.mjs",
+    "license-headers": "node scripts/license-headers.mjs",
     "test": "node --test test/*.test.mjs home/src/*.test.ts",
     "test:routes": "node --test test/oauth2-proxy.integration.mjs",
     "db:reset": "node scripts/db-reset.mjs",

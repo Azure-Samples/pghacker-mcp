@@ -35,11 +35,25 @@ Before you open a pull request, run the checks for what you changed:
 | The home page (`home/`) | `npm --prefix home test` and `npm --prefix home run build` |
 | Terraform (`deploy/terraform/`) | In `deploy/terraform`: `terraform init -backend=false -input=false -lockfile=readonly`, then `terraform fmt -recursive -check`, `terraform validate` and `terraform test` |
 
+## License headers
+
+Every source file starts with this header, in its language's comment syntax, after any `#!` line, Dockerfile parser
+directive or HTML doctype:
+
+```text
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT license.
+```
+
+`npm run license-headers` lists the files that lack it, and `npm run license-headers -- --fix` adds it to them.
+[scripts/lib/license-headers.mjs](scripts/lib/license-headers.mjs) lists the file types that take it; `vendor/`
+doesn't. A migration's checksum leaves the header out, so adding it to a migration that a database has applied is safe.
+
 ## Third-party code
 
-`vendor/` holds third-party code under its own license: keep its license files and don't reformat it. [NOTICE](NOTICE)
-describes each piece and its license. Before you add third-party code, open an issue: its license must allow its use
-here, and it needs a NOTICE entry.
+`vendor/` holds third-party code under its own license: keep its license files, don't add the header to it, and don't
+reformat it. [NOTICE](NOTICE) describes each piece and its license. Before you add third-party code, open an issue:
+its license must allow its use here, and it needs a NOTICE entry.
 
 ## Pull requests
 

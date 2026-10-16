@@ -13,6 +13,24 @@ static MIGRATIONS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../migrations"
 const ROLES: &str = include_str!("../sql/roles.sql");
 const DATABASE: &str = include_str!("../sql/database.sql");
 
+/// The license header that starts each migration, with the blank line after
+/// it (scripts/lib/license-headers.mjs), with LF and with CRLF line ends. A
+/// migration's checksum leaves it out, so the header changed no checksum that
+/// a database had recorded.
+const LICENSE_HEADER: [&str; 2] = [
+    "-- Copyright (c) Microsoft Corporation.\n-- Licensed under the MIT license.\n\n",
+    "-- Copyright (c) Microsoft Corporation.\r\n-- Licensed under the MIT license.\r\n\r\n",
+];
+
+/// A migration's checksum: the SHA-256 of its SQL without the license header.
+fn checksum(sql: &str) -> String {
+    let body = LICENSE_HEADER
+        .iter()
+        .find_map(|header| sql.strip_prefix(header))
+        .unwrap_or(sql);
+    hex::encode(Sha256::digest(body.as_bytes()))
+}
+
 /// The roles' passwords: pgh_indexer's and pgh_reader's, and pgh_swarm's
 /// when PilotSwarm gets a role of its own rather than the administrator's.
 #[derive(Clone)]
@@ -209,7 +227,7 @@ pub fn migrations() -> Vec<Migration> {
                     .to_string_lossy()
                     .into_owned(),
                 sql,
-                sha256: hex::encode(Sha256::digest(sql.as_bytes())),
+                sha256: checksum(sql),
             }
         })
         .collect();
@@ -348,5 +366,18 @@ mod tests {
                 .all(|pair| pair[0].version < pair[1].version)
         );
         assert_eq!(list[0].version, "0001_core");
+    }
+
+    #[test]
+    fn a_checksum_leaves_out_the_license_header() {
+        use sha2::{Digest, Sha256};
+        let body = "-- A migration.\nCREATE TABLE t (id int);\n";
+        let plain = hex::encode(Sha256::digest(body.as_bytes()));
+        assert_eq!(super::checksum(body), plain);
+        for header in super::LICENSE_HEADER {
+            assert_eq!(super::checksum(&format!("{header}{body}")), plain);
+            // Only a header at the start is left out.
+            assert_ne!(super::checksum(&format!("{body}{header}")), plain);
+        }
     }
 }
