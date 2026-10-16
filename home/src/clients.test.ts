@@ -12,10 +12,10 @@ const byId = (id: string) => {
   return client;
 };
 
-test("each agent has its own tab, most used first, and Other has nothing to paste", () => {
+test("each agent has its own tab, the standalone agents before the editors, and Other has nothing to paste", () => {
   assert.deepEqual(
     CLIENTS.map((client) => client.id),
-    ["claude-code", "vscode", "codex", "cursor", "copilot-cli", "copilot-app", "other"],
+    ["claude-code", "codex", "copilot-cli", "copilot-app", "vscode", "cursor", "other"],
   );
   assert.equal(new Set(CLIENTS.map((client) => client.label)).size, CLIENTS.length);
   for (const client of CLIENTS) assert.ok(client.action.length > 0, client.id);

@@ -5,15 +5,14 @@
  * How to add the MCP server to each agent: the first thing to do, a command
  * to run when there is one, and a configuration file, which the page shows
  * collapsed. Each follows the client's documentation: `claude mcp add` and
- * .mcp.json, VS Code's MCP: Add Server and .vscode/mcp.json, `codex mcp add
- * --url` and ~/.codex/config.toml, Cursor's mcp.json, Copilot CLI's
- * `copilot mcp add` and ~/.copilot/mcp-config.json, and the GitHub Copilot
- * app's Customize > MCP, which also loads Copilot CLI's servers.
+ * .mcp.json, `codex mcp add --url` and ~/.codex/config.toml, Copilot CLI's
+ * `copilot mcp add` and ~/.copilot/mcp-config.json, the GitHub Copilot app's
+ * Customize > MCP, which also loads Copilot CLI's servers, VS Code's MCP: Add
+ * Server and .vscode/mcp.json, and Cursor's mcp.json.
  *
- * The agents come in order of use, by the Stack Overflow Developer Survey
- * 2026's AI coding agents: Claude Code 66%, GitHub Copilot 59%, OpenAI Codex
- * 30%, Cursor 26%. GitHub Copilot is VS Code first, then its CLI and app,
- * which the survey counts with it.
+ * The agents that run on their own come first: Claude Code and OpenAI Codex,
+ * in order of use by the Stack Overflow Developer Survey 2026 (66% and 30%),
+ * then GitHub Copilot's CLI and app. The editors follow, VS Code and Cursor.
  */
 
 /** The name each agent knows the server by. */
@@ -62,16 +61,6 @@ export const CLIENTS: readonly Client[] = [
     },
   },
   {
-    id: "vscode",
-    label: "VS Code",
-    action: "Run MCP: Add Server… from the Command Palette, choose HTTP and paste the URL.",
-    config: {
-      file: ".vscode/mcp.json",
-      language: "json",
-      text: (url) => json({ servers: { [SERVER_NAME]: { type: "http", url } } }),
-    },
-  },
-  {
     id: "codex",
     label: "Codex",
     action: "Run in a terminal:",
@@ -80,17 +69,6 @@ export const CLIENTS: readonly Client[] = [
       file: "~/.codex/config.toml",
       language: "toml",
       text: (url) => `[mcp_servers.${SERVER_NAME}]\nurl = ${JSON.stringify(url)}`,
-    },
-  },
-  {
-    id: "cursor",
-    label: "Cursor",
-    action: "Add the server to ~/.cursor/mcp.json for all your projects, or to a project's .cursor/mcp.json.",
-    config: {
-      file: "mcp.json",
-      prefix: "Show",
-      language: "json",
-      text: (url) => json({ mcpServers: { [SERVER_NAME]: { url } } }),
     },
   },
   {
@@ -105,6 +83,27 @@ export const CLIENTS: readonly Client[] = [
     label: "Copilot app",
     action: "In the GitHub Copilot app, click Customize in the sidebar, then MCP, and add a custom server with this URL.",
     config: copilotConfig,
+  },
+  {
+    id: "vscode",
+    label: "VS Code",
+    action: "Run MCP: Add Server… from the Command Palette, choose HTTP and paste the URL.",
+    config: {
+      file: ".vscode/mcp.json",
+      language: "json",
+      text: (url) => json({ servers: { [SERVER_NAME]: { type: "http", url } } }),
+    },
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    action: "Add the server to ~/.cursor/mcp.json for all your projects, or to a project's .cursor/mcp.json.",
+    config: {
+      file: "mcp.json",
+      prefix: "Show",
+      language: "json",
+      text: (url) => json({ mcpServers: { [SERVER_NAME]: { url } } }),
+    },
   },
   {
     id: "other",
