@@ -73,6 +73,9 @@ crawl_max_sessions            = 4
 
 # Usage telemetry (PRIVACY.md); false records nothing.
 usage_enabled = true
+# Feedback (PRIVACY.md): the chance that a client's hour of use brings one
+# "Was this answer helpful?"; 0 asks nothing.
+feedback_rate_per_hour = 0.1
 
 # Replace these with your GitHub organization and team slug.
 # Explicit github_users can admit additional logins or work around an OAuth App

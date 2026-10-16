@@ -34,6 +34,7 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 | Archive | `PGHACKER_ARCHIVE_BASE_URL` (`https://www.postgresql.org`), `PGHACKER_ARCHIVE_USER` and `PGHACKER_ARCHIVE_PASSWORD` (the published `archives` and `antispam`); `PGHACKER_HTTP_RATE` (2 requests a second), `PGHACKER_HTTP_USER_AGENT`; `PGHACKER_CACHE_DIR` (`.runtime/cache`), `PGHACKER_GIT_DIR` (`.runtime/git`), `PGHACKER_KEEP_DOWNLOADS` (true) |
 | Logs | `RUST_LOG`: the launchers set `info,tokio_postgres=warn,rmcp=warn` |
 | Usage telemetry | pghacker-mcp's `PGHACKER_USAGE_ENDPOINT`, the ingestion endpoint's origin (unset, no [telemetry](../PRIVACY.md); `npm start` never sets it); `PGHACKER_USAGE_IKEY`, the Application Insights resource's instrumentation key; `PGHACKER_USAGE_ID_KEY`, the key of the users' keyed hashes, at least 32 characters; `CONTAINER_APP_REVISION`, the instance |
+| Feedback | `PGHACKER_FEEDBACK_RATE`, the chance from 0 (off, the default) to 1 that a client's hour of use brings a request for [feedback](#feedback), with usage telemetry only; `PGHACKER_FEEDBACK_COMMENTS` (false), whether its form takes a comment |
 
 `npm run crawl` reads `PGHACKER_CRAWL_MODEL` (`github-copilot:gpt-6-luna`), `PGHACKER_CRAWL_PER_SESSION` (8 threads) and, with `--watch`, `PGHACKER_CRAWL_START_SESSIONS` (else `--concurrency`) and `PGHACKER_CRAWL_MAX_SESSIONS` (16). Tests and local tools read the `.env` of the repository root, or of `PGHACKER_ROOT`.
 
@@ -120,6 +121,15 @@ Few clients load skills from MCP servers yet; the extension's [client matrix](ht
 - the server's instructions name the skill and summarize its procedure, for agents that see only the tools.
 
 `npm run eval` checks the skill against what authors actually said: `eval/reviews.json` has 10 patches posted to pgsql-hackers, each with the points its reviewer actually raised. An agent reviews each patch as that reviewer would have when it was posted, with the skill (`--skill skills/review-as-author/SKILL.md`, or its `skill://` URI, read from the server and checked against its digests) or without it, as a baseline. A review passes when a judge finds the reviewer's main point in it, its citations are verbatim, at least two quote the reviewer's own words, and none came on or after the patch's date. The [README](../README.md#check-it) has the command.
+
+## Feedback
+
+Now and then, pghacker-mcp asks whether an answer helped, through the client's own prompt ([PRIVACY.md](../PRIVACY.md)). For each client (the usage identity) and UTC clock hour, a keyed draw arms the hour with the chance `PGHACKER_FEEDBACK_RATE` (Terraform's `feedback_rate_per_hour`, 0.1). In an armed hour, the first successful result of any tool gets a second text block, for the model, with a `feedback_id`: a random value sealed with the client's identity, valid for 6 hours. The server's instructions and the `user_feedback` tool's description ask the model, once it has written its answer and only if a person is reading, to call `user_feedback` with the id. That call answers `input_required` (MCP 2026-07-28's multi round-trip requests) with an `elicitation/create` form: helpful, not helpful or Skip, the default. The client asks the user and calls again with the answer, which is recorded; the model never passes a rating.
+
+- **Who is asked:** only a client whose request declares form elicitation under the 2026-07-28 protocol, at most once an hour, and not for a day after declining. Never a request without a client identity (the internal listener), on an earlier protocol, or to a URL with `?feedback=off`, which also keeps `user_feedback` from recording anything. `PGHACKER_AGENT_MCP_URL` gets `feedback=off`.
+- **Events:** `McpFeedbackOffered`, with the same operation as the answer's `McpToolCall`, and `McpFeedback` (`outcome`: `rated`, `declined` or `dismissed`; `rating`: `up` or `down`) share a `feedbackId`. `McpFeedbackRejected` records an id that isn't the client's or has expired, or a limit, once a minute per client. `user_feedback`'s first call is an `McpToolCall` with `activityStatus` `InputRequired`.
+- **Limits:** 3 outcomes per client an hour, 60 a minute per replica; with comments on, 500 characters. What keeps the asks rare lives in memory, so a restart forgets it; the draw doesn't change.
+- **Off:** `PGHACKER_FEEDBACK_RATE=0`, or no usage telemetry: the tool isn't listed and no result has a note.
 
 ## Email addresses
 

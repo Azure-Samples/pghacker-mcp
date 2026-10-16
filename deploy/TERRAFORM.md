@@ -91,6 +91,8 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `usage_enabled` | `true` | Usage telemetry ([PRIVACY.md](../PRIVACY.md)): Application Insights on the logs' workspace, `usage-id-key`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` for the app; false creates none of them, and the app records nothing. `AppEvents` keeps the events it already holds until their retention ends |
 | `usage_daily_cap_gb` | `5` | The most usage telemetry Application Insights takes a day; it drops the rest of the day's events |
 | `usage_retention_days`, `usage_total_retention_days` | `730`, `1095` | How long usage events stay queryable (30 to 730) and are kept (up to 4383) in the `AppEvents` table |
+| `feedback_rate_per_hour` | `0.1` | The chance, 0 to 1, that a client's hour of use of `/mcp` brings one "Was this answer helpful?" through the client's own prompt (`PGHACKER_FEEDBACK_RATE`; [PRIVACY.md](../PRIVACY.md)); only with `usage_enabled`, and 0 asks nothing |
+| `feedback_comments_enabled` | `false` | Whether that prompt also takes an optional comment of up to 500 characters (`PGHACKER_FEEDBACK_COMMENTS`); update PRIVACY.md before turning it on |
 | `deployer_object_ids` | `[]` | Everyone who applies, given Key Vault Secrets Officer; empty means whoever is applying |
 | `vnet_address_space` | `"10.66.0.0/22"` | VNet range |
 | `container_apps_subnet_prefix` | `"10.66.0.0/24"` | Container Apps subnet, /27 or larger; fixed once the environment exists |

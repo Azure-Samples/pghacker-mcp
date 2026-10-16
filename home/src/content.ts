@@ -52,7 +52,7 @@ export const CAPABILITIES: readonly Capability[] = [
   },
 ];
 
-export const ENDPOINT_FACTS = ["Streamable HTTP", "No sign-in or key", "Read-only", "Rate-limited per client"] as const;
+export const ENDPOINT_FACTS = ["Streamable HTTP", "No sign-in or key", "Read-only data", "Rate-limited per client"] as const;
 
 export const FIRST_PROMPT = "Use pghacker to find out what happened to SQL/PGQ in PostgreSQL 19.";
 
