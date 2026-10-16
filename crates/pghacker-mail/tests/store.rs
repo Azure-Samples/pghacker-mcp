@@ -956,6 +956,69 @@ async fn restoring_leaves_text_that_differs() {
     assert_eq!(restore(&mut client, &missing).await, Restored::Unchanged);
 }
 
+#[tokio::test]
+async fn concurrent_restores_of_a_thread_both_refresh_it() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let mut other = db.indexer().await.unwrap();
+    let root = raw_message(
+        "root@example.org",
+        ALICE,
+        "Ping carol@example.org",
+        "Date: 1 Jun 2026 10:00:00 +0000\n",
+        "Ask carol@example.org.\n",
+    );
+    let reply = raw_message(
+        "reply@example.org",
+        BOB,
+        "Re: Ping carol@example.org",
+        "Date: 2 Jun 2026 10:00:00 +0000\nIn-Reply-To: <root@example.org>\nReferences: <root@example.org>\n",
+        "Done, carol@example.org.\n",
+    );
+    let stored = store_each(&mut client, &[&root, &reply]).await;
+    let thread = stored[0].thread_id;
+    assert_eq!(stored[1].thread_id, thread);
+    for msg in [&root, &reply] {
+        store_as_once(&client, &msg.message_id, msg.from_email.as_deref()).await;
+    }
+    let tx = client.transaction().await.unwrap();
+    store::refresh_threads(&tx, &[thread]).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(thread_subject(&client, thread).await, "Ping [email]");
+
+    // Each restores a message of the thread, as two batches restoring months
+    // that share it do; chunking it again locks the thread FOR KEY SHARE
+    // until the transaction ends. Then both refresh the thread.
+    let first = client.transaction().await.unwrap();
+    let second = other.transaction().await.unwrap();
+    for (tx, msg) in [(&first, &root), (&second, &reply)] {
+        let restored = store::restore_addresses(tx, msg).await.unwrap();
+        assert_eq!(restored, Restored::Restored { thread_id: thread });
+    }
+    tokio::join!(
+        async {
+            store::refresh_threads(&first, &[thread]).await.unwrap();
+            first.commit().await.unwrap();
+        },
+        async {
+            store::refresh_threads(&second, &[thread]).await.unwrap();
+            second.commit().await.unwrap();
+        },
+    );
+    assert_eq!(
+        thread_subject(&client, thread).await,
+        "Ping carol@example.org"
+    );
+}
+
+async fn thread_subject(client: &Client, id: i64) -> String {
+    client
+        .query_one("SELECT subject FROM threads WHERE id = $1", &[&id])
+        .await
+        .unwrap()
+        .get(0)
+}
+
 type ThreadStats = (i32, i32, String, String, i32, String, String);
 
 /// Message and participant counts, subject, key, version, first and last day.

@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use pghacker_core::db::Pool;
 use serde::Serialize;
 use tokio_postgres::error::SqlState;
@@ -285,6 +285,9 @@ async fn store_batch(
             }
         }
         let ids: Vec<i64> = batch_touched.iter().copied().collect();
+        // Without its refresh, the batch commits anyway: the counts that
+        // inserts maintain stay right, and the threads' next refresh fixes
+        // the rest.
         refresh(&tx, &ids).await?;
         tx.commit().await?;
         touched.extend(batch_touched);
@@ -299,10 +302,11 @@ async fn store_batch(
 /// Rounds of [`store_batch`] for messages that deadlocked.
 const RETRY_ROUNDS: usize = 3;
 
-/// [`store::refresh_threads`], retried if it deadlocks; if it still fails,
-/// the batch commits without it: the counts that inserts maintain stay
-/// right, and the threads' next refresh fixes the rest.
-async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<()> {
+/// [`store::refresh_threads`], retried if it deadlocks; false if it still
+/// fails, with the transaction usable without it. A retry releases only the
+/// locks the refresh took, so it can't break a deadlock over the
+/// transaction's earlier locks.
+async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<bool> {
     for attempt in 1..=RETRY_ROUNDS {
         tx.batch_execute("SAVEPOINT pghacker_refresh_threads")
             .await?;
@@ -310,7 +314,7 @@ async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<()
             Ok(()) => {
                 tx.batch_execute("RELEASE SAVEPOINT pghacker_refresh_threads")
                     .await?;
-                return Ok(());
+                return Ok(true);
             }
             Err(error) => {
                 tx.batch_execute(
@@ -320,13 +324,13 @@ async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<()
                 .await?;
                 if attempt == RETRY_ROUNDS || !is_transient(&error) {
                     tracing::warn!(error = %format!("{error:#}"), "cannot refresh threads");
-                    return Ok(());
+                    return Ok(false);
                 }
                 tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn is_transient(error: &anyhow::Error) -> bool {
@@ -481,6 +485,10 @@ pub async fn restore_messages(
 
 /// Restores messages in one transaction and refreshes the threads whose
 /// subjects may have changed. A message that fails is counted and skipped.
+/// Without its refresh the batch rolls back, and fails for the job's retry
+/// to restore it again: a thread's subject gets its addresses back only
+/// from the refresh, and a run after a commit would find the messages
+/// restored and refresh nothing.
 async fn restore_batch(
     pool: &Pool,
     messages: &[ParsedMessage],
@@ -514,7 +522,9 @@ async fn restore_batch(
         }
     }
     let ids: Vec<i64> = threads.into_iter().collect();
-    refresh(&tx, &ids).await?;
+    if !refresh(&tx, &ids).await? {
+        bail!("cannot refresh the restored messages' threads; the batch rolled back");
+    }
     tx.commit().await?;
     Ok(())
 }

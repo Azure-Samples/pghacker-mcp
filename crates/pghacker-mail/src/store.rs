@@ -112,8 +112,13 @@ pub async fn refresh_threads(tx: &Transaction<'_>, thread_ids: &[i64]) -> Result
         .into_iter()
         .collect();
     // Lock in id order: concurrent refreshes then wait instead of deadlocking.
+    // No key changes, so the lock leaves foreign-key checks free: a
+    // transaction that stored or restored a message of the thread holds a
+    // KEY SHARE lock on it from inserting the message or its chunks, and two
+    // such transactions refreshing the thread would otherwise wait on each
+    // other's. Inserts' count updates still wait on this lock.
     tx.execute_typed(
-        "SELECT FROM threads WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+        "SELECT FROM threads WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE",
         &[(&ids, Type::INT8_ARRAY)],
     )
     .await?;

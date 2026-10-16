@@ -474,3 +474,98 @@ async fn restores_the_addresses_ingest_once_replaced() {
         .unwrap();
     assert_eq!((again.stored, again.restored, again.differs), (3, 0, 0));
 }
+
+#[tokio::test]
+async fn a_restore_that_cannot_refresh_its_threads_rolls_back() {
+    let db = TestDb::create().await.unwrap();
+    let cache = scratch();
+    let client = offline_client(cache.path());
+    write(&client.mbox_path("pgsql-hackers", "2026-06"), JUNE);
+    ingest::ingest_mbox_month(
+        &db.indexer_pool(1).unwrap(),
+        &client,
+        "pgsql-hackers",
+        "2026-06",
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    let mut indexer = db.indexer().await.unwrap();
+    let ids = ["j1@example.org", "j2@example.org"];
+    let mut written = Vec::new();
+    for (id, email) in ids.iter().zip(["erin@example.org", "bob@example.org"]) {
+        written.push(stored_text(&indexer, id).await);
+        store_as_once(&indexer, id, Some(email)).await;
+    }
+    let thread: i64 = indexer
+        .query_one(
+            "SELECT thread_id FROM messages WHERE message_id = 'j1@example.org'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let tx = indexer.transaction().await.unwrap();
+    pghacker_mail::store::refresh_threads(&tx, &[thread])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(thread_subject(&indexer, thread).await, "Ping [email]");
+    let mut once = Vec::new();
+    for id in ids {
+        once.push(stored_text(&indexer, id).await);
+    }
+
+    // The refresh can't lock the thread while another transaction holds it:
+    // it gives up waiting, and the restore commits nothing.
+    db.admin()
+        .await
+        .unwrap()
+        .batch_execute(&format!(
+            "ALTER ROLE pgh_indexer IN DATABASE {} SET lock_timeout = '500ms'",
+            db.name
+        ))
+        .await
+        .unwrap();
+    let pool = db.indexer_pool(2).unwrap();
+    let mut holder = db.indexer().await.unwrap();
+    let hold = holder.transaction().await.unwrap();
+    hold.execute(
+        "SELECT FROM threads WHERE id = $1 FOR NO KEY UPDATE",
+        &[&thread],
+    )
+    .await
+    .unwrap();
+    let error = ingest::restore_mbox_month(&pool, &client, "pgsql-hackers", "2026-06")
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("rolled back"), "{error:#}");
+    for (id, once) in ids.iter().zip(&once) {
+        assert_eq!(&stored_text(&indexer, id).await, once, "{id}");
+    }
+    assert_eq!(thread_subject(&indexer, thread).await, "Ping [email]");
+
+    // Restored again, as the job's retry does: the messages and the thread's
+    // subject.
+    hold.rollback().await.unwrap();
+    let again = ingest::restore_mbox_month(&pool, &client, "pgsql-hackers", "2026-06")
+        .await
+        .unwrap();
+    assert_eq!((again.restored, again.failed), (2, 0));
+    for (id, written) in ids.iter().zip(&written) {
+        assert_eq!(&stored_text(&indexer, id).await, written, "{id}");
+    }
+    assert_eq!(
+        thread_subject(&indexer, thread).await,
+        "Ping frank@example.org"
+    );
+}
+
+async fn thread_subject(client: &tokio_postgres::Client, id: i64) -> String {
+    client
+        .query_one("SELECT subject FROM threads WHERE id = $1", &[&id])
+        .await
+        .unwrap()
+        .get(0)
+}
