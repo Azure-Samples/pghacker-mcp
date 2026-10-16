@@ -597,6 +597,346 @@ async fn messages_that_share_an_unstored_ancestor_share_a_thread() {
 }
 
 #[tokio::test]
+async fn senders_addresses_and_placeholders_name_no_message() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    const TOM: &str = "Tom Lane <tom@example.org>";
+    let bug = message("bug@example.org", TOM, "1 Nov 1998", "Parser bug?", &[]);
+    let dump = message(
+        "dump@example.org",
+        TOM,
+        "2 Nov 1998",
+        "pg_dump inheritance",
+        &[],
+    );
+    // exmh names the sender replied to before the Message-ID, and no
+    // References: replies to anything Tom wrote shared tom@example.org.
+    let exmh = |id: &str, date: &str, subject: &str, parent: &str| {
+        let headers = format!(
+            "Date: {date} 10:00:00 +0000\nTo: {TOM}\nIn-Reply-To: Message from Tom Lane <tom@example.org> \n\tof \"{date}\" <{parent}>\n"
+        );
+        raw_message(
+            id,
+            "Oliver Elphick <olly@example.org>",
+            subject,
+            &headers,
+            "Text.",
+        )
+    };
+    let on_bug = exmh(
+        "on-bug@example.org",
+        "3 Nov 1998",
+        "Re: Parser bug?",
+        "bug@example.org",
+    );
+    let on_dump = exmh(
+        "on-dump@example.org",
+        "4 Nov 1998",
+        "Re: pg_dump inheritance",
+        "dump@example.org",
+    );
+    // Mutt copied the address into References.
+    let mutt = raw_message(
+        "mutt@example.org",
+        BOB,
+        "Re: Parser bug?",
+        "Date: 5 Nov 1998 10:00:00 +0000\nIn-Reply-To: <on-bug@example.org>\nReferences: <tom@example.org> <on-bug@example.org>\n",
+        "Text.",
+    );
+    let only = raw_message(
+        "only@example.org",
+        BOB,
+        "Re: Something else",
+        "Date: 6 Nov 1998 10:00:00 +0000\nIn-Reply-To: <tom@example.org>\nReferences: <tom@example.org>\n",
+        "Text.",
+    );
+    // Its own sender's address, before any message of that sender is stored.
+    let own = raw_message(
+        "own@example.org",
+        "Philip Warner <pjw@example.org>",
+        "Re: pg_dump inheritance",
+        "Date: 7 Nov 1998 10:00:00 +0000\nIn-Reply-To: <dump@example.org>\nReferences: <Message from Philip Warner\n\t<pjw@example.org><dump@example.org>\n",
+        "Text.",
+    );
+    // elm's placeholder for a message without a Message-ID.
+    let elm = |id: &str, subject: &str| {
+        raw_message(
+            id,
+            ALICE,
+            subject,
+            "Date: 8 Nov 1998 10:00:00 +0000\nIn-Reply-To: <no.id> from \"nolan\" at Nov 08, 1998 01:29:06 PM\n",
+            "Text.",
+        )
+    };
+    let elm1 = elm("elm1@example.org", "Re: initcap");
+    let elm2 = elm("elm2@example.org", "Re: Var->sublevels_up");
+    store_each(
+        &mut client,
+        &[
+            &bug, &dump, &on_bug, &on_dump, &mutt, &only, &own, &elm1, &elm2,
+        ],
+    )
+    .await;
+    assert_eq!(
+        threads(&client).await,
+        [
+            thread(
+                "bug@example.org",
+                &["bug@example.org", "on-bug@example.org", "mutt@example.org"]
+            ),
+            thread(
+                "dump@example.org",
+                &["dump@example.org", "on-dump@example.org", "own@example.org"]
+            ),
+            thread("only@example.org", &["only@example.org"]),
+            thread("elm1@example.org", &["elm1@example.org"]),
+            thread("elm2@example.org", &["elm2@example.org"]),
+        ]
+    );
+    // Messages store the IDs that name messages.
+    let stored: Vec<(String, Option<String>, Vec<String>)> = client
+        .query(
+            "SELECT message_id, parent_message_id, references_ids FROM messages ORDER BY sent_at, id",
+            &[],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    let expect = |id: &str, parent: Option<&str>, references: &[&str]| {
+        let row = (
+            id.to_owned(),
+            parent.map(str::to_owned),
+            references.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+        );
+        assert!(stored.contains(&row), "{row:?} in {stored:#?}");
+    };
+    expect("on-bug@example.org", Some("bug@example.org"), &[]);
+    expect(
+        "mutt@example.org",
+        Some("on-bug@example.org"),
+        &["on-bug@example.org"],
+    );
+    expect("only@example.org", None, &[]);
+    expect(
+        "own@example.org",
+        Some("dump@example.org"),
+        &["dump@example.org"],
+    );
+    expect("elm1@example.org", None, &[]);
+}
+
+/// A discussion; a reply to it 38 days later on a topic of its own, and the
+/// reply to that; and replies that stay with the discussion: on its subject,
+/// with a version, or too soon.
+fn topic_mail() -> Vec<ParsedMessage> {
+    let chain = ["p@example.org", "r@example.org"];
+    vec![
+        message(
+            "p@example.org",
+            ALICE,
+            "1 Apr 2003",
+            "Are we losing momentum?",
+            &[],
+        ),
+        message(
+            "r@example.org",
+            BOB,
+            "2 Apr 2003",
+            "Re: Are we losing momentum?",
+            &["p@example.org"],
+        ),
+        message(
+            "soon@example.org",
+            ALICE,
+            "8 Apr 2003",
+            "A question of its own",
+            &chain,
+        ),
+        message(
+            "iso@example.org",
+            ALICE,
+            "10 May 2003",
+            "ISO 8601 intervals in the format with designators",
+            &chain,
+        ),
+        message(
+            "iso-re@example.org",
+            BOB,
+            "11 May 2003",
+            "Re: ISO 8601 intervals in the format with designators",
+            &["p@example.org", "r@example.org", "iso@example.org"],
+        ),
+        message(
+            "late@example.org",
+            BOB,
+            "12 May 2003",
+            "Re: Are we losing momentum?",
+            &chain,
+        ),
+        message(
+            "v5@example.org",
+            ALICE,
+            "13 May 2003",
+            "Momentum patch v5",
+            &chain,
+        ),
+    ]
+}
+
+fn topic_threads() -> Vec<Thread> {
+    vec![
+        thread(
+            "p@example.org",
+            &[
+                "p@example.org",
+                "r@example.org",
+                "soon@example.org",
+                "late@example.org",
+                "v5@example.org",
+            ],
+        ),
+        thread(
+            "iso@example.org",
+            &["iso@example.org", "iso-re@example.org"],
+        ),
+    ]
+}
+
+/// The threads of [`topic_mail`] stored in this order of Message-IDs.
+async fn topic_threads_after(order: &[&str]) -> Vec<Thread> {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let mail = topic_mail();
+    let messages: Vec<&ParsedMessage> = order
+        .iter()
+        .map(|id| mail.iter().find(|m| m.message_id == *id).unwrap())
+        .collect();
+    store_each(&mut client, &messages).await;
+    threads(&client).await
+}
+
+#[tokio::test]
+async fn replies_on_topics_of_their_own_start_threads() {
+    let in_order: Vec<String> = topic_mail().into_iter().map(|m| m.message_id).collect();
+    let in_order: Vec<&str> = in_order.iter().map(String::as_str).collect();
+    assert_eq!(topic_threads_after(&in_order).await, topic_threads());
+}
+
+#[tokio::test]
+async fn topics_gather_the_replies_that_arrived_first() {
+    // The topic's reply first; then the topic and its reply before its parent.
+    for order in [
+        [
+            "iso-re@example.org",
+            "p@example.org",
+            "r@example.org",
+            "soon@example.org",
+            "iso@example.org",
+            "late@example.org",
+            "v5@example.org",
+        ],
+        [
+            "iso@example.org",
+            "iso-re@example.org",
+            "late@example.org",
+            "p@example.org",
+            "v5@example.org",
+            "soon@example.org",
+            "r@example.org",
+        ],
+    ] {
+        assert_eq!(
+            topic_threads_after(&order).await,
+            topic_threads(),
+            "{order:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn topics_leave_replies_that_extracts_cite() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let mail = topic_mail();
+    let by_id = |id: &str| mail.iter().find(|m| m.message_id == id).unwrap();
+    store_each(
+        &mut client,
+        &[
+            by_id("iso-re@example.org"),
+            by_id("p@example.org"),
+            by_id("r@example.org"),
+        ],
+    )
+    .await;
+    client
+        .batch_execute(
+            "INSERT INTO features (slug, name, description, status) VALUES ('iso', 'ISO', 'd', 'proposed');
+             INSERT INTO citations (extract_kind, extract_id, message_id, quote)
+             SELECT 'feature', f.id, m.id, 'Text of iso-re' FROM features f, messages m
+             WHERE m.message_id = 'iso-re@example.org'",
+        )
+        .await
+        .unwrap();
+    store_each(&mut client, &[by_id("iso@example.org")]).await;
+    assert_eq!(
+        threads(&client).await,
+        [
+            thread(
+                "p@example.org",
+                &["p@example.org", "r@example.org", "iso-re@example.org"]
+            ),
+            thread("iso@example.org", &["iso@example.org"]),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_parent_leaves_topics_that_extracts_cite() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let mail = topic_mail();
+    let by_id = |id: &str| mail.iter().find(|m| m.message_id == id).unwrap();
+    // The topic and its reply first, whose parent isn't stored yet: they
+    // share the discussion's thread.
+    store_each(
+        &mut client,
+        &[by_id("iso-re@example.org"), by_id("iso@example.org")],
+    )
+    .await;
+    client
+        .batch_execute(
+            "INSERT INTO features (slug, name, description, status) VALUES ('iso', 'ISO', 'd', 'proposed');
+             INSERT INTO citations (extract_kind, extract_id, message_id, quote)
+             SELECT 'feature', f.id, m.id, 'Text of iso-re' FROM features f, messages m
+             WHERE m.message_id = 'iso-re@example.org'",
+        )
+        .await
+        .unwrap();
+    // The parent's arrival makes the topic one, but extracts cite its reply:
+    // nothing moves, and no thread is left empty.
+    store_each(
+        &mut client,
+        &[by_id("p@example.org"), by_id("r@example.org")],
+    )
+    .await;
+    assert_eq!(
+        threads(&client).await,
+        [thread(
+            "p@example.org",
+            &[
+                "p@example.org",
+                "r@example.org",
+                "iso@example.org",
+                "iso-re@example.org"
+            ]
+        )]
+    );
+    assert_eq!(count(&client, "SELECT count(*) FROM threads").await, 1);
+}
+
+#[tokio::test]
 async fn reingesting_a_message_changes_nothing() {
     let db = TestDb::create().await.unwrap();
     let mut client = db.indexer().await.unwrap();
@@ -1103,13 +1443,21 @@ async fn a_failed_message_leaves_the_transaction_usable() {
         body: "text".into(),
         ..Default::default()
     };
-    // PostgreSQL rejects the NUL in References when the message row is
-    // inserted, after its thread and author were created.
+    // PostgreSQL rejects the message row, whose source doesn't exist, after
+    // its thread and author were created.
     let mut broken = good_message.clone();
     broken.message_id = "broken@example.org".into();
     broken.from_email = Some("bob@example.org".into());
-    broken.references = vec!["root\u{0}@example.org".into()];
-    assert!(store::upsert_message(&tx, &ctx(), &broken).await.is_err());
+    broken.references = vec!["root@example.org".into()];
+    let missing_source = StoreContext {
+        source_id: Some(424_242),
+        ..ctx()
+    };
+    assert!(
+        store::upsert_message(&tx, &missing_source, &broken)
+            .await
+            .is_err()
+    );
     let bad = good_message;
     let good = store::upsert_message(&tx, &ctx(), &bad).await.unwrap();
     assert!(good.inserted);

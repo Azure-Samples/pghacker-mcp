@@ -109,6 +109,12 @@ Text keeps the email addresses written in it: subjects, bodies, patches and send
 
 Mail stored before ingest kept addresses has `[email]` in their place. With the indexer running, `cargo run --release -p pghacker-indexer -- restore-addresses` (with `.env`'s settings in the environment), or `SELECT * FROM pghacker.restore_addresses()` as `pgh_indexer`, queues jobs that read that mail from the archive again. They restore only text still as ingest stored it, and embed changed chunks again; `ingest_status` shows them.
 
+## Threading
+
+A thread is the mail that In-Reply-To and References link. Ingest leaves out what old mailers wrote there that names no message: placeholders without an `@`, such as elm's `<no.id>`, and senders' addresses. exmh and MH-E wrote the sender replied to before the Message-ID (`Message from Tom Lane <tgl@sss.pgh.pa.us> of "…" <id>`), and other mailers copied the address into References, so replies to anything Tom wrote once shared a thread. `parent_message_id` and `references_ids` keep only the IDs that name messages.
+
+A reply that starts a topic gets a thread of its own: it was sent 30 days or more after its parent, under a subject that isn't a reply, has another key than its parent's, and gives no version (a series re-posted under a new name with its `v12` continues its thread). Its replies follow it whichever arrives first, unless extracts cite them.
+
 ## Patch series
 
 A patch's series version is the label it was posted under, as its file name or its message's subject writes it, without the `v`: `3`, `3.1`, `6a`, `01`, `20261003`, `12-pg13`. Its part is its number in the set, from the file name only: 1 for `v3-0001-…`. `search_patches` and `get_commit` show the version; `query` reads both in `patches`.

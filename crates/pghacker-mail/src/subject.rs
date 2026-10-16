@@ -1,12 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Subjects: the form threads display, and the key that matches a reply that
-//! lost its threading headers with its thread.
+//! Subjects: the form threads display, the key that matches a reply that
+//! lost its threading headers with its thread, and when a reply starts a
+//! topic of its own.
 
 use std::sync::LazyLock;
 
+use chrono::{DateTime, TimeDelta, Utc};
 use regex::Regex;
+
+use crate::series;
+
+/// How many days after its parent a reply with a subject of its own starts a
+/// topic ([`starts_topic`]).
+pub const TOPIC_DAYS: i64 = 30;
 
 /// Reply and forward prefixes, in the languages pgsql-hackers sees.
 static REPLY: LazyLock<Regex> = LazyLock::new(|| {
@@ -98,6 +106,30 @@ pub fn is_distinctive(key: &str) -> bool {
     key.split_whitespace().count() >= 3 && key.chars().filter(|c| c.is_alphanumeric()).count() >= 12
 }
 
+/// Whether a message starts a topic of its own though it replies to another:
+/// it was sent 30 days or more after its parent, under a subject that isn't
+/// a reply, gives no version, and has another key than the parent's. People
+/// started new discussions by replying to old mail; a series re-posted under
+/// a new name with its version continues its thread.
+pub fn starts_topic(
+    subject: &str,
+    sent_at: Option<DateTime<Utc>>,
+    parent_subject: &str,
+    parent_sent_at: Option<DateTime<Utc>>,
+) -> bool {
+    let (Some(sent), Some(parent_sent)) = (sent_at, parent_sent_at) else {
+        return false;
+    };
+    if sent - parent_sent < TimeDelta::days(TOPIC_DAYS)
+        || is_reply(subject)
+        || series::subject_has_version(subject)
+    {
+        return false;
+    }
+    let own = key(subject);
+    !own.is_empty() && own != key(parent_subject)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +186,51 @@ mod tests {
         assert!(is_reply("Fwd: foo"));
         assert!(!is_reply("Regression in foo"));
         assert!(!is_reply("[PATCH] foo"));
+    }
+
+    #[test]
+    fn new_subjects_on_old_mail_start_topics() {
+        use chrono::TimeZone;
+        let day = |d: u32| {
+            Some(Utc.with_ymd_and_hms(2003, 8, 1, 12, 0, 0).unwrap() + TimeDelta::days(d.into()))
+        };
+        let parent = "Re: [HACKERS] Are we losing momentum?";
+        let iso = "ISO 8601 \"Time Intervals\" of the \"format with time-unit designators\"";
+        assert!(starts_topic(iso, day(30), parent, day(0)));
+        assert!(starts_topic(
+            "prokind column (was Re: [HACKERS] SQL procedures)",
+            day(45),
+            "Re: [HACKERS] SQL procedures",
+            day(0)
+        ));
+        // Too soon, a reply, the same topic, a version, or no date: not one.
+        assert!(!starts_topic(iso, day(29), parent, day(0)));
+        assert!(!starts_topic(
+            &format!("Re: {iso}"),
+            day(40),
+            parent,
+            day(0)
+        ));
+        assert!(!starts_topic(
+            "回复：Re: Cache relation sizes?",
+            day(40),
+            "Re: Cache relation sizes?",
+            day(0)
+        ));
+        assert!(!starts_topic(
+            "[PATCH v5] Are we losing momentum?",
+            day(40),
+            parent,
+            day(0)
+        ));
+        assert!(!starts_topic(
+            "JIT compiling with LLVM v11",
+            day(181),
+            "JIT compiling expressions/deform + inlining prototype",
+            day(0)
+        ));
+        assert!(!starts_topic("?", day(40), parent, day(0)));
+        assert!(!starts_topic(iso, None, parent, day(0)));
+        assert!(!starts_topic(iso, day(40), parent, None));
     }
 }

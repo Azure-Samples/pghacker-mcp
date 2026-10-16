@@ -129,6 +129,47 @@ fn message_ids_are_normalized() {
 }
 
 #[test]
+fn in_reply_to_takes_the_message_id_after_an_address() {
+    let parse_headers = |headers: &str| {
+        let raw = format!("Message-ID: <reply@example.org>\n{headers}\n\nx\n");
+        let msg = parse(raw.as_bytes()).unwrap();
+        (msg.in_reply_to, msg.references)
+    };
+    // exmh and MH-E write the sender replied to before the Message-ID.
+    let (parent, _) = parse_headers(
+        "In-Reply-To: Message from Tom Lane <tgl@sss.pgh.pa.us> \n\tof \"Tue, 24 Nov 1998 11:17:58 EST.\" <26279.911924278@sss.pgh.pa.us> ",
+    );
+    assert_eq!(parent.as_deref(), Some("26279.911924278@sss.pgh.pa.us"));
+    // nmh's form without one keeps the address: the store knows senders.
+    let (parent, _) =
+        parse_headers("In-Reply-To: Your message of \"Mon, 14 Apr 2003\" <a@example.org>");
+    assert_eq!(parent.as_deref(), Some("a@example.org"));
+    // elm's placeholder for a message without a Message-ID, and others.
+    let (parent, references) = parse_headers(
+        "In-Reply-To: <no.id> from \"nolan\" at Jul 09, 2003 01:29:06 PM\nReferences: <N/A> <r@example.org> <no.id>",
+    );
+    assert_eq!(parent, None);
+    assert_eq!(references, ["r@example.org"]);
+    // IDs that mailers mangled still name their conversation.
+    let (parent, references) = parse_headers(
+        "In-Reply-To: <ff3a0357-5b79-4fc7-8f47-663865d777cb.>\nReferences: <AckzBS5PNwDGidYbSuSDgtnRwVhKMA==> <ff3a0357-5b79-4fc7-8f47-663865d777cb.>",
+    );
+    assert_eq!(
+        parent.as_deref(),
+        Some("ff3a0357-5b79-4fc7-8f47-663865d777cb.")
+    );
+    assert_eq!(
+        references,
+        [
+            "AckzBS5PNwDGidYbSuSDgtnRwVhKMA==",
+            "ff3a0357-5b79-4fc7-8f47-663865d777cb."
+        ]
+    );
+    assert!(names_a_message("x@y") && names_a_message("12345678"));
+    assert!(!names_a_message("no.id") && !names_a_message("N/A") && !names_a_message("unknown"));
+}
+
+#[test]
 fn names_keep_their_addresses() {
     let parse_from = |from: &str| {
         let raw = format!("From: {from}\nMessage-ID: <n@example.org>\n\nbody\n");

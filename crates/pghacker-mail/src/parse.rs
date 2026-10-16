@@ -27,7 +27,9 @@ use crate::mbox;
 pub struct ParsedMessage {
     /// Without angle brackets or whitespace.
     pub message_id: String,
-    /// The first Message-ID of In-Reply-To.
+    /// The last Message-ID of In-Reply-To: MH and exmh write the address of
+    /// the sender replied to before it (`Message from Tom Lane
+    /// <tgl@sss.pgh.pa.us> of "…" <20593.1107191786@sss.pgh.pa.us>`).
     pub in_reply_to: Option<String>,
     /// References, oldest first, without duplicates or the message itself.
     pub references: Vec<String>,
@@ -108,11 +110,12 @@ pub fn parse(raw: &[u8]) -> Result<ParsedMessage> {
         .ok_or_else(|| anyhow!("the message has no Message-ID"))?;
     let in_reply_to = header_ids(&message, HeaderName::InReplyTo)
         .into_iter()
-        .find(|id| *id != message_id);
+        .rev()
+        .find(|id| *id != message_id && names_a_message(id));
     let mut seen = HashSet::from([message_id.clone()]);
     let references = header_ids(&message, HeaderName::References)
         .into_iter()
-        .filter(|id| seen.insert(id.clone()))
+        .filter(|id| names_a_message(id) && seen.insert(id.clone()))
         .collect();
     let (from_name, from_email) = sender(&message);
     let subject = message.subject().map(clean_header).unwrap_or_default();
@@ -134,6 +137,19 @@ pub fn parse(raw: &[u8]) -> Result<ParsedMessage> {
         raw_size: raw.len(),
         envelope_date,
     })
+}
+
+/// The longest token without an `@` that's a placeholder rather than an ID.
+pub const PLACEHOLDER_CHARS: usize = 7;
+
+/// Whether a token of In-Reply-To or References can name a message. Mailers
+/// write short placeholders without an `@` for a message that had no
+/// Message-ID, which replies to unrelated mail then share: elm's `<no.id>`,
+/// `<N/A>`. Longer tokens without one, IDs that their mailers mangled
+/// (Outlook's thread indexes, IDs cut at the `@`), still tell one
+/// conversation from another.
+pub fn names_a_message(id: &str) -> bool {
+    id.contains('@') || id.chars().count() > PLACEHOLDER_CHARS
 }
 
 /// A Message-ID without angle brackets, whitespace or control characters, as

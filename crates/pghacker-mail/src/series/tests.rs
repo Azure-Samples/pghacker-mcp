@@ -612,6 +612,24 @@ fn subjects_give_versions_the_names_lack() {
     assert_eq!(subject_version("AW: [PATCH v2] Fix"), None);
     assert_eq!(subject_version("[PATCH] Fix foo"), None);
     assert_eq!(subject_version("Fix foo v3"), None);
+    for versioned in [
+        "JIT compiling with LLVM v11",
+        "WIP: Faster Expression Processing v4",
+        "[PATCH v1] Allow COPY \"text\" to output a header",
+        "better atomics - v0.5",
+        "Refactor the [v2] parser",
+        "[PATCH v.7a] Fix",
+    ] {
+        assert!(subject_has_version(versioned), "{versioned}");
+    }
+    for plain in [
+        "[PATCH] Fix foo",
+        "uuidv7 support",
+        "pgv18 notes",
+        "Fix the v-tables",
+    ] {
+        assert!(!subject_has_version(plain), "{plain}");
+    }
     let s = |v: &str| Some(v.to_owned());
     assert_eq!(
         thread(&[

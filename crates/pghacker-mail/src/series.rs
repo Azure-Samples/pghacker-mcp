@@ -251,6 +251,13 @@ static SUBJECT_VERSION: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+/// A version word anywhere in a subject: `v4`, `[v2]`, `- v0.5`.
+static SUBJECT_WORD_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[\s,(\[/-])v\.?[0-9][0-9a-z]*(?:\.[0-9]{1,3}(?:[a-z][0-9a-z]*)?)*(?:$|[\s,;:.)\]])",
+    )
+    .unwrap()
+});
 
 /// What a patch file's name says: its version and part, and a number that
 /// may be a version with its thread. `sent_at` dates releases and bounds
@@ -309,6 +316,15 @@ pub fn subject_version(subject: &str) -> Option<String> {
         let label = SUBJECT_VERSION.captures(&tag[1])?.get(1)?.as_str();
         (!release(label, None)).then(|| label.to_owned())
     })
+}
+
+/// Whether a subject names a version anywhere: a `[PATCH v3]` tag or a word
+/// such as `v4` or `v0.5` (`JIT compiling with LLVM v11`), as a series
+/// re-posted under a new name does. Unlike [`subject_version`], a `v11`
+/// counts even while release 11 is current: a new name with a version
+/// continues a series more often than it names a release.
+pub fn subject_has_version(subject: &str) -> bool {
+    SUBJECT_WORD_VERSION.is_match(subject)
 }
 
 /// The series of a thread's patches, in order: what each name says, then

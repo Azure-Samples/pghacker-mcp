@@ -5,8 +5,15 @@
 //! patches, anchors and chunks, idempotently.
 //!
 //! Threads keep a stable identity, their root Message-ID, whichever order
-//! messages arrive in (months out of order, mbox and thread pages mixed):
+//! messages arrive in (months out of order, mbox and thread pages mixed).
+//! A message's ancestors are the Message-IDs of its In-Reply-To and
+//! References, without placeholders and senders' addresses, which old
+//! mailers wrote there ([`threading_ids`]); messages store those.
 //!
+//! 0. A message that starts a topic (sent 30 days or more after its parent,
+//!    under a subject of its own: [`subject::starts_topic`]) gets a thread of
+//!    its own, rooted at itself. A message below it ignores the ancestors
+//!    above it.
 //! 1. A message joins the thread of its closest stored ancestor (In-Reply-To,
 //!    then References from the newest).
 //! 2. Else the thread rooted at its first References entry (or In-Reply-To),
@@ -22,7 +29,8 @@
 //! Other threads the message connects (replies that arrived before it under
 //! a later root) merge into the chosen one, unless extracts already cite
 //! them, and a thread rooted at a later message of the chain takes the
-//! earlier root.
+//! earlier root. A topic takes the replies below it that arrived before it,
+//! or before its parent, unless extracts cite them.
 //!
 //! Authors match by lowercased address in `author_emails`. Text is stored as
 //! written, email addresses included; mail stored before ingest kept them
@@ -33,13 +41,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use anyhow::{Result, anyhow, ensure};
 use chrono::{DateTime, Utc};
 use pghacker_core::text::redact_emails;
-use tokio_postgres::Transaction;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
+use tokio_postgres::{GenericClient, Transaction};
 
 use crate::anchors::{self, AnchorRef};
 use crate::parse::{
-    ParsedMessage, display_name, display_name_without_addresses, normalize_message_id, sanitize,
+    ParsedMessage, display_name, display_name_without_addresses, names_a_message,
+    normalize_message_id, sanitize,
 };
 use crate::patch::{self, PatchFile};
 use crate::{chunk, clean, series, subject};
@@ -64,6 +73,114 @@ pub struct Stored {
 
 /// How long a thread stays open to replies that lost their headers.
 const SUBJECT_WINDOW_DAYS: i32 = 60;
+
+/// The Message-IDs that thread a message ([`threading_ids`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThreadingIds {
+    pub in_reply_to: Option<String>,
+    /// Oldest first.
+    pub references: Vec<String>,
+}
+
+impl ThreadingIds {
+    /// What messages store as their parent: In-Reply-To, else the last
+    /// References entry.
+    pub fn parent(&self) -> Option<&str> {
+        self.in_reply_to
+            .as_deref()
+            .or(self.references.last().map(String::as_str))
+    }
+}
+
+/// The IDs of `msg`'s In-Reply-To and References that name messages: not its
+/// own, not a placeholder, and not a sender's address. exmh and MH-E write
+/// the address of the sender replied to into In-Reply-To (`Message from Tom
+/// Lane <tgl@sss.pgh.pa.us> of "…"`), and other mailers copied it into
+/// References, so that replies to anything Tom wrote shared an "ancestor".
+/// An ID that no stored message has is an address when a known sender
+/// (`author_emails`) or the message's own sender has it.
+pub async fn threading_ids(
+    client: &impl GenericClient,
+    msg: &ParsedMessage,
+) -> Result<ThreadingIds> {
+    Ok(threading_ids_many(client, std::slice::from_ref(msg))
+        .await?
+        .pop()
+        .expect("one message's IDs"))
+}
+
+/// [`threading_ids`] of many messages, with one query.
+pub async fn threading_ids_many(
+    client: &impl GenericClient,
+    messages: &[ParsedMessage],
+) -> Result<Vec<ThreadingIds>> {
+    let named: Vec<ThreadingIds> = messages.iter().map(named_ids).collect();
+    let candidates: Vec<&String> = named
+        .iter()
+        .flat_map(|ids| ids.in_reply_to.iter().chain(&ids.references))
+        .filter(|id| id.contains('@'))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if candidates.is_empty() {
+        return Ok(named);
+    }
+    // Each candidate that no message has, and whether a known sender has it.
+    let unstored: HashMap<String, bool> = client
+        .query_typed(
+            "SELECT x.id, EXISTS (SELECT FROM author_emails e WHERE e.email = lower(x.id))
+             FROM unnest($1::text[]) AS x (id)
+             WHERE NOT EXISTS (SELECT FROM messages m WHERE m.message_id = x.id)",
+            &[(&candidates, Type::TEXT_ARRAY)],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    Ok(named
+        .into_iter()
+        .zip(messages)
+        .map(|(ids, msg)| {
+            let own = msg.from_email.as_deref().unwrap_or("").to_lowercase();
+            let address = |id: &String| {
+                unstored
+                    .get(id)
+                    .is_some_and(|&known| known || id.to_lowercase() == own)
+            };
+            ThreadingIds {
+                in_reply_to: ids.in_reply_to.filter(|id| !address(id)),
+                references: ids
+                    .references
+                    .into_iter()
+                    .filter(|id| !address(id))
+                    .collect(),
+            }
+        })
+        .collect())
+}
+
+/// `msg`'s In-Reply-To and References, normalized, without its own ID,
+/// placeholders and repeats.
+fn named_ids(msg: &ParsedMessage) -> ThreadingIds {
+    let message_id = normalize_message_id(&msg.message_id);
+    let names = |id: &String| !id.is_empty() && *id != message_id && names_a_message(id);
+    let in_reply_to = msg
+        .in_reply_to
+        .as_deref()
+        .map(normalize_message_id)
+        .filter(names);
+    let mut seen = HashSet::new();
+    let references = msg
+        .references
+        .iter()
+        .map(|id| normalize_message_id(id))
+        .filter(|id| names(id) && seen.insert(id.clone()))
+        .collect();
+    ThreadingIds {
+        in_reply_to,
+        references,
+    }
+}
 
 /// Stores a message with its thread, author, patches, anchors and chunks,
 /// or returns the stored one. On error, nothing of the message is written
@@ -526,12 +643,11 @@ async fn insert(
     message_id: &str,
     d: &Derived,
 ) -> Result<Option<Stored>> {
-    let thread_id = resolve_thread(tx, ctx, msg, message_id, &d.subject).await?;
+    let ids = threading_ids(tx, msg).await?;
+    let resolved = resolve_thread(tx, ctx, msg, &ids, message_id, &d.subject).await?;
+    let thread_id = resolved.thread;
     let author_id = resolve_author(tx, &d.from_name, msg.from_email.as_deref()).await?;
-    let parent = msg
-        .in_reply_to
-        .clone()
-        .or_else(|| msg.references.last().cloned());
+    let parent = ids.parent().map(str::to_owned);
     let has_patch = !d.patches.is_empty();
     let raw_size = i32::try_from(msg.raw_size).unwrap_or(i32::MAX);
     let row = tx
@@ -547,7 +663,7 @@ async fn insert(
                 (&ctx.list, Type::TEXT),
                 (&thread_id, Type::INT8),
                 (&parent, Type::TEXT),
-                (&msg.references, Type::TEXT_ARRAY),
+                (&ids.references, Type::TEXT_ARRAY),
                 (&author_id, Type::INT8),
                 (&d.from_name, Type::TEXT),
                 (&d.subject, Type::TEXT),
@@ -638,6 +754,7 @@ async fn insert(
     }) {
         series::refresh(tx, &[thread_id]).await?;
     }
+    settle_topics(tx, ctx, message_id, &d.subject, msg.sent_at, &resolved).await?;
     Ok(Some(Stored {
         message_row_id: id,
         thread_id,
@@ -645,64 +762,119 @@ async fn insert(
     }))
 }
 
+/// A stored ancestor of a message being threaded.
+struct Ancestor {
+    thread: i64,
+    root: String,
+    subject: String,
+    sent_at: Option<DateTime<Utc>>,
+    /// It starts a topic ([`subject::starts_topic`]).
+    starts_topic: bool,
+}
+
+/// Where [`resolve_thread`] put a message.
+struct Resolved {
+    thread: i64,
+    /// It starts a topic of its own.
+    starts_topic: bool,
+}
+
 /// The stored ancestor's thread, or the thread rooted in the message's chain,
 /// or the subject match, or a new thread; merging the other threads the
-/// message connects.
+/// message connects. A message that starts a topic gets a thread of its own;
+/// one below it ignores the ancestors above it.
 async fn resolve_thread(
     tx: &Transaction<'_>,
     ctx: &StoreContext,
     msg: &ParsedMessage,
+    ids: &ThreadingIds,
     message_id: &str,
     stored_subject: &str,
-) -> Result<i64> {
+) -> Result<Resolved> {
     let mut seen = HashSet::from([message_id.to_owned()]);
-    let ancestors: Vec<String> = msg
+    let mut ancestors: Vec<String> = ids
         .in_reply_to
         .iter()
-        .chain(msg.references.iter().rev())
-        .map(|id| normalize_message_id(id))
-        .filter(|id| !id.is_empty() && seen.insert(id.clone()))
+        .chain(ids.references.iter().rev())
+        .filter(|id| seen.insert((*id).clone()))
+        .cloned()
         .collect();
-    let root_hint = msg
-        .references
-        .first()
-        .or(msg.in_reply_to.as_ref())
-        .map(|id| normalize_message_id(id))
-        .filter(|id| !id.is_empty() && id != message_id);
-    let mut chain = vec![message_id.to_owned()];
-    chain.extend(ancestors.iter().cloned());
+    let mut root_hint = ids.references.first().or(ids.in_reply_to.as_ref()).cloned();
 
-    // Each stored ancestor's thread and its root, and the threads rooted in
-    // the chain.
+    // Each stored ancestor's thread and its root, and whether it starts a
+    // topic.
     let rows = tx
         .query_typed(
-            "SELECT 'stored', m.message_id, t.id, t.root_message_id
+            "SELECT m.message_id, t.id, t.root_message_id, m.subject, m.sent_at, p.subject, p.sent_at
              FROM messages m JOIN threads t ON t.id = m.thread_id
-             WHERE m.message_id = ANY($1)
-             UNION ALL
-             SELECT 'rooted', t.root_message_id, t.id, t.root_message_id
-             FROM threads t WHERE t.root_message_id = ANY($2)",
-            &[(&ancestors, Type::TEXT_ARRAY), (&chain, Type::TEXT_ARRAY)],
+             LEFT JOIN messages p ON p.message_id = m.parent_message_id
+             WHERE m.message_id = ANY($1)",
+            &[(&ancestors, Type::TEXT_ARRAY)],
         )
         .await?;
-    let mut stored: HashMap<String, i64> = HashMap::new();
-    let mut rooted: HashMap<String, i64> = HashMap::new();
-    let mut roots: HashMap<i64, String> = HashMap::new();
+    let mut found_ancestors: HashMap<String, Ancestor> = HashMap::new();
     for row in rows {
-        let kind: &str = row.get(0);
-        let key: String = row.get(1);
-        let thread: i64 = row.get(2);
-        roots.insert(thread, row.get(3));
-        if kind == "stored" {
-            stored.insert(key, thread);
-        } else {
-            rooted.insert(key, thread);
+        let subject: String = row.get(3);
+        let sent_at: Option<DateTime<Utc>> = row.get(4);
+        let parent_subject: Option<String> = row.get(5);
+        let starts_topic = parent_subject
+            .is_some_and(|parent| subject::starts_topic(&subject, sent_at, &parent, row.get(6)));
+        found_ancestors.insert(
+            row.get(0),
+            Ancestor {
+                thread: row.get(1),
+                root: row.get(2),
+                subject,
+                sent_at,
+                starts_topic,
+            },
+        );
+    }
+    let starts_topic = ids
+        .parent()
+        .and_then(|parent| found_ancestors.get(parent))
+        .is_some_and(|parent| {
+            subject::starts_topic(stored_subject, msg.sent_at, &parent.subject, parent.sent_at)
+        });
+    if starts_topic {
+        ancestors.clear();
+        root_hint = None;
+    } else if let Some(at) = ancestors
+        .iter()
+        .position(|a| found_ancestors.get(a).is_some_and(|a| a.starts_topic))
+    {
+        ancestors.truncate(at + 1);
+        root_hint = Some(ancestors[at].clone());
+    }
+    let mut chain = vec![message_id.to_owned()];
+    chain.extend(ancestors.iter().cloned());
+    let mut stored: HashMap<String, i64> = HashMap::new();
+    let mut roots: HashMap<i64, String> = HashMap::new();
+    for a in &ancestors {
+        if let Some(found) = found_ancestors.get(a) {
+            stored.insert(a.clone(), found.thread);
+            roots.insert(found.thread, found.root.clone());
         }
     }
+
+    // The threads rooted in the chain.
+    let rows = tx
+        .query_typed(
+            "SELECT root_message_id, id FROM threads WHERE root_message_id = ANY($1)",
+            &[(&chain, Type::TEXT_ARRAY)],
+        )
+        .await?;
+    let mut rooted: HashMap<String, i64> = HashMap::new();
+    for row in rows {
+        let thread: i64 = row.get(1);
+        roots.insert(thread, row.get(0));
+        rooted.insert(row.get(0), thread);
+    }
     // Without a stored ancestor: the threads of messages that reply to this
-    // one or share one of its ancestors that isn't stored.
+    // one or share one of its ancestors that isn't stored. A topic's replies
+    // that came first are gathered once it's stored ([`gather_topic`]).
     let mut shared: BTreeSet<i64> = BTreeSet::new();
-    if stored.is_empty() {
+    if stored.is_empty() && !starts_topic {
         let rows = tx
             .query_typed(
                 "SELECT t.id, t.root_message_id FROM threads t
@@ -790,7 +962,10 @@ async fn resolve_thread(
         )
         .await?;
     }
-    Ok(target)
+    Ok(Resolved {
+        thread: target,
+        starts_topic,
+    })
 }
 
 /// A thread with the same subject key, active around `sent_at`.
@@ -962,6 +1137,274 @@ async fn merge_thread(tx: &Transaction<'_>, from: i64, into: i64) -> Result<bool
             Err(error.into())
         }
     }
+}
+
+/// Most messages that gathering a topic's replies looks at.
+const GATHER_LIMIT: usize = 2000;
+
+/// Threads the topics that `message_id`'s arrival settles, as if mail came
+/// in order: a message that starts a topic takes the replies below it that
+/// came first, and its children stored before it that now start topics take
+/// theirs ([`gather_topic`]). Best effort: a gather that fails leaves the
+/// messages where they are, for `rethread_mail` to move.
+async fn settle_topics(
+    tx: &Transaction<'_>,
+    ctx: &StoreContext,
+    message_id: &str,
+    subject: &str,
+    sent_at: Option<DateTime<Utc>>,
+    resolved: &Resolved,
+) -> Result<()> {
+    let mut topics: Vec<(String, Option<i64>)> = Vec::new();
+    if resolved.starts_topic {
+        topics.push((message_id.to_owned(), Some(resolved.thread)));
+    }
+    let children = tx
+        .query_typed(
+            "SELECT m.message_id, m.subject, m.sent_at FROM messages m JOIN threads t ON t.id = m.thread_id
+             WHERE m.parent_message_id = $1 AND t.root_message_id <> m.message_id",
+            &[(&message_id, Type::TEXT)],
+        )
+        .await?;
+    for row in children {
+        if subject::starts_topic(row.get(1), row.get(2), subject, sent_at) {
+            topics.push((row.get(0), None));
+        }
+    }
+    for (topic, thread) in topics {
+        tx.batch_execute("SAVEPOINT pghacker_gather_topic").await?;
+        match gather_topic(tx, ctx, &topic, thread).await {
+            Ok(()) => {
+                tx.batch_execute("RELEASE SAVEPOINT pghacker_gather_topic")
+                    .await?
+            }
+            Err(error) => {
+                rollback_to(tx, "pghacker_gather_topic").await?;
+                tracing::warn!(
+                    %topic,
+                    error = %format!("{error:#}"),
+                    "cannot gather the replies below a topic; rethread_mail moves them"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A message below a topic that [`gather_topic`] may move.
+struct Below {
+    id: i64,
+    thread: i64,
+    parent: Option<String>,
+    references: Vec<String>,
+    subject: String,
+    sent_at: Option<DateTime<Utc>>,
+}
+
+/// Moves into `thread`, else the thread rooted at `topic` (created if
+/// missing), the topic and the messages below it, wherever they were
+/// threaded: those whose newest ancestor that starts a topic is `topic`.
+/// Nothing moves if extracts cite any of them, as threads that extracts cite
+/// don't merge: `rethread_mail` moves messages with their extracts. Threads
+/// left empty go.
+async fn gather_topic(
+    tx: &Transaction<'_>,
+    ctx: &StoreContext,
+    topic: &str,
+    thread: Option<i64>,
+) -> Result<()> {
+    let Some(row) = tx
+        .query_typed_opt(
+            "SELECT id, thread_id, subject, sent_at FROM messages WHERE message_id = $1",
+            &[(&topic, Type::TEXT)],
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let mut below: HashMap<String, Below> = HashMap::from([(
+        topic.to_owned(),
+        Below {
+            id: row.get(0),
+            thread: row.get(1),
+            parent: None,
+            references: Vec::new(),
+            subject: row.get(2),
+            sent_at: row.get(3),
+        },
+    )]);
+    let mut frontier = vec![topic.to_owned()];
+    while !frontier.is_empty() && below.len() < GATHER_LIMIT {
+        let known: Vec<&String> = below.keys().collect();
+        let rows = tx
+            .query_typed(
+                "SELECT id, message_id, thread_id, parent_message_id, references_ids, subject, sent_at
+                 FROM messages
+                 WHERE (references_ids && $1 OR parent_message_id = ANY($1)) AND message_id <> ALL($2)",
+                &[(&frontier, Type::TEXT_ARRAY), (&known, Type::TEXT_ARRAY)],
+            )
+            .await?;
+        frontier.clear();
+        for row in rows {
+            let message_id: String = row.get(1);
+            below.entry(message_id.clone()).or_insert_with(|| {
+                frontier.push(message_id);
+                Below {
+                    id: row.get(0),
+                    thread: row.get(2),
+                    parent: row.get(3),
+                    references: row.get(4),
+                    subject: row.get(5),
+                    sent_at: row.get(6),
+                }
+            });
+        }
+    }
+
+    // Which of them start topics of their own: their replies stay with them.
+    let outside: Vec<&String> = below
+        .values()
+        .filter_map(|b| b.parent.as_ref())
+        .filter(|p| !below.contains_key(*p))
+        .collect();
+    let mut parents: HashMap<String, (String, Option<DateTime<Utc>>)> = tx
+        .query_typed(
+            "SELECT message_id, subject, sent_at FROM messages WHERE message_id = ANY($1)",
+            &[(&outside, Type::TEXT_ARRAY)],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), (row.get(1), row.get(2))))
+        .collect();
+    for (id, b) in &below {
+        parents.insert(id.clone(), (b.subject.clone(), b.sent_at));
+    }
+    let nested: HashSet<&String> = below
+        .iter()
+        .filter(|(id, b)| {
+            *id != topic
+                && b.parent.as_ref().and_then(|p| parents.get(p)).is_some_and(
+                    |(parent_subject, parent_sent)| {
+                        subject::starts_topic(&b.subject, b.sent_at, parent_subject, *parent_sent)
+                    },
+                )
+        })
+        .map(|(id, _)| id)
+        .collect();
+    // A message is below the topic if its ancestors, up to the newest that
+    // starts a topic, include the topic or a message below it.
+    let mut kept: HashSet<&String> =
+        HashSet::from([below.get_key_value(topic).expect("the topic").0]);
+    loop {
+        let mut grew = false;
+        for (id, b) in &below {
+            if kept.contains(id) || nested.contains(id) {
+                continue;
+            }
+            for a in b.parent.iter().chain(b.references.iter().rev()) {
+                if kept.contains(a) {
+                    kept.insert(id);
+                    grew = true;
+                    break;
+                }
+                if nested.contains(a) {
+                    break;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // The topic's thread: the given one, else the one rooted at it, made
+    // only once something moves there.
+    let existing = match thread {
+        Some(thread) => Some(thread),
+        None => tx
+            .query_typed_opt(
+                "SELECT id FROM threads WHERE root_message_id = $1",
+                &[(&topic, Type::TEXT)],
+            )
+            .await?
+            .map(|row| row.get(0)),
+    };
+    let moving: Vec<&Below> = kept
+        .iter()
+        .map(|id| &below[*id])
+        .filter(|b| Some(b.thread) != existing)
+        .collect();
+    if moving.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<i64> = moving.iter().map(|b| b.id).collect();
+    let cited: bool = tx
+        .query_typed_one(
+            "SELECT EXISTS (SELECT FROM citations WHERE message_id = ANY($1))",
+            &[(&ids, Type::INT8_ARRAY)],
+        )
+        .await?
+        .get(0);
+    if cited {
+        tracing::warn!(%topic, "extracts cite replies below the topic; not gathering them");
+        return Ok(());
+    }
+    let target = match existing {
+        Some(thread) => thread,
+        None => {
+            let t = &below[topic];
+            create_thread(tx, ctx, topic, &t.subject, t.sent_at).await?
+        }
+    };
+    let threads: Vec<i64> = moving
+        .iter()
+        .map(|b| b.thread)
+        .chain([target])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    tx.execute_typed(
+        "SELECT FROM threads WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE",
+        &[(&threads, Type::INT8_ARRAY)],
+    )
+    .await?;
+    tx.execute_typed(
+        "UPDATE messages SET thread_id = $2 WHERE id = ANY($1)",
+        &[(&ids, Type::INT8_ARRAY), (&target, Type::INT8)],
+    )
+    .await?;
+    tx.execute_typed(
+        "UPDATE message_chunks SET thread_id = $2 WHERE message_id = ANY($1)",
+        &[(&ids, Type::INT8_ARRAY), (&target, Type::INT8)],
+    )
+    .await?;
+    recount_threads(tx, &threads).await?;
+    tx.execute_typed(
+        "DELETE FROM threads t WHERE t.id = ANY($1) AND NOT EXISTS (SELECT FROM messages m WHERE m.thread_id = t.id)",
+        &[(&threads, Type::INT8_ARRAY)],
+    )
+    .await?;
+    series::refresh(tx, &threads).await?;
+    tracing::info!(%topic, target, moved = ids.len(), "gathered the replies below a topic");
+    Ok(())
+}
+
+/// Recounts threads' messages and dates after messages moved, and bumps
+/// their content versions.
+pub async fn recount_threads(client: &impl GenericClient, threads: &[i64]) -> Result<()> {
+    client
+        .execute_typed(
+            "UPDATE threads t
+             SET message_count = s.n, started_at = s.first_at, last_at = s.last_at,
+                 content_version = t.content_version + 1, updated_at = now()
+             FROM (SELECT t2.id, count(m.id)::int AS n, min(m.sent_at) AS first_at, max(m.sent_at) AS last_at
+                   FROM threads t2 LEFT JOIN messages m ON m.thread_id = t2.id
+                   WHERE t2.id = ANY($1) GROUP BY t2.id) s
+             WHERE t.id = s.id",
+            &[(&threads, Type::INT8_ARRAY)],
+        )
+        .await?;
+    Ok(())
 }
 
 /// The canonical author of an address, created if new; without an address,
