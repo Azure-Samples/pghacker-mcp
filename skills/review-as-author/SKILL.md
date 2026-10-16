@@ -61,12 +61,14 @@ Skip what doesn't apply: a contributor may have no commits.
 ### 4. The reviewer's stated views
 
 - `author_perspective(author: <id>, topic: <the one-sentence summary>, paths: [<changed files>])`: their positions on this topic and on features implemented in these files, with quotes. Each position says whether it matched the topic, the paths or both.
+- The kind of change, stated generically ("showing computed values in a monitoring view", "adding a field to a planner struct", "restricting what an admin tool may do"): `author_perspective(author: <id>, topic: <the kind of change>)`. How they judged similar proposals predicts their verdict better than anything else.
 - For each checklist dimension the change touches, at most four, `author_perspective(author: <id>, topic: <the dimension's topic>)`.
 - `search_threads(query: <topic>, author: <id>)` for their messages on similar proposals. Read the best one or two in context with `get_thread`.
 
 ### 5. The review
 
-- Keep the points with the strongest evidence that apply to this change: stated objections (stances `opposes` and `concerned`) first, then recurring themes, then the questions they habitually ask. Usually three to six points.
+- Lead with their likely verdict on the premise and the approach, before any detail: is the problem real and common enough to fix, and is what the change costs (complexity, struct size, work on hot paths, new user-visible semantics, a restriction on what experts can do, one more way to do something) worth it? A committer's first reply most often argues exactly this. Their positions by stance (`get_author`) show how often they push back; when the record shows them rejecting similar changes, predict that, rather than a friendly list of details.
+- Then the other points with the strongest evidence that apply to this change: stated objections (stances `opposes` and `concerned`) first, then recurring themes, then the questions they habitually ask. Usually three to six points in all.
 - For each point, give what they would raise, where in the change, and the basis: a quote with its Message-ID and date, or a commit.
 - Check every quote before you answer, with one `query`:
 
@@ -115,7 +117,7 @@ To predict what the reviewer would have said on a date, for example to compare w
 ```markdown
 > Simulated review: what <Name> would likely say about <subject>, predicted from <Name>'s public pgsql-hackers messages and commits. These aren't <Name>'s words or opinion.
 
-**Likely stance:** <one sentence>
+**Likely verdict:** <one sentence: on the premise and the approach>
 
 **What <Name> would likely raise**
 
