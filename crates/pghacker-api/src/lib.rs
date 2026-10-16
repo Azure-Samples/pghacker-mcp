@@ -35,7 +35,9 @@ pub mod descriptions {
         (stance and summary on features and decisions) that match the topic through their own text or the feature or \
         decision they are about, best first, in mode fulltext, semantic or hybrid (default; semantic and hybrid keep \
         only positions close to the topic), each with cited quotes; plus their most relevant messages on the topic as \
-        further evidence.";
+        further evidence. paths (files or folders, such as a patch's) adds their positions on features implemented \
+        there, and each position says whether it matched the topic, the paths or both. until (a date) keeps only \
+        evidence from before it: what they had said by then.";
     pub const SEARCH_AUTHORS: &str =
         "Finds authors by name, with how many messages they wrote and when.";
     pub const GET_AUTHOR: &str = "Returns an author's profile: names used, message counts and dates, most active \

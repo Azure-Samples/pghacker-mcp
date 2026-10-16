@@ -317,6 +317,91 @@ async fn narrows_an_author_perspective_to_the_topic() {
 }
 
 #[tokio::test]
+async fn adds_positions_on_the_paths_and_keeps_only_evidence_from_before_until() {
+    let db = corpus().await;
+    // Bob's position on a vacuum feature, cited in his message of 2026-06-10.
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO features (id, slug, name, description, status) VALUES
+                 (2, 'autovacuum-cost-limits', 'Autovacuum cost limits', 'Raise the autovacuum cost limits.', 'proposed');
+             INSERT INTO feature_files (feature_id, path, thread_id) VALUES (2, 'src/backend/postmaster/autovacuum.c', 11);
+             INSERT INTO positions (id, author_id, thread_id, feature_id, stance, summary) VALUES
+                 (3, 2, 11, 2, 'proposes', 'Wants higher autovacuum cost limits for modern disks.');
+             INSERT INTO citations (extract_kind, extract_id, message_id, quote) VALUES
+                 ('position', 3, 103, 'cost limits are too low for modern disks');",
+        )
+        .await
+        .unwrap();
+    let reader = db.reader().await.unwrap();
+    let perspective = |extra: Value| {
+        let mut arguments =
+            json!({ "author": 2, "topic": "autovacuum cost limits", "mode": "fulltext" });
+        for (key, value) in extra.as_object().unwrap() {
+            arguments[key] = value.clone();
+        }
+        let reader = &reader;
+        async move {
+            people::author_perspective(reader, None, args(arguments))
+                .await
+                .unwrap()
+        }
+    };
+    let ids = |out: &Value| -> Vec<i64> {
+        out["positions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["position_id"].as_i64().unwrap())
+            .collect()
+    };
+
+    // The topic finds the vacuum position; a folder of the parser adds the
+    // position on the JSON_TABLE feature implemented there.
+    let out =
+        perspective(json!({ "paths": ["./src/backend/parser/", "src/backend/parser"] })).await;
+    assert_eq!(ids(&out), [3, 1], "{out:#}");
+    assert_eq!(out["positions"][0]["matched"], json!(["topic"]));
+    assert_eq!(out["positions"][1]["matched"], json!(["paths"]));
+    assert_eq!(out["paths"], json!(["src/backend/parser"]));
+    // A file matches as itself; `_` in a path is a character, not a wildcard.
+    let file = perspective(json!({ "paths": ["src/backend/parser/parse_jsontable.c"] })).await;
+    assert_eq!(ids(&file), [3, 1], "{file:#}");
+    let wildcard = perspective(json!({ "paths": ["src/backend/pars_r"] })).await;
+    assert_eq!(ids(&wildcard), [3], "{wildcard:#}");
+    // Without paths, no position says how it matched.
+    let plain = perspective(json!({})).await;
+    assert_eq!(ids(&plain), [3]);
+    assert!(plain["positions"][0].get("matched").is_none());
+    assert!(plain.get("paths").is_none());
+
+    // Before Bob's vacuum message, he had no position on vacuum, nor any
+    // message about it.
+    let before =
+        perspective(json!({ "until": "2026-06-10", "paths": ["src/backend/parser"] })).await;
+    assert_eq!(ids(&before), [1], "{before:#}");
+    assert_eq!(before["until"], "2026-06-10");
+    assert!(
+        before["messages"].as_array().unwrap().is_empty(),
+        "{before:#}"
+    );
+    // A position counts only once every message it cites came before.
+    let earlier =
+        perspective(json!({ "until": "2026-06-02", "paths": ["src/backend/parser"] })).await;
+    assert!(ids(&earlier).is_empty(), "{earlier:#}");
+    let plan = people::author_perspective(
+        &reader,
+        None,
+        args(json!({ "author": 2, "topic": "PLAN clause complexity", "mode": "fulltext", "until": "2026-06-03" })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&plan), [1], "{plan:#}");
+    assert_eq!(plan["messages"][0]["message_id"], "m2@example.org");
+}
+
+#[tokio::test]
 async fn searches_extracts_with_citations() {
     let db = corpus().await;
     let reader = db.reader().await.unwrap();

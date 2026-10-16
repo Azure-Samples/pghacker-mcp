@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,6 +55,17 @@ pub struct AuthorPerspectiveArgs {
     /// Positions to return, 1 to 20. Default 8.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Files or folders from the source root, such as the files a patch
+    /// changes (src/backend/optimizer/plan/planner.c, src/include/nodes):
+    /// the author's positions on features implemented in them count too,
+    /// besides those matching the topic.
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Only evidence from before this date (YYYY-MM-DD): positions whose
+    /// cited messages were all sent before it, and messages sent before it.
+    /// For what the author had said by then.
+    #[serde(default)]
+    pub until: Option<NaiveDate>,
 }
 
 pub async fn search_authors(client: &impl GenericClient, args: SearchAuthorsArgs) -> Result<Value> {
@@ -164,11 +175,37 @@ pub async fn author_perspective(
         .get(0);
     let searcher = Searcher::new(args.mode, &args.topic, embedder).await?;
     let authors = vec![id];
-    let position_ids: Vec<i64> = topic_positions(client, &searcher, id)
-        .await?
+    let until = args
+        .until
+        .and_then(|day| day.and_hms_opt(0, 0, 0))
+        .map(|day| day.and_utc());
+    let paths = source_paths(&args.paths);
+    // The topic's rankings fused into one, then fused with the paths' at
+    // equal weight, so that neither crowds the other out.
+    let topic_ranked: Vec<i64> = rrf(&topic_positions(client, &searcher, id).await?, RRF_K)
         .into_iter()
+        .map(|(position, _)| position)
+        .collect();
+    let path_ranked = if paths.is_empty() {
+        Vec::new()
+    } else {
+        path_positions(client, id, &paths).await?
+    };
+    let mut rankings = vec![topic_ranked.clone(), path_ranked.clone()];
+    if let Some(until) = until {
+        let before = positions_before(client, id, until).await?;
+        for ranking in &mut rankings {
+            ranking.retain(|position| before.contains(position));
+        }
+    }
+    rankings.retain(|ranking| !ranking.is_empty());
+    let position_ids: Vec<i64> = rrf(&rankings, RRF_K)
+        .into_iter()
+        .map(|(position, _)| position)
         .take(limit)
         .collect();
+    let on_topic: HashSet<i64> = topic_ranked.into_iter().collect();
+    let on_paths: HashSet<i64> = path_ranked.into_iter().collect();
     let cites = citations(client, "position", &position_ids, 3).await?;
     let mut positions: HashMap<i64, Value> = HashMap::new();
     for row in client
@@ -182,7 +219,7 @@ pub async fn author_perspective(
         .await?
     {
         let pid: i64 = row.get(0);
-        positions.insert(pid, json!({
+        let mut position = json!({
             "position_id": pid, "stance": row.get::<_, String>(1), "summary": row.get::<_, String>(2),
             "feature": row.get::<_, Option<String>>(3).map(|slug| json!({
                 "slug": slug, "name": row.get::<_, Option<String>>(4), "status": row.get::<_, Option<String>>(5) })),
@@ -190,7 +227,16 @@ pub async fn author_perspective(
             "thread": { "thread_id": row.get::<_, i64>(8), "subject": row.get::<_, String>(9),
                         "last_at": row.get::<_, Option<DateTime<Utc>>>(10) },
             "citations": cites.get(&pid).cloned().unwrap_or_default(),
-        }));
+        });
+        if !paths.is_empty() {
+            let matched: Vec<&str> = [("topic", &on_topic), ("paths", &on_paths)]
+                .into_iter()
+                .filter(|(_, ids)| ids.contains(&pid))
+                .map(|(how, _)| how)
+                .collect();
+            position["matched"] = json!(matched);
+        }
+        positions.insert(pid, position);
     }
     let ordered: Vec<Value> = position_ids
         .iter()
@@ -204,7 +250,7 @@ pub async fn author_perspective(
     }
     // The author's own most relevant messages, as further evidence.
     let mut chunks = searcher
-        .rank_chunks(client, Some(&authors), None, None, 40)
+        .rank_chunks(client, Some(&authors), None, until, 40)
         .await?;
     if let Some(embedding) = topic_embedding(&searcher) {
         let ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
@@ -271,6 +317,12 @@ pub async fn author_perspective(
         "stances": stances,
         "messages": messages,
     });
+    if !paths.is_empty() {
+        out["paths"] = json!(paths);
+    }
+    if let Some(until) = args.until {
+        out["until"] = json!(until);
+    }
     if position_ids.is_empty() {
         out["note"] = json!(
             "No extracted positions match this topic yet; the author's own messages below are the evidence."
@@ -282,6 +334,74 @@ pub async fn author_perspective(
     Ok(out)
 }
 
+/// `paths` as `feature_files` has them: from the source root, without a
+/// leading `./` or `/` or a trailing `/`.
+fn source_paths(paths: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    paths
+        .iter()
+        .map(|path| {
+            let path = path.trim();
+            let path = path.strip_prefix("./").unwrap_or(path);
+            path.trim_matches('/').to_owned()
+        })
+        .filter(|path| !path.is_empty() && seen.insert(path.clone()))
+        .collect()
+}
+
+/// The author's positions on features implemented in `paths` (files, or
+/// folders and what's below them), directly or through a decision about the
+/// feature: those touching the most of the paths first, then the latest.
+async fn path_positions(
+    client: &impl GenericClient,
+    author: i64,
+    paths: &[String],
+) -> Result<Vec<i64>> {
+    let below: Vec<String> = paths
+        .iter()
+        .map(|path| {
+            let escaped = path
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("{escaped}/%")
+        })
+        .collect();
+    let rows = client
+        .query(
+            "SELECT p.id
+             FROM positions p LEFT JOIN decisions d ON d.id = p.decision_id
+             JOIN feature_files ff ON ff.feature_id = coalesce(p.feature_id, d.feature_id)
+             JOIN threads t ON t.id = p.thread_id
+             WHERE p.author_id = $1 AND (ff.path = ANY ($2) OR ff.path LIKE ANY ($3))
+             GROUP BY p.id, t.last_at
+             ORDER BY count(DISTINCT ff.path) DESC, t.last_at DESC NULLS LAST, p.id
+             LIMIT 200",
+            &[&author, &paths, &below],
+        )
+        .await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
+/// The author's positions whose cited messages were all sent before `until`.
+async fn positions_before(
+    client: &impl GenericClient,
+    author: i64,
+    until: DateTime<Utc>,
+) -> Result<HashSet<i64>> {
+    let rows = client
+        .query(
+            "SELECT c.extract_id
+             FROM citations c JOIN positions p ON p.id = c.extract_id
+             JOIN messages m ON m.id = c.message_id
+             WHERE c.extract_kind = 'position' AND p.author_id = $1
+             GROUP BY c.extract_id HAVING max(m.sent_at) < $2",
+            &[&author, &until],
+        )
+        .await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
 /// The topic's embedding when the mode uses semantic search.
 fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfVector> {
     searcher
@@ -289,15 +409,16 @@ fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfV
         .filter(|_| searcher.mode != Mode::Fulltext)
 }
 
-/// The author's positions on the topic, best first. A position matches
-/// through its summary or through the feature or decision it is about, since
-/// a summary often leaves its subject implicit. With an embedding, a position
-/// counts only within the topic cutoff, so loose text matches drop out.
+/// The rankings of the author's positions on the topic, best first, for RRF
+/// to fuse. A position matches through its summary or through the feature or
+/// decision it is about, since a summary often leaves its subject implicit.
+/// With an embedding, a position counts only within the topic cutoff, so
+/// loose text matches drop out.
 async fn topic_positions(
     client: &impl GenericClient,
     searcher: &Searcher<'_>,
     author: i64,
-) -> Result<Vec<i64>> {
+) -> Result<Vec<Vec<i64>>> {
     let mut rankings: Vec<Vec<i64>> = Vec::new();
     let mut counted: Option<HashSet<i64>> = None;
     if let Some(embedding) = topic_embedding(searcher) {
@@ -361,8 +482,5 @@ async fn topic_positions(
         }
     }
     rankings.retain(|ranking| !ranking.is_empty());
-    Ok(rrf(&rankings, RRF_K)
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect())
+    Ok(rankings)
 }
