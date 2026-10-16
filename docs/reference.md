@@ -103,6 +103,24 @@ FROM (
 WHERE scoped.line LIKE '%for (%';
 ```
 
+## Skills
+
+pghacker-mcp serves [Agent Skills](https://agentskills.io/specification) as MCP's [skills extension](https://modelcontextprotocol.io/extensions/skills/overview) (SEP-2640, `io.modelcontextprotocol/skills`) defines. Its capabilities declare the extension and resources. `skills/list` and `skills/get` give each skill's frontmatter and the SHA-256 digest and size of each of its files, and resources/list and resources/read serve the files at `skill://<name>/<file>`. The skills are the repository's `skills/` folder, embedded in the binary when it's built; startup refuses a skill that breaks the Agent Skills rules or the extension's limits. Usage telemetry records each `skills/list`, `skills/get` and resource read, with its URI.
+
+| Skill | What it does |
+| --- | --- |
+| [`review-as-author`](../skills/review-as-author/SKILL.md) | Reviews a patch, commit or design as a given pgsql-hackers author would: the points they would likely raise, each with a quote of their own message or one of their commits, in the third person and marked as a prediction. Points without their evidence stay apart, as general reviewer notes. With an as-of date, it uses only what they had said by then |
+
+`author_perspective` serves the skill with two arguments: `paths`, a patch's files or folders, adds the author's positions on the features implemented there (`feature_files`); `until` keeps only positions whose cited messages, and messages, came before a date.
+
+Few clients load skills from MCP servers yet; the extension's [client matrix](https://modelcontextprotocol.io/extensions/client-matrix) tracks them. Elsewhere:
+
+- a client that reads MCP resources can attach `skill://review-as-author/SKILL.md` to a conversation;
+- any agent that reads skills from folders can use a copy of `skills/review-as-author`, such as in `.claude/skills/` for Claude Code or `.github/skills/` for GitHub Copilot;
+- the server's instructions name the skill and summarize its procedure, for agents that see only the tools.
+
+`npm run eval` checks the skill against what authors actually said: `eval/reviews.json` has 10 patches posted to pgsql-hackers, each with the points its reviewer actually raised. An agent reviews each patch as that reviewer would have when it was posted, with the skill (`--skill skills/review-as-author/SKILL.md`, or its `skill://` URI, read from the server and checked against its digests) or without it, as a baseline. A review passes when a judge finds the reviewer's main point in it, its citations are verbatim, at least two quote the reviewer's own words, and none came on or after the patch's date. The [README](../README.md#check-it) has the command.
+
 ## Email addresses
 
 Text keeps the email addresses written in it: subjects, bodies, patches and senders' names. `author_emails`, which matches senders' addresses to authors, isn't readable by pghacker-mcp, and the graph doesn't use it.
@@ -200,6 +218,7 @@ cargo run --locked -p pghacker-replay --example profile_full
 | `crates/pghacker-replay` | The search replays and the history's parity check |
 | `migrations/`, `db/` | The schema, and the PostgreSQL image |
 | `plugin/` | Branding, agents and the MCP catalog |
+| `skills/` | The skills pghacker-mcp serves |
 | `home/` | The public home page: React, Vite and TypeScript |
 | `scripts/` | The launcher, the site's routes and its edge, crawl and evaluation drivers; the container's supervisor, the home page's server, probe and corpus restore |
 | `Dockerfile`, `deploy/` | The image, and the Azure deployment |

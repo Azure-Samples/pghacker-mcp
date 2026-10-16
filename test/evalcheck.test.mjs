@@ -2,8 +2,12 @@
 // Licensed under the MIT license.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
-import { checkCommits, citedCommits, lastJsonBlock, normalizeForQuote, parseCsv, quoteIn, resultsTable } from "../scripts/lib/evalcheck.mjs";
+import {
+  checkCommits, checkReview, citedCommits, lastJsonBlock, MAX_DIFF_CHARS, normalizeForQuote, parseCsv, quoteIn, resultsTable,
+  reviewPrompt, reviewTable, verifySkill,
+} from "../scripts/lib/evalcheck.mjs";
 
 test("quotes match across wrapping and quote markers, like the indexer's check", () => {
   const body = "On Monday Tom wrote:\n> I think we should not\n> commit this patch yet.\n\nAgreed.";
@@ -61,4 +65,81 @@ test("the results table reports the commit checks, with a dash where they don't 
   assert.equal(rows[0], "| q01: Why \\| how? | decision | yes | yes | yes | — | — | 30 |");
   assert.equal(rows[1], "| q24: JIT? | time-travel | yes | yes | no | yes | no | 41 |");
   assert.equal(rows[2], "| q25: SCRAM? | time-travel | no | no | no | — | — |  |");
+});
+
+test("a review prompt shows the patch, the reviewer and the date, and the skill only when given", () => {
+  const plain = reviewPrompt({ reviewer: "Tom Lane", asOf: "2026-10-05", subject: "Show xmin", diff: "+int x;" });
+  assert.match(plain, /as Tom Lane would have when it was posted, on 2026-10-05\./);
+  assert.match(plain, /only evidence from before 2026-10-05/);
+  assert.match(plain, /````diff\n\+int x;\n````/);
+  assert.doesNotMatch(plain, /<skill>/);
+  const withSkill = reviewPrompt({ reviewer: "Tom Lane", asOf: "2026-10-05", subject: "Show xmin", diff: "+int x;", skill: "---\nname: s\n---\nSteps.\n" });
+  assert.match(withSkill, /<skill>\n---\nname: s\n---\nSteps\.\n<\/skill>/);
+  assert.equal(withSkill.replace(/\n\nFollow this skill[\s\S]*<\/skill>/, ""), plain);
+  const long = reviewPrompt({ reviewer: "A", asOf: "2026-01-01", subject: "s", diff: "x".repeat(MAX_DIFF_CHARS + 10) });
+  assert.match(long, /the rest of the patch is cut/);
+});
+
+test("a review's citations count the reviewer's own words and catch what came after", () => {
+  const found = new Map([
+    ["own@x", { author: "Tom Lane", sent_at: "2026-09-01T10:00:00+00:00", body_clean: "Adding a field there breaks the ABI." }],
+    ["quoted@x", { author: "Tom Lane", sent_at: "2026-09-02T10:00:00+00:00", body_clean: "I agree." }],
+    ["other@x", { author: "Andres Freund", sent_at: "2026-09-03T10:00:00+00:00", body_clean: "Adding a field there breaks the ABI." }],
+    ["late@x", { author: "Tom Lane", sent_at: "2026-10-05T00:00:00+00:00", body_clean: "This patch is wrong." }],
+    ["gold@x", { author: "Tom Lane", sent_at: "2026-09-04T00:00:00+00:00", body_clean: "Not like this." }],
+  ]);
+  const citations = [
+    { message_id: "own@x", quote: "breaks the ABI." },
+    { message_id: "own@x", quote: "Adding a field there" },
+    { message_id: "quoted@x", quote: "something someone else wrote" },
+    { message_id: "other@x", quote: "breaks the ABI." },
+    { message_id: "late@x", quote: "This patch is wrong." },
+    { message_id: "gold@x", quote: "Not like this." },
+    { message_id: "missing@x", quote: "anything at all" },
+  ];
+  const checked = checkReview(citations, found, { reviewer: " tom lane ", asOf: "2026-10-05", goldIds: ["gold@x"] });
+  // own@x once, late@x and gold@x are the reviewer's own words too, but leak.
+  assert.equal(checked.own, 3);
+  assert.deepEqual(checked.leaked.sort(), ["gold@x", "late@x"]);
+  assert.deepEqual(checkReview([], found, { reviewer: "Tom Lane", asOf: "2026-10-05" }), { own: 0, leaked: [] });
+});
+
+test("the review table shows the reviewer, the score and the review checks", () => {
+  const [header, , ...rows] = reviewTable([
+    { id: "r01", subject: "Show xmin | slots", reviewer: "Andres Freund", correct: true, score: 0.5, citations_valid: true, own_citations: 3, leaked: [], seconds: 120 },
+    { id: "r02", subject: "x", reviewer: "Tom Lane", pass: false, error: "no JSON answer block" },
+  ]);
+  assert.match(header, /\| Reviewer's own \| No leak \| Seconds \|$/);
+  assert.equal(rows[0], "| r01: Show xmin \\| slots | Andres Freund | yes | 0.50 | yes | 3 | yes | 120 |");
+  assert.equal(rows[1], "| r02: x | Tom Lane | no |  | no | 0 | no |  |");
+});
+
+test("a skill read from a server must match its entry's digests and sizes", () => {
+  const text = "---\nname: s\ndescription: d\n---\nÉtape.\n";
+  const digest = `sha256:${createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex")}`;
+  const size = Buffer.byteLength(text, "utf8");
+  const entry = { uri: "skill://s/SKILL.md", resources: [{ uri: "skill://s/SKILL.md", digest, size }] };
+  assert.deepEqual(verifySkill(entry, new Map([["skill://s/SKILL.md", text]])), []);
+  assert.match(verifySkill(entry, new Map([["skill://s/SKILL.md", `${text} `]])).join("\n"), /bytes, not/);
+  assert.deepEqual(verifySkill(entry, new Map()), ["skill://s/SKILL.md: not read"]);
+  assert.deepEqual(verifySkill({ uri: "skill://s/SKILL.md", resources: "dynamic" }, new Map()), ["the entry lists no files"]);
+});
+
+test("each review question names its reviewer, date and patch, and quotes the actual review", async () => {
+  const { readFileSync } = await import("node:fs");
+  const reviews = JSON.parse(readFileSync(new URL("../eval/reviews.json", import.meta.url), "utf8"));
+  assert.ok(reviews.length >= 10);
+  const ids = new Set();
+  for (const review of reviews) {
+    assert.match(review.id, /^r\d{2}$/);
+    assert.ok(!ids.has(review.id), review.id);
+    ids.add(review.id);
+    assert.equal(review.kind, "review", review.id);
+    assert.ok(review.reviewer && review.subject && review.patch_message_id && review.question, review.id);
+    assert.match(review.as_of, /^\d{4}-\d{2}-\d{2}$/, review.id);
+    assert.match(review.gold_answer, /^\S[\s\S]*Supporting detail: \S/, review.id);
+    assert.ok(review.gold_answer.startsWith(review.reviewer), review.id);
+    assert.ok(review.gold_citations.length > 0, review.id);
+    for (const citation of review.gold_citations) assert.ok([...normalizeForQuote(citation.quote)].length >= 12, review.id);
+  }
 });

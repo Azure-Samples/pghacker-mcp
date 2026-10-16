@@ -21,6 +21,8 @@ COPY vendor vendor
 COPY crates crates
 COPY migrations migrations
 COPY config config
+# The skills pghacker-mcp serves, embedded in its binary.
+COPY skills skills
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --release --locked -p pghacker-indexer -p pghacker-mcp \

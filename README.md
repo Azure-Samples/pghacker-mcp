@@ -62,14 +62,19 @@ Connect any MCP client to `http://127.0.0.1:3102/mcp`, or ask a **pghacker Evalu
 | Code | `search`, `grep`, `read_file`, `list_files` and `blame`, at any commit; `get_commit` and `search_commits`, like `git show` and `git log`; `search_patches`, in the patches posted to the list |
 | SQL and graph | `get_ontology` describes the data; `query` runs one read-only SQL statement, Cypher included |
 
+It also serves a skill, [`review-as-author`](skills/review-as-author/SKILL.md): a review of a patch, commit or design as a given pgsql-hackers author would give it (Tom Lane, say), each point quoting that author's own messages. Clients that support MCP's skills extension find it at `skill://review-as-author/SKILL.md`. Elsewhere, attach that resource, or install the folder as a skill in your agent; the [reference](docs/reference.md#skills) explains.
+
 ## Check it
 
 ```bash
 npm test             # the launcher, configuration, readiness and evaluation helpers
 npm run rust:check   # rustfmt, clippy and the Rust tests
-npm run smoke        # with the app running: both servers, the portal, the worker and the agents
+npm run smoke        # with the app running: both servers and their skills, the portal, the worker and the agents
 npm run eval         # with the data loaded: 30 questions (eval/questions.json), into eval/RESULTS.md
+npm run eval -- --questions eval/reviews.json --skill skills/review-as-author/SKILL.md --results eval/RESULTS-reviews.md
 ```
+
+The last reviews 10 patches as their actual reviewers would have, with the `review-as-author` skill; without `--skill`, it gives the baseline.
 
 ## Deploy to Azure
 
@@ -77,7 +82,7 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 
 ## Privacy and telemetry
 
-A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments and the shape of its answer, the client, and an approximate location; and each view of the home page. To turn it off, set `usage_enabled = false` and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
+A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments and the shape of its answer (or the skill file read), the client, and an approximate location; and each view of the home page. To turn it off, set `usage_enabled = false` and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
 
 ## Learn more
 

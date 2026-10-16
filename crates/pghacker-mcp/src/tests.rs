@@ -219,3 +219,57 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
     assert_eq!(properties(agent_call)["arg.text"], "agent");
     assert_eq!(usage.lost(), 0);
 }
+
+#[tokio::test]
+async fn reads_of_the_skills_are_recorded_with_their_uris() {
+    let ingestion = Ingestion::start().await;
+    let usage = Usage::new(Settings {
+        endpoint: ingestion.url.clone(),
+        instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+        id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+        role: "pghacker-mcp".into(),
+        version: "0.1.0".into(),
+        instance: None,
+    })
+    .unwrap();
+    let server =
+        McpServer::new(Echo, "echo", "1", "Echo.").with_skills(crate::tools::skills().unwrap());
+    let base = listen(internal(router(server, None), &usage)).await;
+    let client = reqwest::Client::new();
+    let uri = crate::tools::REVIEW_SKILL;
+    let requests = [
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {} }),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "skills/get", "params": { "uri": uri } }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": uri } }),
+        json!({ "jsonrpc": "2.0", "id": 4, "method": "skills/get", "params": { "uri": "skill://nope/SKILL.md" } }),
+    ];
+    for request in requests {
+        assert_eq!(post(&client, &base, &[], request).await, 200);
+    }
+
+    usage.flush().await;
+    let events = ingestion.received();
+    let seen: Vec<(&str, Option<&str>, &str)> = events
+        .iter()
+        .map(|event| {
+            let properties = properties(event);
+            (
+                properties["action"].as_str().unwrap(),
+                properties["uri"].as_str(),
+                properties["activityStatus"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("McpSkillsList", None, "Succeeded"),
+            ("McpSkillsGet", Some(uri), "Succeeded"),
+            ("McpResourceRead", Some(uri), "Succeeded"),
+            ("McpSkillsGet", Some("skill://nope/SKILL.md"), "Failed"),
+        ],
+        "{events:#?}"
+    );
+    assert_eq!(events[0]["tags"]["ai.operation.name"], "skills/list");
+    assert_eq!(usage.lost(), 0);
+}

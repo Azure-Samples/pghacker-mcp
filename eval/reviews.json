@@ -1,0 +1,135 @@
+[
+ {
+  "id": "r01",
+  "kind": "review",
+  "reviewer": "Tom Lane",
+  "as_of": "2026-09-23",
+  "subject": "[PATCH] Add ALTER SYSTEM RELOAD",
+  "patch_message_id": "5A1F1E3B-D22F-487B-9480-D3DDB5F0C2A1@gmail.com",
+  "question": "Review \"[PATCH] Add ALTER SYSTEM RELOAD\" as Tom Lane would have on 2026-09-23.",
+  "gold_answer": "Tom Lane opposed the proposal: more than one way to do a security-relevant operation such as reloading the configuration is a bad thing, and the patch loses an explainable scope for ALTER SYSTEM, which exists to change configuration parameters (it reuses the SET and RESET machinery to change GUC values system-wide), not to carry out other server actions. Supporting detail: the patch's new summary for the command, 'change or reload the server configuration', isn't self-consistent and implies that any configuration can be changed through it, although pg_hba.conf stays out of scope; overloading ALTER SYSTEM with more unrelated actions such as log rotation or promotion would make that worse; and the command doesn't exist for discoverability.",
+  "gold_citations": [
+   { "message_id": "1811098.1790278160@sss.pgh.pa.us", "quote": "isn't a great thing for security-relevant operations" },
+   { "message_id": "1811098.1790278160@sss.pgh.pa.us", "quote": "I don't like the loss of an explainable scope for what ALTER SYSTEM does" }
+  ]
+ },
+ {
+  "id": "r02",
+  "kind": "review",
+  "reviewer": "Tom Lane",
+  "as_of": "2026-09-29",
+  "subject": "[PATCH] intXshr, intXshl: return error on shift count out of range",
+  "patch_message_id": "180711790717647@mail.360.yandex.ru",
+  "question": "Review \"[PATCH] intXshr, intXshl: return error on shift count out of range\" as Tom Lane would have on 2026-09-29.",
+  "gold_answer": "Tom Lane rejected the premise: the integer shift operators exist to give access to the C-level bitwise operators, which do whatever they do on the platform, and there's no contract restricting them to a portable subset, so raising errors for out-of-range shift counts would break code that works where it's used. Supporting detail: PostgreSQL treats other platform-dependent behavior, such as floating-point math, the same way and doesn't hide the differences; at most a documentation change could say the operators act like C's << operator; ASAN's notion of undefined behavior shouldn't dictate the choice, and a test on a RISC-V machine showed no crash and results consistent with using the low six bits of the count.",
+  "gold_citations": [
+   { "message_id": "936421.1790796286@sss.pgh.pa.us", "quote": "the purpose of these functions and their siblings is to provide access to the C-level bitwise operators" },
+   { "message_id": "1034484.1790808916@sss.pgh.pa.us", "quote": "I reject the notion that we should let ASAN dictate our choices here" }
+  ]
+ },
+ {
+  "id": "r03",
+  "kind": "review",
+  "reviewer": "Tom Lane",
+  "as_of": "2026-10-12",
+  "subject": "find_all_inheritors() with NoLock fails on concurrently dropped sub-partitions",
+  "patch_message_id": "CAN4CZFMp2oRXb_AC6+6+NxdjPHE2DJHFz_5WTpm99ovjKD9xTA@mail.gmail.com",
+  "question": "Review \"find_all_inheritors() with NoLock fails on concurrently dropped sub-partitions\" as Tom Lane would have on 2026-10-12.",
+  "gold_answer": "Tom Lane opposed making find_all_inheritors() tolerate relations dropped concurrently: a caller should pass NoLock only when it already holds a lock on the whole inheritance tree, so the callers that don't are what's wrong, and the function's semantics shouldn't be made squishy to accommodate them. Supporting detail: Tom Lane called the patch's approach quite horrid.",
+  "gold_citations": [
+   { "message_id": "736636.1791916552@sss.pgh.pa.us", "quote": "NoLock should only be used if the caller already got a lock on the whole inheritance tree" }
+  ]
+ },
+ {
+  "id": "r04",
+  "kind": "review",
+  "reviewer": "Andres Freund",
+  "as_of": "2026-08-11",
+  "subject": "[PATCH] bufmgr: tighten LWLock:BufferMapping on InvalidateBuffer",
+  "patch_message_id": "CAE8JnxOR9cJtXGG-3Ki33zHyh5oEcuVeRqeToEvu-44T+R-DnA@mail.gmail.com",
+  "question": "Review \"[PATCH] bufmgr: tighten LWLock:BufferMapping on InvalidateBuffer\" as Andres Freund would have on 2026-08-11.",
+  "gold_answer": "Andres Freund rejected the patch as unsafe: it holds a spinlock across operations as complicated as acquiring an LWLock and deleting from the buffer mapping hash table, which must never happen; and changing the nesting of locks in one place would cause undetected deadlocks. Supporting detail: waiting on the spinlock already backs off exponentially, through perform_spin_delay(); holding spinlocks this way also breaks error recovery, as Andres Freund had explained in an earlier thread.",
+  "gold_citations": [
+   { "message_id": "hsnzvaqgbcy5z273m3ha773xhvinvdvxbssl6bz67w4spgg2h3@zv77ylqbly5m", "quote": "And without that the patch is completely unsafe." },
+   { "message_id": "wgdm7wmxmw4bprczss5adlrw523n4k7sb6imqir2ffculhj5lr@lkbykmjlkzsl", "quote": "You can't just change the nesting of locks in one place." }
+  ]
+ },
+ {
+  "id": "r05",
+  "kind": "review",
+  "reviewer": "Andres Freund",
+  "as_of": "2026-10-05",
+  "subject": "Show effective xmin in pg_replication_slots when xmin is not set",
+  "patch_message_id": "CALj2ACUMUpAapqFDCVV2op3FiL7yUAXPRzQhVUiAWE4mzU3K=A@mail.gmail.com",
+  "question": "Review \"Show effective xmin in pg_replication_slots when xmin is not set\" as Andres Freund would have on 2026-10-05.",
+  "gold_answer": "Andres Freund strongly opposed showing a computed effective xmin in pg_replication_slots' xmin column: changing which value the view shows, without any indication, would make it impossible to understand what the slot actually contains, and faking up values is a terrible idea. Supporting detail: the patch's argument is bogus, since by the same logic every other xid the system waits for could be shown too; adding more columns might be arguable.",
+  "gold_citations": [
+   { "message_id": "bknkxzg3xfbf2nonxwmc7od2e4rya3n4ufhaiedimrj7rnvywf@vrhsvashv7zz", "quote": "I strongly am against making it impossible to understand what values the slot actually contains." }
+  ]
+ },
+ {
+  "id": "r06",
+  "kind": "review",
+  "reviewer": "Robert Haas",
+  "as_of": "2026-09-28",
+  "subject": "Costing for parallel scans with few/single row produced in the outer side",
+  "patch_message_id": "CAEze2Wi+Jp26mhBJvrMshKGYNTtPcxzd1BWoEW_7+eH6saj3gQ@mail.gmail.com",
+  "question": "Review \"Costing for parallel scans with few/single row produced in the outer side\" as Robert Haas would have on 2026-09-28.",
+  "gold_answer": "Robert Haas doubted the approach: making Path bigger for this isn't a good idea when there are so few reports of the problem, and treating a very small number of rows as a special case that needs special handling is worrying, though there's an argument for it, since the planner also gets small LIMIT values wrong. Supporting detail: Robert Haas searched the archives for other reports of the problem and found one clear example, from Mark Kirkwood, and cases close to it, one of which seemed to have more to do with expensive worker startup and shutdown.",
+  "gold_citations": [
+   { "message_id": "CA+TgmobUaa0OAkUBOy0E-BxkG1k+0FZacFzp93_sPJPDQgx3Tw@mail.gmail.com", "quote": "I'm not sure that making Path bigger for this is a good idea." }
+  ]
+ },
+ {
+  "id": "r07",
+  "kind": "review",
+  "reviewer": "Michael Paquier",
+  "as_of": "2026-09-29",
+  "subject": "pg_resetwal: refuse to run when backup_label exists",
+  "patch_message_id": "CAGRkXqTEM51AHwzvs6QVVrJJDXVD9g5QwrfMYp3-BkM9Ph-G8A@mail.gmail.com",
+  "question": "Review \"pg_resetwal: refuse to run when backup_label exists\" as Michael Paquier would have on 2026-09-29.",
+  "gold_answer": "Michael Paquier argued against restricting pg_resetwal when a backup_label file exists: the tool is a footgun for those who don't know what they're doing, but for those who do, running it on a data folder with a backup_label file can be very useful when salvaging data from a corrupted instance. Supporting detail: Michael Paquier would rather have the opposite of a restriction, an option to overwrite the DBState in the control file; the tool should have been renamed long ago (pg_control_update, or, half joking, pg_footgun); and Michael Paquier later said he didn't see the patch's value.",
+  "gold_citations": [
+   { "message_id": "ar8mhs05SzC4hjmu@paquier.xyz", "quote": "I don't think that we should restrict that at all." }
+  ]
+ },
+ {
+  "id": "r08",
+  "kind": "review",
+  "reviewer": "Peter Eisentraut",
+  "as_of": "2026-08-23",
+  "subject": "Re: pg_upgrade --copy-file-range fails with EINVAL on Linux 4.19",
+  "patch_message_id": "CAJh1VjaroPYzOC_XgFeH9vz_18eV6nqJVsvw4okE76ddt+uwBg@mail.gmail.com",
+  "question": "Review \"Re: pg_upgrade --copy-file-range fails with EINVAL on Linux 4.19\" as Peter Eisentraut would have on 2026-08-23.",
+  "gold_answer": "Peter Eisentraut said the approach is not correct: a check at build time can't tell what copy_file_range() supports on the kernel pg_upgrade runs against, which most likely isn't the one PostgreSQL was built against. Supporting detail: the check might instead belong in pg_upgrade's --check phase, or perhaps nothing needs to be done, because copy_file_range() returns a clean error when what's asked isn't supported.",
+  "gold_citations": [
+   { "message_id": "2974dfa8-4abf-4012-bc1b-a093a542100d@eisentraut.org", "quote": "You don't know whether the kernel you are running against is the one you built against." }
+  ]
+ },
+ {
+  "id": "r09",
+  "kind": "review",
+  "reviewer": "Melanie Plageman",
+  "as_of": "2026-09-14",
+  "subject": "Opportunistic pruning is lost under direct io, and nothing shows it",
+  "patch_message_id": "CAGRkXqTA_bSyrpWQE5MqmwrZ4CqqCwoyVqeykBC4NfE6+DPV9Q@mail.gmail.com",
+  "question": "Review \"Opportunistic pruning is lost under direct io, and nothing shows it\" as Melanie Plageman would have on 2026-09-14.",
+  "gold_answer": "Melanie Plageman opposed the patch: its scenario is too contrived to expect in real workloads (shared_buffers with room for 1,000 blocks is highly unrealistic), and adding four columns to pg_stat_all_tables isn't worth it for this. Supporting detail: a cumulative count says little over time, especially for bursty workloads, while the log shows when vacuum couldn't clean up a table; the only remedy in that scenario is a larger shared_buffers; other vacuum statistics might deserve cumulative counters, but not this one.",
+  "gold_citations": [
+   { "message_id": "CAAKRu_ZK8ohrrQUvWcSo7MQp4Jrc8o0nhq3gn3CimP0KODzTfg@mail.gmail.com", "quote": "Adding four columns to pg_stat_all_tables is not worth it for this." }
+  ]
+ },
+ {
+  "id": "r10",
+  "kind": "review",
+  "reviewer": "Chao Li",
+  "as_of": "2026-09-23",
+  "subject": "[PATCH] Add ALTER SYSTEM RELOAD",
+  "patch_message_id": "5A1F1E3B-D22F-487B-9480-D3DDB5F0C2A1@gmail.com",
+  "question": "Review \"[PATCH] Add ALTER SYSTEM RELOAD\" as Chao Li would have on 2026-09-23.",
+  "gold_answer": "Chao Li questioned the privilege model: pg_reload_conf() relies on ordinary function privileges, so a superuser can grant EXECUTE on it to other roles, but the patch's ALTER SYSTEM RELOAD requires superuser, so two interfaces for essentially the same action would have different privilege models. Supporting detail: Chao Li pointed to the patch's AlterSystemReloadConfig(), which refuses non-superusers, and asked why the new command needs stronger privileges than pg_reload_conf().",
+  "gold_citations": [
+   { "message_id": "B254502B-2BF5-4A17-BA04-1E4AA6D878B3@gmail.com", "quote": "Is there a reason ALTER SYSTEM RELOAD needs stronger privileges than pg_reload_conf()?" }
+  ]
+ }
+]

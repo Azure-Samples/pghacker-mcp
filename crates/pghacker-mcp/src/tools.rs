@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, LazyLock};
 
+use include_dir::{Dir, include_dir};
 use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,12 +16,17 @@ use pghacker_codesearch as code;
 use pghacker_core::db::Pool;
 use pghacker_core::embed::Embedder;
 use pghacker_core::mcp::{Effect, Output, ToolSpec, Tools, failed, parse, schema};
+use pghacker_core::skills::Skills;
 use pghacker_sqlquery as sql;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NoArgs {}
 
 const READ: Effect = Effect::Read;
+
+/// The skill for reviewing as a given author would, which the instructions name.
+#[cfg(test)]
+pub const REVIEW_SKILL: &str = "skill://review-as-author/SKILL.md";
 
 /// The server's instructions.
 pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and \
@@ -33,11 +39,23 @@ grep (grep command lines), read_file and list_files read the version named (a ma
 tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) and paths below \
 /branch/<name>/, /tag/<name>/ or /commit/<rev>/; blame, get_commit and search_commits answer as git blame, \
 git show and git log, with the threads that discussed each commit. Cite Message-IDs, commit SHAs and file \
-paths with line numbers in answers.";
+paths with line numbers in answers. To review a patch, commit or design as a given author would (Tom Lane, \
+say), follow the skill skill://review-as-author/SKILL.md (resources/read reads it). In short: their positions \
+with author_perspective (topic: what the change does; paths: its files), their commits in those files with \
+search_commits (author, paths) and blame, and each point attributed to them only with a quote of their own \
+message.";
 
 /// The server's instructions.
 pub fn instructions() -> &'static str {
     INSTRUCTIONS
+}
+
+/// The repository's skills folder, embedded at build time.
+static SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../skills");
+
+/// The skills pghacker-mcp serves (the skills extension, SEP-2640).
+pub fn skills() -> anyhow::Result<Skills> {
+    Skills::from_dir(&SKILLS)
 }
 
 pub static TOOLS: &[ToolSpec] = &[
@@ -350,6 +368,74 @@ mod tests {
         }
         for table in ["code_commits", "code_commit_threads", "code_line_instances"] {
             assert!(sql::HISTORY_NOTE.contains(table), "{table}");
+        }
+    }
+
+    #[test]
+    fn the_skills_load_and_the_instructions_name_the_review_skill() {
+        let skills = skills().unwrap();
+        let review = skills.get(REVIEW_SKILL).expect("the review skill");
+        assert_eq!(review.name, "review-as-author");
+        assert!(INSTRUCTIONS.contains(REVIEW_SKILL));
+        // Hosts get the whole skill even when they only read SKILL.md.
+        assert_eq!(review.files.len(), 1);
+    }
+
+    /// The tool calls the review skill writes as `name(argument: ...)`, with
+    /// their arguments' names.
+    fn skill_calls(text: &str) -> Vec<(String, Vec<String>)> {
+        let span = regex::Regex::new(r"`([a-z_]+)\(([^`]*)\)`").unwrap();
+        let argument = regex::Regex::new(r"(?:^|, )([a-z_]+): ").unwrap();
+        span.captures_iter(text)
+            .map(|call| {
+                let names = argument
+                    .captures_iter(&call[2])
+                    .map(|name| name[1].to_owned())
+                    .collect();
+                (call[1].to_owned(), names)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_review_skill_calls_only_served_tools_with_their_arguments() {
+        let skills = skills().unwrap();
+        let review = skills.get(REVIEW_SKILL).unwrap();
+        let calls = skill_calls(&review.files[0].text);
+        let called: Vec<&str> = calls.iter().map(|(tool, _)| tool.as_str()).collect();
+        for needed in [
+            "author_perspective",
+            "search_commits",
+            "blame",
+            "search_threads",
+        ] {
+            assert!(called.contains(&needed), "the skill should call {needed}");
+        }
+        for (tool, arguments) in &calls {
+            let spec = TOOLS
+                .iter()
+                .find(|spec| spec.name == tool)
+                .unwrap_or_else(|| panic!("the skill calls {tool}, which isn't served"));
+            let schema = (spec.schema)();
+            let properties = schema["properties"].as_object().unwrap();
+            for argument in arguments {
+                assert!(
+                    properties.contains_key(argument),
+                    "{tool} has no argument {argument}"
+                );
+            }
+        }
+        let compatibility = review.frontmatter["compatibility"].as_str().unwrap();
+        let listed = compatibility
+            .split_once(": ")
+            .unwrap()
+            .1
+            .trim_end_matches('.');
+        for tool in listed
+            .split([',', ' '])
+            .filter(|word| !word.is_empty() && *word != "and")
+        {
+            assert!(TOOLS.iter().any(|spec| spec.name == tool), "{tool}");
         }
     }
 }

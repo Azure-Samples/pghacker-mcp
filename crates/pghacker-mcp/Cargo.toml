@@ -12,6 +12,7 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 http.workspace = true
+include_dir.workspace = true
 pghacker-api.workspace = true
 pghacker-codesearch.workspace = true
 pghacker-core.workspace = true
@@ -25,4 +26,5 @@ tokio-postgres.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+regex.workspace = true
 reqwest.workspace = true

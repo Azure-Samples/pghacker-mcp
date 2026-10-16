@@ -499,6 +499,13 @@ npm run eval -- --mcp-url "$(terraform -chdir=deploy/terraform output -raw mcp_u
 
 Concurrency 1 keeps the agents within the endpoint's per-client rate limit.
 
+The review evaluation runs the same way. Its skill is the one the deployment serves, which the script checks against the digests `skills/get` gives:
+
+```sh
+npm run eval -- --mcp-url "$(terraform -chdir=deploy/terraform output -raw mcp_url)" --concurrency 1 \
+    --questions eval/reviews.json --skill skill://review-as-author/SKILL.md --results eval/RESULTS-reviews.md
+```
+
 ## Operations
 
 - **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[home]`, `[oauth2-proxy]`.

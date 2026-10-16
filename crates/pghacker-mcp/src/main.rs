@@ -2,10 +2,11 @@
 // Licensed under the MIT license.
 
 //! pghacker-mcp: the public MCP server. Stateless, read-only (pgh_reader),
-//! rate-limited per client, no LLM calls beyond query embeddings. An
-//! optional second listener, for agents in the same deployment, serves
-//! loopback clients without the limit. With PGHACKER_USAGE_ENDPOINT set,
-//! both listeners record usage (`pghacker_core::usage`).
+//! rate-limited per client, no LLM calls beyond query embeddings. It serves
+//! the repository's skills too (`skills/`). An optional second listener, for
+//! agents in the same deployment, serves loopback clients without the limit.
+//! With PGHACKER_USAGE_ENDPOINT set, both listeners record usage
+//! (`pghacker_core::usage`).
 
 mod ratelimit;
 mod tools;
@@ -80,7 +81,8 @@ async fn main() -> Result<()> {
         "pghacker-mcp",
         env!("CARGO_PKG_VERSION"),
         instructions(),
-    );
+    )
+    .with_skills(tools::skills().context("the embedded skills")?);
     let front_door = env
         .get("PGHACKER_FRONT_DOOR_ID")
         .map(|id| FrontDoor(Arc::from(id.trim())));

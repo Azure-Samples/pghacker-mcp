@@ -6,6 +6,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, wri
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { LOCAL_HOST, platformEnvironment, serviceEnvironments, serviceUrl } from "./config.mjs";
+import { verifySkill } from "./evalcheck.mjs";
 
 export const SERVICES = {
   indexer: { binary: "pghacker-indexer", args: ["serve"], portKey: "indexerPort" },
@@ -213,16 +214,43 @@ export async function checkServices(config, { timeout = 60_000, fetchImpl = fetc
 
 /** Calls an MCP tool through the stateless JSON-RPC endpoint; returns its JSON or text. */
 export async function callTool(url, name, args = {}, { timeout = 120_000, fetchImpl = fetch } = {}) {
-  await postJson(url, {
-    jsonrpc: "2.0", id: 1, method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "pghacker-scripts", version: "1" } },
-  }, timeout, fetchImpl);
-  const reply = await postJson(url, {
-    jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args },
-  }, timeout, fetchImpl);
+  const reply = await mcpRequest(url, "tools/call", { name, arguments: args }, { timeout, fetchImpl, raw: true });
   if (reply.error) throw new Error(`${name}: ${reply.error.message}`);
   const result = reply.result ?? {};
   const text = (result.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
   if (result.isError) throw new Error(`${name}: ${text}`);
   return result.structuredContent ?? text;
+}
+
+/**
+ * Sends one MCP request, such as skills/get or resources/read, after a
+ * client's initialize; returns its result, or with `raw` the whole reply.
+ */
+export async function mcpRequest(url, method, params = {}, { timeout = 120_000, fetchImpl = fetch, raw = false } = {}) {
+  await postJson(url, {
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "pghacker-scripts", version: "1" } },
+  }, timeout, fetchImpl);
+  const reply = await postJson(url, { jsonrpc: "2.0", id: 2, method, params }, timeout, fetchImpl);
+  if (raw) return reply;
+  if (reply.error) throw new Error(`${method}: ${reply.error.message}`);
+  return reply.result;
+}
+
+/**
+ * The names of the skills an MCP server lists, after reading each of their
+ * files as a host would and checking it against the listing's digest.
+ */
+export async function checkSkills(url, { timeout = 30_000, fetchImpl = fetch } = {}) {
+  const { skills = [] } = await mcpRequest(url, "skills/list", {}, { timeout, fetchImpl });
+  for (const skill of skills) {
+    const texts = new Map();
+    for (const { uri } of Array.isArray(skill.resources) ? skill.resources : []) {
+      const { contents } = await mcpRequest(url, "resources/read", { uri }, { timeout, fetchImpl });
+      texts.set(uri, contents?.[0]?.text);
+    }
+    const problems = verifySkill(skill, texts);
+    if (problems.length) throw new Error(`${skill.uri} doesn't match its listing: ${problems.join("; ")}`);
+  }
+  return skills.map((skill) => skill.frontmatter?.name ?? skill.uri);
 }
