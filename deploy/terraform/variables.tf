@@ -743,9 +743,9 @@ variable "feedback_min_questions" {
 }
 
 variable "feedback_clients" {
-  description = "The interactive apps feedback can ask, by the name their MCP requests give (clientInfo.name), matched ignoring case (PGHACKER_FEEDBACK_CLIENTS): Copilot CLI and the GitHub Copilot app, Codex CLI, VS Code, Claude Code, the Claude app and Cursor. Scripts, agents and other apps are never asked."
+  description = "The interactive apps feedback can ask: any whose MCP requests give a name (clientInfo.name) that contains one of these, ignoring case (PGHACKER_FEEDBACK_CLIENTS). The defaults match Copilot CLI and the GitHub Copilot app, Codex CLI, VS Code and its Insiders build, Claude Code and the Claude app, and Cursor. Scripts, agents and other apps are never asked."
   type        = list(string)
-  default     = ["copilot-cli", "codex-mcp-client", "Visual Studio Code", "Visual Studio Code - Insiders", "claude-code", "claude-ai", "cursor-vscode"]
+  default     = ["copilot", "codex", "Visual Studio Code", "claude", "cursor"]
   nullable    = false
 
   validation {

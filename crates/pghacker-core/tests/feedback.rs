@@ -497,7 +497,7 @@ async fn only_interactive_clients_that_can_show_a_form_are_asked() {
     for client in &never {
         client.questions(3).await;
     }
-    // An app on the list is matched ignoring case.
+    // An app whose name contains one on the list, ignoring case, is asked.
     let codex = Client::new(&base, "198.51.100.5").named(Some("Codex-MCP-Client"));
     codex.questions(1).await;
     codex.held().await;

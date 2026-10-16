@@ -121,7 +121,7 @@ run "usage_is_recorded_by_default" {
         PGHACKER_FEEDBACK_QUESTION_GAP  = "180"
         PGHACKER_FEEDBACK_SESSION_GAP   = "600"
         PGHACKER_FEEDBACK_MIN_QUESTIONS = "5"
-        PGHACKER_FEEDBACK_CLIENTS       = "copilot-cli,codex-mcp-client,Visual Studio Code,Visual Studio Code - Insiders,claude-code,claude-ai,cursor-vscode"
+        PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
       }
       && !anytrue(flatten([
         for job in azurerm_container_app_job.this : [

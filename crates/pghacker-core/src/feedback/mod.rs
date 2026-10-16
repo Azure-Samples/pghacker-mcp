@@ -6,8 +6,9 @@
 //! 2026-07-28 protocol's multi round-trip requests) as the user's next
 //! question starts.
 //!
-//! An interactive client, an address and an app on the list, is followed by
-//! the pauses between its tool calls ([`questions`]): a gap over the question
+//! An interactive client, an address and an app whose name contains one on
+//! the list, is followed by the pauses between its tool calls
+//! ([`questions`]): a gap over the question
 //! gap starts a question, and one under the session gap keeps the session
 //! active. When a call starts a question in an active session, after the
 //! client's first questions and in an hour that the draw arms for the
@@ -25,8 +26,8 @@
 //!
 //! Off unless usage telemetry is on and PGHACKER_FEEDBACK_RATE is above 0.
 //! A request with no client identity (the internal listener), with
-//! `feedback=off` in its URL, from an app off the list, or that can't show a
-//! form is never followed or asked.
+//! `feedback=off` in its URL, from an app whose name contains none on the
+//! list, or that can't show a form is never followed or asked.
 
 mod form;
 mod questions;
@@ -61,18 +62,12 @@ const REJECTIONS_PER_MINUTE: u32 = 60;
 const MAX_ADDRESSES: usize = 100_000;
 const MAX_ANSWERED: usize = 100_000;
 
-/// The apps asked by default, by `clientInfo` name: Copilot CLI (and the
-/// GitHub Copilot app), Codex CLI, VS Code and VS Code Insiders, Claude
-/// Code, the Claude app, and Cursor.
-pub const CLIENTS: &[&str] = &[
-    "copilot-cli",
-    "codex-mcp-client",
-    "Visual Studio Code",
-    "Visual Studio Code - Insiders",
-    "claude-code",
-    "claude-ai",
-    "cursor-vscode",
-];
+/// The apps asked by default: any whose `clientInfo` name contains one of
+/// these, ignoring case. That's Copilot CLI and the GitHub Copilot app
+/// (`copilot-cli`), Codex CLI (`codex-mcp-client`), VS Code and VS Code
+/// Insiders, Claude Code (`claude-code`) and the Claude app (`claude-ai`),
+/// and Cursor (`cursor-vscode`).
+pub const CLIENTS: &[&str] = &["copilot", "codex", "Visual Studio Code", "claude", "cursor"];
 
 /// What the environment sets.
 #[derive(Clone, Debug, PartialEq)]
@@ -87,8 +82,8 @@ pub struct Settings {
     pub session_gap: Duration,
     /// The questions a client asks before it can be asked.
     pub min_questions: u32,
-    /// The apps that can be asked, by `clientInfo` name, matched ignoring
-    /// case.
+    /// The apps that can be asked: any whose `clientInfo` name contains one
+    /// of these, ignoring case.
     pub clients: Vec<String>,
     /// For trying the form by hand: every question after a client's first
     /// is asked, whatever the pause before it, the warm-up, the draw, the
@@ -239,8 +234,9 @@ impl Feedback {
     ///   in seconds (180 and 600): a longer gap starts a question, a shorter
     ///   one keeps the session active;
     /// - PGHACKER_FEEDBACK_MIN_QUESTIONS (5), the questions before an ask;
-    /// - PGHACKER_FEEDBACK_CLIENTS, the apps asked, by `clientInfo` name and
-    ///   separated by commas; unset or blank, [`CLIENTS`];
+    /// - PGHACKER_FEEDBACK_CLIENTS, the apps asked: names separated by
+    ///   commas, any of which an app's `clientInfo` name contains, ignoring
+    ///   case; unset or blank, [`CLIENTS`];
     /// - PGHACKER_FEEDBACK_DEBUG (false), for trying the form by hand: every
     ///   question after a client's first is asked ([`Settings::debug`]).
     ///
@@ -556,17 +552,22 @@ impl Inner {
     }
 
     /// The client `caller` is, if it can be followed and asked: an address,
-    /// an app on the list, a form it can show, and feedback not turned off.
+    /// an app whose name contains one on the list, ignoring case, a form it
+    /// can show, and feedback not turned off. Apps are told apart by their
+    /// whole names.
     fn key(&self, caller: &Caller<'_>) -> Option<Key> {
         let user = caller.user?;
         if caller.opted_out || !caller.elicits {
             return None;
         }
         let app = caller.app.as_deref()?.trim().to_lowercase();
-        self.clients.contains(&app).then(|| Key {
-            user: user.to_owned(),
-            app,
-        })
+        self.clients
+            .iter()
+            .any(|name| app.contains(name.as_str()))
+            .then(|| Key {
+                user: user.to_owned(),
+                app,
+            })
     }
 
     fn question_gap(&self) -> u64 {
@@ -1085,18 +1086,52 @@ mod tests {
         never(&feedback, &without(|c| c.elicits = false));
         never(&feedback, &without(|c| c.app = None));
         never(&feedback, &without(|c| c.app = Some("mcp".into())));
-        never(&feedback, &without(|c| c.app = Some("copilot".into())));
+        never(&feedback, &without(|c| c.app = Some("pilot-cli".into())));
+        never(&feedback, &without(|c| c.app = Some("VS Code".into())));
         never(&Feedback::off(), &caller(USER));
         let none = feedback_with(|settings| settings.clients.clear());
         never(&none, &caller(USER));
         assert!(!feedback_with(|settings| settings.rate = 0.0).is_on());
-        // The list matches names ignoring case, and only the names on it.
+        // The list matches any name that contains one on it, ignoring case.
         let mine = feedback_with(|settings| settings.clients = vec!["My App".into()]);
         let mut app = caller(USER);
-        app.app = Some("my app".into());
+        app.app = Some("the MY APP client".into());
         let t = questions(&mine, &app, 0, 5);
         ask(&mine, &app, "search", t);
         never(&mine, &caller(OTHER));
+    }
+
+    #[test]
+    fn the_default_list_matches_the_interactive_clients_names() {
+        let feedback = always();
+        let inner = feedback.inner.as_ref().unwrap();
+        for (name, asked) in [
+            ("copilot-cli", true),
+            ("GitHub Copilot", true),
+            ("codex-mcp-client", true),
+            ("Visual Studio Code", true),
+            ("Visual Studio Code - Insiders", true),
+            ("claude-code", true),
+            ("claude-ai", true),
+            ("Claude Desktop", true),
+            ("cursor-vscode", true),
+            ("mcp", false),
+            ("python-mcp-client", false),
+            ("VS Code", false),
+            ("", false),
+        ] {
+            let mut caller = caller(USER);
+            caller.app = Some(name.into());
+            assert_eq!(inner.key(&caller).is_some(), asked, "{name:?}");
+        }
+        // Two apps that match the same name are told apart.
+        let mut code = caller(USER);
+        code.app = Some("claude-code".into());
+        let mut app = caller(USER);
+        app.app = Some("Claude-AI".into());
+        let (code, app) = (inner.key(&code).unwrap(), inner.key(&app).unwrap());
+        assert_ne!(code, app);
+        assert_eq!(app.app, "claude-ai");
     }
 
     fn feedback_with(change: impl FnOnce(&mut Settings)) -> Feedback {

@@ -96,7 +96,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `feedback_question_gap_seconds` | `180` | A pause between a client's tool calls longer than this starts a new question, whose first call the form can come before (`PGHACKER_FEEDBACK_QUESTION_GAP`), 1 to 3600 |
 | `feedback_session_gap_seconds` | `600` | A pause shorter than this keeps a client's session active; the form comes only in an active session (`PGHACKER_FEEDBACK_SESSION_GAP`), more than `feedback_question_gap_seconds` |
 | `feedback_min_questions` | `5` | The questions a client asks before the form can come, 0 to 100 (`PGHACKER_FEEDBACK_MIN_QUESTIONS`) |
-| `feedback_clients` | Copilot CLI, Codex, VS Code, Claude Code, the Claude app and Cursor | The interactive apps that can be asked, by `clientInfo.name`, matched ignoring case (`PGHACKER_FEEDBACK_CLIENTS`); scripts and agents are never asked |
+| `feedback_clients` | `copilot`, `codex`, `Visual Studio Code`, `claude`, `cursor` | The interactive apps that can be asked: any whose `clientInfo.name` contains one of these, ignoring case (`PGHACKER_FEEDBACK_CLIENTS`); scripts and agents are never asked |
 | `deployer_object_ids` | `[]` | Everyone who applies, given Key Vault Secrets Officer; empty means whoever is applying |
 | `vnet_address_space` | `"10.66.0.0/22"` | VNet range |
 | `container_apps_subnet_prefix` | `"10.66.0.0/24"` | Container Apps subnet, /27 or larger; fixed once the environment exists |
