@@ -9,7 +9,9 @@
 // files of its own. It also sends the portal's share links, which PilotSwarm
 // builds as /?session=... and /?canvasShare=..., on to the portal: in Azure,
 // on the portal's own host, Front Door's, since a custom domain doesn't
-// serve it (deploy/terraform/frontdoor.tf). In Azure it serves alone behind
+// serve it (deploy/terraform/frontdoor.tf). Given star counts
+// (scripts/lib/github-stars.mjs), it adds the GitHub repository's stars to
+// the page it serves, once GitHub shows them. In Azure it serves alone behind
 // oauth2-proxy (scripts/home.mjs); locally, the edge puts it and the
 // services on one origin with the routes of scripts/lib/routes.mjs, as
 // oauth2-proxy does in Azure, without sign-in.
@@ -82,14 +84,31 @@ function parseUrl(url) {
   }
 }
 
+/** The page's link to its GitHub repository, owner/name, in index.html. */
+const REPOSITORY_META = /<meta name="github-repo" content="([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)"\s*\/?>/;
+
+/**
+ * `html` with its repository's star count as the github-repo meta tag's
+ * data-stars, when `stars` knows it; otherwise `html` as it is, and the
+ * page shows the link without a count.
+ */
+export function withStars(html, stars) {
+  const meta = REPOSITORY_META.exec(html);
+  if (!meta) return html;
+  const count = stars.get(meta[1]);
+  if (!Number.isSafeInteger(count) || count < 0) return html;
+  return html.replace(meta[0], `<meta name="github-repo" content="${meta[1]}" data-stars="${count}" />`);
+}
+
 /**
  * A request handler for the home page in `root`, a directory Vite built.
  * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
  * the portal's share links go on to; without it, they stay on the request's
  * own origin, as on the local edge. `onPage(request)` hears of each page
- * served to a GET, for usage telemetry.
+ * served to a GET, for usage telemetry. `stars`, from createStarCounts, adds
+ * the repository's star count to the page.
  */
-export function createHomeHandler({ root = HOME_DIR, portal = "", onPage } = {}) {
+export function createHomeHandler({ root = HOME_DIR, portal = "", onPage, stars } = {}) {
   if (portal && URL.parse(portal)?.origin !== portal) {
     throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
   }
@@ -104,6 +123,7 @@ export function createHomeHandler({ root = HOME_DIR, portal = "", onPage } = {})
       if (error.code === "ENOENT" || error.code === "EISDIR") return notFound(request, response);
       throw error;
     }
+    if (name === "index.html" && stars) body = Buffer.from(withStars(body.toString("utf8"), stars));
     send(request, response, 200, {
       "content-type": TYPES[path.extname(name)] ?? "application/octet-stream",
       "content-length": body.length,

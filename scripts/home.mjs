@@ -3,16 +3,18 @@
 
 // The home page's server in the Azure container, which the supervisor
 // (scripts/container.mjs) runs as pgh-home on loopback, behind oauth2-proxy.
-// It reads only the built page. Its settings are its port, the page's
-// directory, and the portal's origin (PGHACKER_PORTAL_URL), which the
-// portal's share links go on to; and, when the app has Application Insights,
-// usage telemetry's (scripts/lib/usage.mjs), whose users' key is its one
-// secret.
+// It reads only the built page, and asks GitHub's API, without a token, for
+// the stars of the repository the page links to (scripts/lib/github-stars.mjs).
+// Its settings are its port, the page's directory, and the portal's origin
+// (PGHACKER_PORTAL_URL), which the portal's share links go on to; and, when
+// the app has Application Insights, usage telemetry's (scripts/lib/usage.mjs),
+// whose users' key is its one secret.
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { APP_ROOT } from "./lib/config.mjs";
 import { HOME_DIR, createHomeHandler } from "./lib/edge.mjs";
+import { createStarCounts } from "./lib/github-stars.mjs";
 import { createUsage, readUsageSettings } from "./lib/usage.mjs";
 
 const port = Number(process.env.PORT);
@@ -24,7 +26,7 @@ const portal = process.env.PGHACKER_PORTAL_URL || "";
 const { version } = JSON.parse(readFileSync(path.join(APP_ROOT, "package.json"), "utf8"));
 const usage = createUsage(readUsageSettings(), { role: "pghacker-home", version });
 
-const server = http.createServer(createHomeHandler({ root, portal, onPage: usage.pageView }));
+const server = http.createServer(createHomeHandler({ root, portal, onPage: usage.pageView, stars: createStarCounts() }));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     // The last page views go before the process does.

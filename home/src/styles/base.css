@@ -157,10 +157,45 @@ main:focus {
   white-space: nowrap;
 }
 
-/* The theme menu, at the top bar's right end. */
+/* The repository's link and the theme menu, at the top bar's right end. */
+.topbar-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.github-link {
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.github-link:hover {
+  text-decoration: none;
+}
+
+.btn .github-mark {
+  width: 18px;
+  height: 18px;
+}
+
+.github-stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.btn .github-stars svg {
+  width: 14px;
+  height: 14px;
+}
+
 .theme-menu {
   position: relative;
-  margin-left: auto;
 }
 
 .footer {

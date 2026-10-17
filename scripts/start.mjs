@@ -10,6 +10,7 @@ import {
   assertPortAvailable, preparePortalRecord, writePortalRecord, clearPortalRecord, runDatabase,
 } from "./lib/processes.mjs";
 import { createEdgeServer, createHomeHandler } from "./lib/edge.mjs";
+import { createStarCounts } from "./lib/github-stars.mjs";
 import { checkPortal } from "./lib/health.mjs";
 import {
   ServiceSupervisor, bootstrapDatabase, buildHome, buildServices, checkServices, stopRecordedServices,
@@ -100,7 +101,7 @@ try {
   // The site, as oauth2-proxy routes it in Azure: the home page at /, the
   // portal at /portal/ (with its /api and /assets), pghacker-mcp at /mcp.
   edge = createEdgeServer({
-    home: createHomeHandler(),
+    home: createHomeHandler({ stars: createStarCounts() }),
     targets: {
       portal: { host: LOCAL_HOST, port: config.portalInternalPort },
       mcp: { host: LOCAL_HOST, port: config.mcpPort },

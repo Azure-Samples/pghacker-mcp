@@ -41,3 +41,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+GitHub's mark (home/src/components/GitHubLink.tsx)
+================================================================================
+
+The GitHub mark, the path of icons/mark-github-16.svg in Primer Octicons
+(https://github.com/primer/octicons), (c) GitHub, Inc. It is GitHub's logo,
+which Octicons' MIT License doesn't cover. The home page uses it only to link
+to this repository on GitHub, as GitHub's logo guidelines allow
+(https://github.com/logos).

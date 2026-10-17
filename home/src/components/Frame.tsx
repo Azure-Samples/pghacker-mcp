@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 import { PRODUCT } from "../content.ts";
+import { GitHubLink } from "./GitHubLink.tsx";
 import { ThemeMenu } from "./ThemeMenu.tsx";
 
 /** The mark: a speech bubble with a quotation, for cited answers, on the brand colour. */
@@ -29,7 +30,10 @@ export function TopBar() {
             <span className="brand-sub">{PRODUCT.subtitle}</span>
           </span>
         </a>
-        <ThemeMenu />
+        <div className="topbar-actions">
+          <GitHubLink />
+          <ThemeMenu />
+        </div>
       </div>
     </header>
   );

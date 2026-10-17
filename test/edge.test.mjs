@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { CACHE, createEdgeServer, createHomeHandler } from "../scripts/lib/edge.mjs";
+import { CACHE, createEdgeServer, createHomeHandler, withStars } from "../scripts/lib/edge.mjs";
 
 const PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" src="/static/index-abc.js"></script>';
 
@@ -120,6 +120,41 @@ test("the page's views are heard, for usage telemetry: GETs of the page alone", 
   const page = await fetch(`http://127.0.0.1:${failingPort}/`);
   assert.equal(page.status, 200);
   assert.equal(await page.text(), PAGE);
+});
+
+test("given star counts, the page carries its repository's stars once GitHub shows them", async (t) => {
+  const root = distFixture(t);
+  const page = (repo) => `<!doctype html><head>${repo}<meta name="application-name" content="pghacker-mcp"></head>`;
+  const tag = '<meta name="github-repo" content="Azure-Samples/pghacker-mcp" />';
+  writeFileSync(path.join(root, "index.html"), page(tag));
+  const asked = [];
+  const counts = new Map();
+  const stars = { get: (repository) => (asked.push(repository), counts.get(repository)) };
+  const port = await listen(t, http.createServer(createHomeHandler({ root, stars })));
+  const base = `http://127.0.0.1:${port}`;
+
+  // Before GitHub answers, and while the repository is internal: the link alone.
+  assert.equal(await (await fetch(`${base}/`)).text(), page(tag));
+
+  counts.set("Azure-Samples/pghacker-mcp", 1234);
+  const counted = page('<meta name="github-repo" content="Azure-Samples/pghacker-mcp" data-stars="1234" />');
+  assert.equal(await (await fetch(`${base}/`)).text(), counted);
+  const head = await fetch(`${base}/`, { method: "HEAD" });
+  assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(counted)));
+  assert.deepEqual([...new Set(asked)], ["Azure-Samples/pghacker-mcp"]);
+  assert.equal(await (await fetch(`${base}/static/index-abc.js`)).text(), "console.log(1);\n");
+});
+
+test("a count goes only into a well-formed github-repo tag, and only a whole one", () => {
+  const seven = { get: () => 7 };
+  const tag = '<meta name="github-repo" content="o/r">';
+  assert.equal(withStars(`<head>${tag}</head>`, seven), '<head><meta name="github-repo" content="o/r" data-stars="7" /></head>');
+  assert.equal(withStars("<head></head>", seven), "<head></head>");
+  for (const count of [undefined, -1, 1.5, "12", Number.NaN]) {
+    assert.equal(withStars(`<head>${tag}</head>`, { get: () => count }), `<head>${tag}</head>`, String(count));
+  }
+  const odd = '<meta name="github-repo" content="o/r/x">';
+  assert.equal(withStars(odd, seven), odd);
 });
 
 test("fingerprinted files are kept a year, the page's other files an hour", async (t) => {

@@ -545,6 +545,14 @@
     padding-left: 16px;
   }
 
+  .github-name {
+    display: none;
+  }
+
+  .github-link {
+    padding: 0 8px;
+  }
+
   .hero {
     padding: 36px 16px 28px;
   }
