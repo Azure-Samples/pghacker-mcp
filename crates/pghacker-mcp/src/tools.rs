@@ -17,6 +17,7 @@ use pghacker_core::db::Pool;
 use pghacker_core::embed::Embedder;
 use pghacker_core::mcp::{Effect, Output, ToolSpec, Tools, failed, parse, schema};
 use pghacker_core::skills::Skills;
+use pghacker_core::usage::Scope;
 use pghacker_sqlquery as sql;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -322,6 +323,23 @@ impl Tools for Server {
                 Ok(value) => Output::Json(value),
                 Err(error) => failed(error),
             }),
+        }
+    }
+
+    // query records the statements it checked by their tokens in its call's
+    // usage; the other tools record nothing of their own.
+    async fn call_with_usage(
+        &self,
+        name: &str,
+        arguments: Value,
+        scope: Option<Scope>,
+    ) -> Result<Output, ErrorData> {
+        match name {
+            sql::NAME => Ok(self
+                .query
+                .run_with_usage(parse(name, arguments)?, scope.as_ref())
+                .await),
+            _ => self.call(name, arguments).await,
         }
     }
 }

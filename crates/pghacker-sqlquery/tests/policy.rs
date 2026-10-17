@@ -3,15 +3,16 @@
 
 //! Query policy without a database, including the PostgreSQL/AGE fallback.
 
-use pghacker_sqlquery::check;
+use pghacker_sqlquery::{Checked, Fallback, check};
 
 fn refused(sql: &str, expected: &str) {
     let reason = check(sql).expect_err(sql);
     assert!(reason.contains(expected), "{sql}: {reason}");
 }
 
-fn allowed(sql: &str) {
-    assert_eq!(check(sql), Ok(()), "{sql}");
+/// Checks that `sql` passes, and says how.
+fn allowed(sql: &str) -> Checked {
+    check(sql).unwrap_or_else(|reason| panic!("{sql}: {reason}"))
 }
 
 fn graph(text: &str) -> String {
@@ -295,15 +296,18 @@ fn deep_read_expressions_use_the_checked_fallback_without_exhausting_the_stack()
     let max_sum = vec!["1"; (pghacker_sqlquery::MAX_SQL_BYTES - 4) / 4].join(" + ");
     let max_sql = format!("SELECT {max_sum}");
     assert_eq!(max_sql.len(), pghacker_sqlquery::MAX_SQL_BYTES);
-    allowed(&max_sql);
+    assert_eq!(allowed(&max_sql), Checked::Tokens(Fallback::TooDeep));
     let sum = vec!["1"; 5000].join(" + ");
-    allowed(&format!("SELECT {sum}"));
+    assert_eq!(
+        allowed(&format!("SELECT {sum}")),
+        Checked::Tokens(Fallback::TooDeep)
+    );
     refused(
         &format!("SELECT {sum} + pg_sleep(1)::text::integer"),
         "delays",
     );
     let union = vec!["SELECT 1"; 1000].join(" UNION ALL ");
-    allowed(&union);
+    assert_eq!(allowed(&union), Checked::Tokens(Fallback::TooDeep));
     refused(
         &format!("{union} UNION ALL SELECT set_config('work_mem', '1MB', true)"),
         "session settings",

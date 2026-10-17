@@ -77,6 +77,8 @@ AGE's `cypher()` stays available with literal SQL-string or dollar-quoted query 
 
 Normal aggregates, JSON/text/date functions, `random()`, catalog inspection and vector/trigram/BM25 reads are not rejected merely for being unfamiliar, VOLATILE or named `pg_*`. For PostgreSQL/AGE syntax sqlparser cannot parse, query retains its first-word fallback **after token-aware checks of known unsafe forms**. Deep ASTs use those token checks too, rather than exhaust the server thread's stack during recursive inspection. This selective denylist and fallback are not a complete SQL/Cypher sandbox: trusted stored functions, views, operators and type input/output routines can execute code that a caller's syntax does not reveal.
 
+Each statement that passes by its tokens is recorded, in the call's usage, as `McpQueryFallback`, with the `OperationId` of its call's `McpToolCall`: `fallback` says why (`unparsed`, sqlparser couldn't parse it, such as a `cypher()` call with its column definitions or PostgreSQL's `TABLE` statement; `too_deep`, it nests deeper than the 64 levels the AST checks go), and `parseError` holds sqlparser's error, at most 1,024 characters, which quotes the SQL. The log line, at info, says only why.
+
 The database remains the final boundary: the reader's privileges, a read-only transaction that is always rolled back, statement/call timeouts and result caps. Each query connection is cleaned before reuse, including session advisory-lock release; an unfinished call cancels and closes its connection. Trusted executor SET LOCAL setup and cleanup are not caller SQL. This parser policy does not change database EXECUTE privileges.
 
 ### Limits

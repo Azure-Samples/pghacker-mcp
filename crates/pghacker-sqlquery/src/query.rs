@@ -11,9 +11,13 @@
 //!   its tokens, including known writes, side-effecting calls and Cypher
 //!   clauses. The first-word fallback is retained for other unsupported
 //!   syntax; it is not a complete SQL sandbox. Untokenizable input is refused.
+//!   It says which way a statement passed ([`Checked`]).
 //! - [`QueryTool::run`] returns an [`Output`], `Failed` for refused
 //!   statements, PostgreSQL's errors and timeouts alike. The SQL is logged at
 //!   debug level only.
+//! - [`QueryTool::run_with_usage`] also records, in the call's usage, each
+//!   statement that passed by its tokens: an `McpQueryFallback` event, with
+//!   sqlparser's error, which quotes the SQL. Its log line says only why.
 //! - `max_rows` is 100 by default and at most 1,000.
 //! - The statement timeout is 10 seconds, and the call as a whole has a
 //!   deadline of its own, [`CALL_TIMEOUT`].
@@ -29,9 +33,11 @@ use deadpool_postgres::{Object, RecyclingMethod};
 use pghacker_core::db::{self, Pool};
 use pghacker_core::mcp::Output;
 use pghacker_core::text::truncate_chars;
+use pghacker_core::usage::Scope;
 
 use crate::QueryArgs;
 use crate::execute::{QueryResponse, run_readonly_query};
+use crate::policy::{Checked, Fallback};
 
 /// The longest SQL that query takes, in bytes.
 pub const MAX_SQL_BYTES: usize = 64 * 1024;
@@ -79,9 +85,33 @@ const DEALLOCATE_SQL_PREPARED: &str = "
 /// known side-effecting functions and writing Cypher. Unsupported SQL keeps
 /// the first-word fallback after token-aware checks of known unsafe forms;
 /// the read-only transaction and database privileges remain backstops.
-/// Returns why a statement is refused.
-pub fn check(sql: &str) -> Result<(), String> {
+/// Returns how a statement passed, or why it is refused.
+pub fn check(sql: &str) -> Result<Checked, String> {
     crate::policy::check(sql, MAX_SQL_BYTES)
+}
+
+/// The longest sqlparser error that an `McpQueryFallback` event keeps.
+const PARSE_ERROR_CHARS: usize = 1024;
+
+/// A statement that passed by its tokens: logged with why, but not
+/// sqlparser's error, which quotes the SQL; and recorded, error included, in
+/// the call's usage, whose operation the event shares.
+fn record_fallback(fallback: &Fallback, scope: Option<&Scope>) {
+    tracing::info!(
+        fallback = fallback.kind(),
+        "a query passed the checks of its tokens"
+    );
+    let Some(scope) = scope else {
+        return;
+    };
+    let mut event = scope.event("McpQueryFallback", crate::NAME);
+    event
+        .property("toolName", crate::NAME)
+        .property("fallback", fallback.kind());
+    if let Fallback::Unparsed(error) = fallback {
+        event.property_cut("parseError", error, PARSE_ERROR_CHARS);
+    }
+    scope.record(event);
 }
 
 /// The query tool, with its pool of pgh_reader connections. Cheap to clone:
@@ -106,6 +136,12 @@ impl QueryTool {
 
     /// Runs `args`' statement: the CSV, or why it failed.
     pub async fn run(&self, args: QueryArgs) -> Output {
+        self.run_with_usage(args, None).await
+    }
+
+    /// Runs `args`' statement as [`QueryTool::run`] does, and records in
+    /// `scope`, the call's usage, a statement that passed by its tokens.
+    pub async fn run_with_usage(&self, args: QueryArgs, scope: Option<&Scope>) -> Output {
         let max_rows = match args.max_rows {
             None => DEFAULT_MAX_ROWS,
             Some(0) => return Output::Failed("max_rows must be at least 1".to_owned()),
@@ -113,9 +149,13 @@ impl QueryTool {
         };
         let sql = args.sql;
         tracing::debug!(sql = %truncate_chars(&sql, 1000), "a query");
-        if let Err(reason) = check(&sql) {
-            tracing::info!(outcome = "refused", reason = %reason, "refused a query");
-            return Output::Failed(reason);
+        match check(&sql) {
+            Err(reason) => {
+                tracing::info!(outcome = "refused", reason = %reason, "refused a query");
+                return Output::Failed(reason);
+            }
+            Ok(Checked::Parsed) => {}
+            Ok(Checked::Tokens(fallback)) => record_fallback(&fallback, scope),
         }
 
         let started = Instant::now();
@@ -317,8 +357,8 @@ mod tests {
         assert!(refused(";").contains("no statement"));
         assert!(refused("-- just a comment").contains("no statement"));
         assert!(refused("/* only a comment */").contains("no statement"));
-        assert_eq!(check("SELECT 1;"), Ok(()));
-        assert_eq!(check("SELECT 1; -- done"), Ok(()));
+        assert_eq!(check("SELECT 1;"), Ok(Checked::Parsed));
+        assert_eq!(check("SELECT 1; -- done"), Ok(Checked::Parsed));
     }
 
     #[test]
@@ -352,7 +392,7 @@ mod tests {
             "SELECT 1 + /* nested /* comment */ ; */ 1",
             "-- a comment first\nSELECT 1",
         ] {
-            assert_eq!(check(sql), Ok(()), "{sql}");
+            assert!(check(sql).is_ok(), "{sql}: {:?}", check(sql));
         }
     }
 
@@ -369,7 +409,11 @@ mod tests {
             "  -- the graph\n  SELECT * FROM cypher('pghacker_graph', $$ MATCH (n) RETURN n $$) \
              AS (n agtype);  ",
         ] {
-            assert_eq!(check(sql), Ok(()), "{sql}");
+            assert!(
+                matches!(check(sql), Ok(Checked::Tokens(Fallback::Unparsed(_)))),
+                "{sql}: {:?}",
+                check(sql)
+            );
         }
     }
 
@@ -459,8 +503,17 @@ mod tests {
 
     #[test]
     fn syntax_errors_in_reads_are_left_to_postgres() {
-        assert_eq!(check("SELECT 1 +"), Ok(()));
-        assert_eq!(check("SELECT FROM WHERE"), Ok(()));
+        // sqlparser takes the second, which PostgreSQL refuses, but not the
+        // first, which passes by its tokens.
+        assert!(
+            matches!(
+                check("SELECT 1 +"),
+                Ok(Checked::Tokens(Fallback::Unparsed(_)))
+            ),
+            "{:?}",
+            check("SELECT 1 +")
+        );
+        assert_eq!(check("SELECT FROM WHERE"), Ok(Checked::Parsed));
     }
 
     #[test]
@@ -622,6 +675,106 @@ mod tests {
         assert!(refused(&sql).contains("at most 65536"));
         let longest = format!("SELECT '{}'", "x".repeat(MAX_SQL_BYTES - 9));
         assert_eq!(longest.len(), MAX_SQL_BYTES);
-        assert_eq!(check(&longest), Ok(()));
+        assert_eq!(check(&longest), Ok(Checked::Parsed));
+    }
+
+    #[test]
+    fn check_says_which_way_a_statement_passed() {
+        for sql in [
+            "SELECT 1",
+            "WITH r AS (SELECT 1 AS a) SELECT a FROM r",
+            "EXPLAIN SELECT 1",
+        ] {
+            assert_eq!(check(sql), Ok(Checked::Parsed), "{sql}");
+        }
+        // sqlparser doesn't know PostgreSQL's TABLE statement.
+        assert!(
+            matches!(
+                check("TABLE authors"),
+                Ok(Checked::Tokens(Fallback::Unparsed(_)))
+            ),
+            "{:?}",
+            check("TABLE authors")
+        );
+        let Ok(Checked::Tokens(fallback)) =
+            check("SELECT * FROM cypher('pghacker_graph', $$ MATCH (n) RETURN n $$) AS (n agtype)")
+        else {
+            panic!("cypher() passes by its tokens");
+        };
+        assert_eq!(fallback.kind(), "unparsed");
+        assert!(
+            matches!(&fallback, Fallback::Unparsed(error) if error.starts_with("sql parser error")),
+            "{fallback:?}"
+        );
+        assert_eq!(Fallback::TooDeep.kind(), "too_deep");
+    }
+
+    #[tokio::test]
+    async fn statements_passed_by_their_tokens_are_recorded_in_the_calls_usage() {
+        use pghacker_core::usage::testing::Ingestion;
+        use pghacker_core::usage::{ACTION, Endpoint, Settings, Usage};
+
+        let ingestion = Ingestion::start().await;
+        let usage = Usage::new(Settings {
+            endpoint: ingestion.url.clone(),
+            instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+            id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+            role: "pghacker-mcp".into(),
+            version: "0.1.0".into(),
+            instance: None,
+        })
+        .unwrap();
+        let scope = Scope::new(
+            usage.clone(),
+            Endpoint::Public,
+            Some("203.0.113.9".parse().unwrap()),
+            None,
+            Instant::now(),
+        );
+        // No database: the event comes before the statement runs.
+        let tool = QueryTool::new("postgresql://pgh_reader@127.0.0.1:1/no_database", 1).unwrap();
+        for sql in [
+            "SELECT * FROM cypher('pghacker_graph', $$ MATCH (n) RETURN n $$) AS (n agtype)",
+            "SELECT 1",
+            "SELECT * FROM cypher('pghacker_graph', $$ CREATE (n) $$) AS (n agtype)",
+        ] {
+            let args = QueryArgs {
+                sql: sql.to_owned(),
+                max_rows: None,
+            };
+            assert!(
+                matches!(
+                    tool.run_with_usage(args, Some(&scope)).await,
+                    Output::Failed(_)
+                ),
+                "{sql}"
+            );
+        }
+        // Without a scope, as run is, nothing is recorded.
+        let args = QueryArgs {
+            sql: "SELECT 1 +".to_owned(),
+            max_rows: None,
+        };
+        tool.run(args).await;
+        usage.flush().await;
+
+        // The parsed read and the refused write record nothing of their own.
+        let events = ingestion.received();
+        assert_eq!(events.len(), 1, "{events:#?}");
+        let event = &events[0];
+        let properties = &event["data"]["baseData"]["properties"];
+        assert_eq!(event["data"]["baseData"]["name"], ACTION);
+        assert_eq!(properties["action"], "McpQueryFallback");
+        assert_eq!(properties["toolName"], "query");
+        assert_eq!(properties["endpoint"], "public");
+        assert_eq!(properties["fallback"], "unparsed");
+        assert!(
+            properties["parseError"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("sql parser error")),
+            "{properties}"
+        );
+        assert_eq!(event["tags"]["ai.operation.name"], "query");
+        assert!(event["tags"]["ai.user.id"].is_string(), "{event}");
     }
 }

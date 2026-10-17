@@ -18,7 +18,36 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 
 mod cypher;
 
-pub(super) fn check(sql: &str, max_bytes: usize) -> Result<(), String> {
+/// How a statement passed the check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// sqlparser parsed it, and the walk of its syntax tree found only reads.
+    Parsed,
+    /// The checks of its tokens passed it: sqlparser couldn't parse it, or it
+    /// nests deeper than the walk goes.
+    Tokens(Fallback),
+}
+
+/// Why a statement was checked by its tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fallback {
+    /// sqlparser couldn't parse it: its error, which quotes the statement.
+    Unparsed(String),
+    /// It nests deeper than the walk's 64 levels.
+    TooDeep,
+}
+
+impl Fallback {
+    /// Its name in usage events: `unparsed` or `too_deep`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Unparsed(_) => "unparsed",
+            Self::TooDeep => "too_deep",
+        }
+    }
+}
+
+pub(super) fn check(sql: &str, max_bytes: usize) -> Result<Checked, String> {
     if sql.len() > max_bytes {
         return Err(format!(
             "the SQL is {} bytes; query takes at most {max_bytes}",
@@ -46,11 +75,14 @@ pub(super) fn check(sql: &str, max_bytes: usize) -> Result<(), String> {
         .parse_statements()
     {
         Ok(parsed) => match parsed.visit(&mut ReadOnly::default()) {
-            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Continue(()) => Ok(Checked::Parsed),
             ControlFlow::Break(Stop::Refused(reason)) => Err(reason),
-            ControlFlow::Break(Stop::TokenFallback) => check_fallback(statement),
+            ControlFlow::Break(Stop::TokenFallback) => {
+                check_fallback(statement).map(|()| Checked::Tokens(Fallback::TooDeep))
+            }
         },
-        Err(_) => check_fallback(statement),
+        Err(error) => check_fallback(statement)
+            .map(|()| Checked::Tokens(Fallback::Unparsed(error.to_string()))),
     }
 }
 

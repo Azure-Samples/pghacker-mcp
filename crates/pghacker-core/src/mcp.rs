@@ -13,10 +13,11 @@
 //! A request that the endpoint's usage middleware gave a [`Scope`]
 //! (`crate::usage`) is recorded: its initialize, discover, tools/list or
 //! tool call, with the call's arguments, outcome and result's shape, and its
-//! reads of the skills ([`McpServer::with_skills`]). With feedback
-//! ([`McpServer::with_feedback`]), a call that starts a user's next question
-//! may first be answered with a form that asks whether the last answer
-//! helped; its retry carries the answer, and runs.
+//! reads of the skills ([`McpServer::with_skills`]). A tool may record events
+//! of its own in its call's operation ([`Tools::call_with_usage`]). With
+//! feedback ([`McpServer::with_feedback`]), a call that starts a user's next
+//! question may first be answered with a form that asks whether the last
+//! answer helped; its retry carries the answer, and runs.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -133,6 +134,19 @@ pub trait Tools: Clone + Send + Sync + 'static {
         name: &str,
         arguments: Value,
     ) -> impl Future<Output = Result<Output, ErrorData>> + Send;
+
+    /// Runs the tool as [`Tools::call`] does, with the request's usage
+    /// `scope`, for a tool that records events of its own: they share the
+    /// call's operation. Without an override, it's [`Tools::call`].
+    fn call_with_usage(
+        &self,
+        name: &str,
+        arguments: Value,
+        scope: Option<Scope>,
+    ) -> impl Future<Output = Result<Output, ErrorData>> + Send {
+        let _ = scope;
+        self.call(name, arguments)
+    }
 }
 
 /// The rmcp handler over `T`. Cheap to clone; a clone serves each request.
@@ -325,7 +339,9 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         } else {
             None
         };
-        let call = self.tools.call(&name, Value::Object(arguments));
+        let call = self
+            .tools
+            .call_with_usage(&name, Value::Object(arguments), scope.clone());
         let started = Instant::now();
         let outcome = if self.cancel_on_disconnect {
             // rmcp cancels the request's token when the client disconnects

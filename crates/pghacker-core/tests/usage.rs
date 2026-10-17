@@ -13,7 +13,7 @@ use pghacker_core::mcp::{
     Effect, McpServer, Output, ToolSpec, Tools, failed, parse, router, schema,
 };
 use pghacker_core::usage::testing::Ingestion;
-use pghacker_core::usage::{ACTION, ERROR, Endpoint, Recorder, Settings, Usage, record};
+use pghacker_core::usage::{ACTION, ERROR, Endpoint, Recorder, Scope, Settings, Usage, record};
 use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,9 +55,51 @@ impl Tools for Echo {
     }
 }
 
+/// A tool that records an event of its own, as query records the statements
+/// it checked by their tokens.
+#[derive(Clone)]
+struct Noting;
+
+static NOTING: &[ToolSpec] = &[ToolSpec {
+    name: "note",
+    description: "Notes text.",
+    effect: Effect::Read,
+    schema: schema::<EchoArgs>,
+}];
+
+impl Tools for Noting {
+    fn specs(&self) -> &'static [ToolSpec] {
+        NOTING
+    }
+
+    async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
+        self.call_with_usage(name, arguments, None).await
+    }
+
+    async fn call_with_usage(
+        &self,
+        name: &str,
+        arguments: Value,
+        scope: Option<Scope>,
+    ) -> Result<Output, ErrorData> {
+        let args: EchoArgs = parse(name, arguments)?;
+        if let Some(scope) = scope {
+            let mut event = scope.event("TestNote", name);
+            event.property("text", &args.text);
+            scope.record(event);
+        }
+        Ok(Output::Json(json!({ "noted": true })))
+    }
+}
+
 /// A listener recording usage to `ingestion`, whose clients name their
 /// address in X-Test-Client.
 async fn serve(ingestion: &Ingestion) -> (String, Usage) {
+    serve_tools(ingestion, Echo).await
+}
+
+/// [`serve`], with `tools`.
+async fn serve_tools<T: Tools>(ingestion: &Ingestion, tools: T) -> (String, Usage) {
     let usage = Usage::new(Settings {
         endpoint: ingestion.url.clone(),
         instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
@@ -76,7 +118,7 @@ async fn serve(ingestion: &Ingestion) -> (String, Usage) {
             .parse::<IpAddr>()
             .ok()
     });
-    let app = router(McpServer::new(Echo, "echo", "1", "Echo tools."), None)
+    let app = router(McpServer::new(tools, "echo", "1", "Echo tools."), None)
         .layer(middleware::from_fn_with_state(recorder, record));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -382,4 +424,38 @@ async fn a_failing_endpoint_costs_events_never_answers() {
     usage.flush().await;
     assert!(ingestion.received().is_empty());
     assert_eq!(usage.lost(), 1);
+}
+
+#[tokio::test]
+async fn a_tool_records_its_own_events_in_its_calls_operation() {
+    let ingestion = Ingestion::start().await;
+    let (base, usage) = serve_tools(&ingestion, Noting).await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        rpc(&client, &base, call(1, "note", json!({ "text": "hello" }))).await,
+        200
+    );
+    usage.flush().await;
+
+    let events = ingestion.received();
+    let action = |event: &&Value| properties(event)["action"].clone();
+    let note = events
+        .iter()
+        .find(|event| action(event) == "TestNote")
+        .expect("the tool's event");
+    let called = events
+        .iter()
+        .find(|event| action(event) == "McpToolCall")
+        .expect("the call's event");
+    assert_eq!(properties(note)["text"], "hello");
+    assert_eq!(properties(note)["endpoint"], "public");
+    for tag in [
+        "ai.operation.id",
+        "ai.operation.name",
+        "ai.user.id",
+        "ai.session.id",
+    ] {
+        assert!(note["tags"][tag].is_string(), "{tag}: {note}");
+        assert_eq!(note["tags"][tag], called["tags"][tag], "{tag}");
+    }
 }

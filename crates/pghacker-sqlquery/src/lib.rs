@@ -19,6 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use execute::{MAX_CSV_BYTES, NULL_TEXT};
+pub use policy::{Checked, Fallback};
 pub use query::{
     CALL_TIMEOUT, DEFAULT_MAX_ROWS, MAX_ROWS, MAX_SQL_BYTES, QueryTool, STATEMENT_TIMEOUT,
     TIMEOUT_MESSAGE, check,
