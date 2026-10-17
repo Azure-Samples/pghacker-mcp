@@ -119,7 +119,7 @@ function feedbackSettings(env) {
     comments: flag(env, "PGHACKER_FEEDBACK_COMMENTS", false),
     questionGap,
     sessionGap,
-    minQuestions: integer(env, "PGHACKER_FEEDBACK_MIN_QUESTIONS", 5, { min: 0, max: 100 }),
+    minQuestions: integer(env, "PGHACKER_FEEDBACK_MIN_QUESTIONS", 3, { min: 0, max: 100 }),
     ...(clients.length > 0 ? { clients } : {}),
   };
 }

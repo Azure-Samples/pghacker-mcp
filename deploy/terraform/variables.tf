@@ -733,7 +733,7 @@ variable "feedback_session_gap_seconds" {
 variable "feedback_min_questions" {
   description = "The questions a client asks before feedback can ask it, 0 to 100 (PGHACKER_FEEDBACK_MIN_QUESTIONS): the first ask can come as the next question starts."
   type        = number
-  default     = 5
+  default     = 3
   nullable    = false
 
   validation {

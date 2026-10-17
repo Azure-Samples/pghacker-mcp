@@ -99,7 +99,7 @@ impl Default for Settings {
             comments: false,
             question_gap: Duration::from_secs(180),
             session_gap: Duration::from_secs(600),
-            min_questions: 5,
+            min_questions: 3,
             clients: CLIENTS.iter().map(|name| (*name).to_owned()).collect(),
             debug: false,
         }
@@ -233,7 +233,7 @@ impl Feedback {
     /// - PGHACKER_FEEDBACK_QUESTION_GAP and PGHACKER_FEEDBACK_SESSION_GAP,
     ///   in seconds (180 and 600): a longer gap starts a question, a shorter
     ///   one keeps the session active;
-    /// - PGHACKER_FEEDBACK_MIN_QUESTIONS (5), the questions before an ask;
+    /// - PGHACKER_FEEDBACK_MIN_QUESTIONS (3), the questions before an ask;
     /// - PGHACKER_FEEDBACK_CLIENTS, the apps asked: names separated by
     ///   commas, any of which an app's `clientInfo` name contains, ignoring
     ///   case; unset or blank, [`CLIENTS`];
@@ -959,21 +959,21 @@ mod tests {
     }
 
     #[test]
-    fn the_sixth_question_is_asked_about_the_fifth() {
+    fn the_fourth_question_is_asked_about_the_third() {
         let feedback = always();
         let me = caller(USER);
-        // The first five questions, and the calls within them, are never
+        // The first three questions, and the calls within them, are never
         // asked.
-        let t = questions(&feedback, &me, 0, 4);
+        let t = questions(&feedback, &me, 0, 2);
         run(&feedback, &me, t, true);
         run(&feedback, &me, t + 30, true);
         let t = t + STEP;
-        // The sixth question's first call is held for the form.
+        // The fourth question's first call is held for the form.
         let ask = ask(&feedback, &me, "query", t);
         assert_eq!(
             ask.rated,
             Rated {
-                number: 5,
+                number: 3,
                 calls: 2,
                 failed: 0,
                 start: at(t - STEP),
@@ -990,7 +990,7 @@ mod tests {
         );
         let state = state_of(&ask);
         assert!(state.starts_with("fb2."), "{state}");
-        // Its retry, with the answer, runs as part of the sixth question.
+        // Its retry, with the answer, runs as part of the fourth question.
         let (outcome, rejection) = resume(
             &feedback,
             &me,
@@ -1018,31 +1018,31 @@ mod tests {
         }
         // The next hour, the first question in an active session is.
         let next = self::ask(&feedback, &me, "search", t);
-        assert!(next.rated.number > 6);
+        assert!(next.rated.number > 4);
     }
 
     #[test]
     fn only_a_question_in_an_active_session_is_asked() {
         let feedback = always();
         let me = caller(USER);
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         // Back after the session gap: a new question, but the session
         // wasn't active.
         let back = t - STEP + 1 + 600;
         run(&feedback, &me, back, true);
         // The next question, 4 minutes on, is.
         let ask = ask(&feedback, &me, "search", back + STEP);
-        assert_eq!(ask.rated.number, 6);
+        assert_eq!(ask.rated.number, 4);
         // Just over the question gap is a new question too; just under it,
         // the same one.
         let feedback = always();
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         run(&feedback, &me, t - STEP + 1 + 180, true);
         assert_eq!(
             self::ask(&feedback, &me, "search", t - STEP + 1 + 180 + 1 + 181)
                 .rated
                 .number,
-            5
+            3
         );
     }
 
@@ -1050,17 +1050,17 @@ mod tests {
     fn a_question_whose_calls_all_failed_is_not_rated() {
         let feedback = always();
         let me = caller(USER);
-        let t = questions(&feedback, &me, 0, 4);
-        // Question 5's calls fail, or are dropped as when the client goes
+        let t = questions(&feedback, &me, 0, 2);
+        // Question 3's calls fail, or are dropped as when the client goes
         // away.
         run(&feedback, &me, t, false);
         let Arrival::Run(call) = feedback.arrive(&me, "search", at(t + 10)) else {
             panic!("not asked within a question");
         };
         drop(call);
-        // Question 6 would rate it: it isn't asked. Question 7 is, about 6.
+        // Question 4 would rate it: it isn't asked. Question 5 is, about 4.
         run(&feedback, &me, t + STEP, true);
-        assert_eq!(ask(&feedback, &me, "search", t + 2 * STEP).rated.number, 6);
+        assert_eq!(ask(&feedback, &me, "search", t + 2 * STEP).rated.number, 4);
     }
 
     #[test]
@@ -1096,7 +1096,7 @@ mod tests {
         let mine = feedback_with(|settings| settings.clients = vec!["My App".into()]);
         let mut app = caller(USER);
         app.app = Some("the MY APP client".into());
-        let t = questions(&mine, &app, 0, 5);
+        let t = questions(&mine, &app, 0, 3);
         ask(&mine, &app, "search", t);
         never(&mine, &caller(OTHER));
     }
@@ -1165,7 +1165,7 @@ mod tests {
     fn the_answer_is_recorded_once_and_only_from_its_retry() {
         let feedback = always();
         let me = caller(USER);
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         let ask = ask(&feedback, &me, "search", t);
         let state = state_of(&ask);
         // Another client's, another tool's, or a forged state records
@@ -1301,7 +1301,7 @@ mod tests {
     fn a_decline_pauses_asks_at_the_address_for_a_day_and_a_skip_does_not() {
         let feedback = always();
         let me = caller(USER);
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         let ask = ask(&feedback, &me, "search", t);
         let declined = responses(json!({ "action": "decline" }));
         let (outcome, _) = resume(
@@ -1316,7 +1316,7 @@ mod tests {
         // Not the next hours, nor another app at the address.
         let mut codex = caller(USER);
         codex.app = Some("codex-mcp-client".into());
-        let codex_start = questions(&feedback, &codex, 4 * 3600, 5);
+        let codex_start = questions(&feedback, &codex, 4 * 3600, 3);
         run(&feedback, &codex, codex_start, true);
         let mut t = 2 * 3600;
         for _ in 0..5 {
@@ -1332,7 +1332,7 @@ mod tests {
         ));
 
         let feedback = always();
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         let ask = self::ask(&feedback, &me, "search", t);
         let (outcome, _) = resume(
             &feedback,
@@ -1360,7 +1360,7 @@ mod tests {
             .iter()
             .map(|user| {
                 let caller = caller(user);
-                let t = questions(&feedback, &caller, 0, 5);
+                let t = questions(&feedback, &caller, 0, 3);
                 state_of(&ask(&feedback, &caller, "search", t))
             })
             .collect();
@@ -1395,7 +1395,7 @@ mod tests {
 
     #[test]
     fn in_debug_mode_every_question_after_the_first_is_asked() {
-        // Whatever the warm-up (5), the draw (almost never), the hour's ask,
+        // Whatever the warm-up (3), the draw (almost never), the hour's ask,
         // a decline, the address's outcomes, an idle session, or a question
         // before whose calls all failed.
         let feedback = feedback_with(|settings| {
@@ -1460,7 +1460,7 @@ mod tests {
     fn with_comments_the_answer_keeps_one() {
         let feedback = feedback_with(|settings| settings.comments = true);
         let me = caller(USER);
-        let t = questions(&feedback, &me, 0, 5);
+        let t = questions(&feedback, &me, 0, 3);
         let ask = ask(&feedback, &me, "search", t);
         let answer = responses(json!({ "action": "accept", "content": {
             "rating": "down", "remarks": "cited the wrong thread" } }));

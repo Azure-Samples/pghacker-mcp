@@ -76,7 +76,7 @@ usage_enabled = true
 # Feedback (PRIVACY.md): the chance that an address's hour of use brings one
 # "Was the last answer helpful?" to an interactive client, as its user's next
 # question starts; 0 asks nothing. feedback_question_gap_seconds (180),
-# feedback_session_gap_seconds (600), feedback_min_questions (5) and
+# feedback_session_gap_seconds (600), feedback_min_questions (3) and
 # feedback_clients set when, and whom.
 feedback_rate_per_hour = 0.1
 

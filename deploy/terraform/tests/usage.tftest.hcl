@@ -120,7 +120,7 @@ run "usage_is_recorded_by_default" {
         PGHACKER_FEEDBACK_COMMENTS      = "false"
         PGHACKER_FEEDBACK_QUESTION_GAP  = "180"
         PGHACKER_FEEDBACK_SESSION_GAP   = "600"
-        PGHACKER_FEEDBACK_MIN_QUESTIONS = "5"
+        PGHACKER_FEEDBACK_MIN_QUESTIONS = "3"
         PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
       }
       && !anytrue(flatten([
@@ -129,7 +129,7 @@ run "usage_is_recorded_by_default" {
         ]
       ]))
     )
-    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after five questions, at a question 3 to 10 minutes after the last call, without comments."
+    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments."
   }
 }
 

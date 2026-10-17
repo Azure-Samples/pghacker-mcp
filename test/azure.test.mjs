@@ -241,12 +241,12 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     PGHACKER_FEEDBACK_COMMENTS: "false",
     PGHACKER_FEEDBACK_QUESTION_GAP: "180",
     PGHACKER_FEEDBACK_SESSION_GAP: "600",
-    PGHACKER_FEEDBACK_MIN_QUESTIONS: "5",
+    PGHACKER_FEEDBACK_MIN_QUESTIONS: "3",
   };
   const withFeedback = { ...USAGE_ENV, PGHACKER_FEEDBACK_RATE: "0.1", PGHACKER_FEEDBACK_COMMENTS: "false" };
   assert.deepEqual(settings(withFeedback), [["mcp", { PGHACKER_FEEDBACK_RATE: "0.1", ...defaults }]]);
   assert.deepEqual(readAzureConfig(withFeedback).feedback, {
-    rate: 0.1, comments: false, questionGap: 180, sessionGap: 600, minQuestions: 5,
+    rate: 0.1, comments: false, questionGap: 180, sessionGap: 600, minQuestions: 3,
   });
   // As Terraform sets them all.
   const all = {
