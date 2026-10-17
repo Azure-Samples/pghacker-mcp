@@ -36,6 +36,14 @@
   --ring: #4f46e5;
   --brand: #4f46e5;
 
+  /* The "Powered by" badge: a ring from the accent to the hero's teal, and a glow in the same two. */
+  --horizon-from: #4f46e5;
+  --horizon-to: #0d9488;
+  --horizon-halo: rgba(79, 70, 229, 0.07);
+  --horizon-glow-from: rgba(79, 70, 229, 0.42);
+  --horizon-glow-to: rgba(13, 148, 136, 0.36);
+  --horizon-text: #4338ca;
+
   --success: #16a34a;
   --success-text: #15803d;
   --success-soft: #dcfce7;
@@ -83,6 +91,13 @@
   --primary-soft: rgba(129, 140, 248, 0.13);
   --ring: #a5b4fc;
   --brand: #818cf8;
+
+  --horizon-from: #818cf8;
+  --horizon-to: #2dd4bf;
+  --horizon-halo: rgba(129, 140, 248, 0.1);
+  --horizon-glow-from: rgba(129, 140, 248, 0.4);
+  --horizon-glow-to: rgba(45, 212, 191, 0.3);
+  --horizon-text: #a5b4fc;
 
   --success: #22c55e;
   --success-text: #4ade80;

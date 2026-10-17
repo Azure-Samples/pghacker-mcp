@@ -38,6 +38,56 @@
   line-height: 1.6;
 }
 
+/* --- Powered by ----------------------------------------------------------- */
+
+/* A ring from the accent to teal around the card's own surface, with a glow in the same two colours. */
+.powered-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  margin-top: 28px;
+  padding: 0 18px 0 5px;
+  border: 1.5px solid transparent;
+  border-radius: 999px;
+  background:
+    linear-gradient(var(--card), var(--card)) padding-box,
+    linear-gradient(110deg, var(--horizon-from), var(--horizon-to)) border-box;
+  box-shadow:
+    0 0 0 3px var(--horizon-halo),
+    -10px 6px 22px -8px var(--horizon-glow-from),
+    10px 6px 22px -8px var(--horizon-glow-to);
+  color: var(--fg-2);
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+.powered-by-mark {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--horizon-from), var(--horizon-to));
+  color: #ffffff;
+}
+
+.powered-by-mark svg {
+  width: 14px;
+  height: 14px;
+}
+
+.powered-by strong {
+  color: var(--horizon-text);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.powered-by + .connect {
+  margin-top: 22px;
+}
+
 /* --- The connect panel --------------------------------------------------- */
 
 .connect {

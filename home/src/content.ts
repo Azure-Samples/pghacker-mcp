@@ -16,6 +16,9 @@ export const PRODUCT = {
   citationNote: "Every answer cites its evidence: Message-IDs with verbatim quotes, and file paths with line numbers.",
 } as const;
 
+/** What the service runs on, said under the headline. */
+export const POWERED_BY = { prefix: "Powered by", name: "HorizonDB" } as const;
+
 export type CapabilityIcon = "history" | "people" | "code" | "sql";
 
 export interface Capability {
