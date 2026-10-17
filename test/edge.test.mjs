@@ -10,7 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { CACHE, createEdgeServer, createHomeHandler, parsePrivacyUrl, withPrivacy, withStars } from "../scripts/lib/edge.mjs";
+import {
+  CACHE, createEdgeServer, createHomeHandler, parseCopyright, parsePrivacyUrl, withCopyright, withPrivacy, withStars,
+} from "../scripts/lib/edge.mjs";
 
 const PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" src="/static/index-abc.js"></script>';
 
@@ -222,12 +224,82 @@ test("the privacy tag goes before the end of the head, once, with the URL escape
   assert.equal(withPrivacy("<p>no head</p>", "https://example.com/p"), "<p>no head</p>");
 });
 
-test("the page's own index.html takes the privacy tag, and has none of its own", () => {
+test("the page's own index.html takes the footer's tags, once each and in order, and has none of its own", () => {
   const html = readFileSync(new URL("../home/index.html", import.meta.url), "utf8");
-  assert.ok(!/<meta[^>]+name="privacy-url"/.test(html));
-  const tagged = withPrivacy(html, "https://example.com/privacy");
-  assert.equal(tagged.match(/<meta name="privacy-url"/g).length, 1);
-  assert.ok(tagged.indexOf('name="privacy-url"') < tagged.indexOf("</head>"));
+  const names = ["privacy-url", "copyright-link"];
+  for (const name of names) assert.ok(!new RegExp(`<meta[^>]+name="${name}"`).test(html), name);
+  const tagged = withCopyright(withPrivacy(html, "https://example.com/privacy"), { url: "https://example.com/", text: "© 2026 Example" });
+  for (const name of names) assert.equal(tagged.match(new RegExp(`<meta name="${name}"`, "g")).length, 1, name);
+  assert.ok(tagged.indexOf('name="privacy-url"') < tagged.indexOf('name="copyright-link"'));
+  assert.ok(tagged.indexOf('name="copyright-link"') < tagged.indexOf("</head>"));
+});
+
+test("given the deployment's copyright link, the page carries it after its privacy statement; without one, it carries nothing", async (t) => {
+  const root = distFixture(t);
+  const page = (head) => `<!doctype html><head><meta name="application-name" content="pghacker-mcp">${head}</head><body></body>`;
+  writeFileSync(path.join(root, "index.html"), page(""));
+  const copyright = { url: "https://example.com/?a=1&b=2", text: "© 2026 Example & Sons" };
+  const copyrightTag = '<meta name="copyright-link" content="https://example.com/?a=1&amp;b=2" data-text="© 2026 Example &amp; Sons" />';
+  const privacyTag = '<meta name="privacy-url" content="https://example.com/privacy" />';
+  const serve = async (options) => `http://127.0.0.1:${await listen(t, http.createServer(createHomeHandler({ root, ...options })))}`;
+
+  const only = await serve({ copyright });
+  assert.equal(await (await fetch(`${only}/`)).text(), page(copyrightTag));
+  // Its length is the bytes' (the © takes two), not the characters'.
+  const head = await fetch(`${only}/`, { method: "HEAD" });
+  assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(page(copyrightTag))));
+  assert.equal(await (await fetch(`${only}/static/index-abc.js`)).text(), "console.log(1);\n");
+
+  const both = await serve({ privacy: "https://example.com/privacy", copyright });
+  assert.equal(await (await fetch(`${both}/`)).text(), page(privacyTag + copyrightTag));
+
+  // Unset or empty: the page as it was built.
+  for (const options of [{}, { copyright: undefined }, { copyright: { url: "", text: "" } }]) {
+    assert.equal(await (await fetch(`${await serve(options)}/`)).text(), page(""), JSON.stringify(options));
+  }
+
+  // With the repository's stars too, all three go in.
+  writeFileSync(path.join(root, "index.html"), page('<meta name="github-repo" content="o/r" />'));
+  const counted = await serve({ privacy: "https://example.com/privacy", copyright, stars: { get: () => 5 } });
+  assert.equal(
+    await (await fetch(`${counted}/`)).text(),
+    page(`<meta name="github-repo" content="o/r" data-stars="5" />${privacyTag}${copyrightTag}`),
+  );
+});
+
+test("a copyright link is an https URL with its text: anything else is refused, not shown", () => {
+  const good = { url: "https://example.com/", text: "© 2026 Example" };
+  assert.deepEqual(parseCopyright(good), good);
+  assert.doesNotThrow(() => createHomeHandler({ copyright: good }));
+  // Up to 100 characters, counted as characters: 100 emoji are 200 UTF-16 units.
+  for (const text of ["x".repeat(100), "😀".repeat(100)]) assert.notEqual(parseCopyright({ url: good.url, text }), undefined);
+  for (const bad of [
+    undefined, null, {}, { url: good.url }, { text: good.text }, { url: "http://example.com/", text: "x" },
+    { url: "javascript:alert(1)", text: "x" }, { url: "https://user:secret@example.com/", text: "x" },
+    { url: good.url, text: "" }, { url: good.url, text: "   " }, { url: good.url, text: "x\ny" },
+    { url: good.url, text: "x\u0000y" }, { url: good.url, text: "x".repeat(101) }, { url: good.url, text: "😀".repeat(101) },
+    { url: good.url, text: 5 },
+  ]) {
+    assert.equal(parseCopyright(bad), undefined, JSON.stringify(bad));
+  }
+  // Given in part, or not valid, it is an error, not a silent omission; given as nothing, it is none.
+  for (const bad of [{ url: good.url }, { text: good.text }, { url: "http://example.com/", text: "x" }, { url: good.url, text: "x\ny" }]) {
+    assert.throws(() => createHomeHandler({ copyright: bad }), /copyright link must be given as an https URL/, JSON.stringify(bad));
+  }
+  for (const none of [undefined, {}, { url: "", text: "" }]) assert.doesNotThrow(() => createHomeHandler({ copyright: none }));
+});
+
+test("the copyright tag goes before the end of the head, with its URL and text escaped and as they are", () => {
+  const link = { url: "https://example.com/$&", text: '© $& "2026" <Example>' };
+  assert.equal(
+    withCopyright("<head></head>", link),
+    '<head><meta name="copyright-link" content="https://example.com/$&amp;" data-text="© $&amp; &quot;2026&quot; &lt;Example&gt;" /></head>',
+  );
+  // Nothing to say, or nowhere to say it: the page as it is.
+  for (const none of [undefined, null, {}, { url: "https://example.com/" }, { text: "x" }, { url: "", text: "" }]) {
+    assert.equal(withCopyright("<head></head>", none), "<head></head>", JSON.stringify(none));
+  }
+  assert.equal(withCopyright("<p>no head</p>", link), "<p>no head</p>");
 });
 
 test("fingerprinted files are kept a year, the page's other files an hour", async (t) => {

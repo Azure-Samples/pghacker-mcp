@@ -216,7 +216,7 @@ run "app_and_restore_job" {
       APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
       PGHACKER_USAGE_DETAILS                = "false"
     }
-    error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users, and no PGHACKER_PRIVACY_URL, so no privacy link on the home page, without privacy_url."
+    error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users, and none of the home page footer's links (PGHACKER_PRIVACY_URL, PGHACKER_COPYRIGHT_URL and PGHACKER_COPYRIGHT_TEXT) without privacy_url, copyright_url and copyright_text."
   }
 
   assert {
@@ -459,6 +459,92 @@ run "app_env_cannot_set_the_privacy_url" {
 
   variables {
     app_env = { PGHACKER_PRIVACY_URL = "https://example.com/privacy" }
+  }
+
+  expect_failures = [var.app_env]
+}
+
+run "copyright_link_reaches_only_the_app" {
+  state_key = "copyright"
+
+  variables {
+    create_app     = true
+    copyright_url  = "https://example.com/"
+    copyright_text = "© 2026 Example"
+  }
+
+  assert {
+    condition = (
+      { for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null }["PGHACKER_COPYRIGHT_URL"] == "https://example.com/"
+      && { for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null }["PGHACKER_COPYRIGHT_TEXT"] == "© 2026 Example"
+      && !anytrue(flatten([
+        for job in azurerm_container_app_job.this : [
+          for env in job.template[0].container[0].env : startswith(env.name, "PGHACKER_COPYRIGHT_")
+        ]
+      ]))
+    )
+    error_message = "copyright_url and copyright_text must reach the app, and only the app, as PGHACKER_COPYRIGHT_URL and PGHACKER_COPYRIGHT_TEXT, for the home page's footer."
+  }
+}
+
+run "copyright_url_needs_its_text" {
+  command = plan
+
+  variables {
+    copyright_url = "https://example.com/"
+  }
+
+  expect_failures = [var.copyright_url]
+}
+
+run "copyright_text_needs_its_url" {
+  command = plan
+
+  variables {
+    copyright_text = "© 2026 Example"
+  }
+
+  expect_failures = [var.copyright_url]
+}
+
+run "copyright_url_must_be_https" {
+  command = plan
+
+  variables {
+    copyright_url  = "http://example.com/"
+    copyright_text = "© 2026 Example"
+  }
+
+  expect_failures = [var.copyright_url]
+}
+
+run "copyright_text_cannot_hold_a_line_break" {
+  command = plan
+
+  variables {
+    copyright_url  = "https://example.com/"
+    copyright_text = "© 2026\nExample"
+  }
+
+  expect_failures = [var.copyright_text]
+}
+
+run "copyright_text_is_at_most_a_hundred_characters" {
+  command = plan
+
+  variables {
+    copyright_url  = "https://example.com/"
+    copyright_text = join("", [for i in range(101) : "x"])
+  }
+
+  expect_failures = [var.copyright_text]
+}
+
+run "app_env_cannot_set_the_copyright_link" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_COPYRIGHT_TEXT = "© 2026 Example" }
   }
 
   expect_failures = [var.app_env]

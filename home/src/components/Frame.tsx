@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { PRODUCT } from "../content.ts";
-import { readPrivacyUrl } from "../privacy.ts";
+import { readCopyright, readPrivacyUrl } from "../footer.ts";
 import { GitHubLink } from "./GitHubLink.tsx";
 import { ThemeMenu } from "./ThemeMenu.tsx";
 
@@ -42,14 +42,17 @@ export function TopBar() {
 }
 
 /**
- * The footer. It links to a privacy statement only if the deployment has one:
- * its server then adds the statement's URL to the page as the privacy-url meta
- * tag. Without the tag, the footer has no privacy link.
+ * The footer. It links to a privacy statement, and then to a copyright notice,
+ * only if the deployment has them: its server adds their URLs, and the
+ * notice's text, to the page as the privacy-url and copyright-link meta tags.
+ * Without a tag, the footer has no such link.
  */
 export function Footer() {
-  const [privacy] = useState(() =>
-    readPrivacyUrl(document.querySelector<HTMLMetaElement>('meta[name="privacy-url"]')),
-  );
+  const [links] = useState(() => ({
+    privacy: readPrivacyUrl(document.querySelector<HTMLMetaElement>('meta[name="privacy-url"]')),
+    copyright: readCopyright(document.querySelector<HTMLMetaElement>('meta[name="copyright-link"]')),
+  }));
+  const { privacy, copyright } = links;
   return (
     <footer className="footer">
       <p>
@@ -57,9 +60,10 @@ export function Footer() {
         pgsql-hackers archive at postgresql.org and PostgreSQL's git repository. Not affiliated with the PostgreSQL
         Global Development Group.
       </p>
-      {privacy && (
-        <p>
-          <a href={privacy}>Privacy</a>
+      {(privacy || copyright) && (
+        <p className="footer-links">
+          {privacy && <a href={privacy}>Privacy</a>}
+          {copyright && <a href={copyright.url}>{copyright.text}</a>}
         </p>
       )}
     </footer>

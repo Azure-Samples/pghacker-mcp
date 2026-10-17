@@ -12,10 +12,11 @@
 // serve it (deploy/terraform/frontdoor.tf). Given star counts
 // (scripts/lib/github-stars.mjs), it adds the GitHub repository's stars to
 // the page it serves, once GitHub shows them; and, given the deployment's
-// privacy statement, a privacy-url tag, which the footer links to. In Azure it
-// serves alone behind oauth2-proxy (scripts/home.mjs); locally, the edge puts
-// it and the services on one origin with the routes of scripts/lib/routes.mjs,
-// as oauth2-proxy does in Azure, without sign-in.
+// privacy statement and copyright link, the privacy-url and copyright-link
+// tags, which the footer shows. In Azure it serves alone behind oauth2-proxy
+// (scripts/home.mjs); locally, the edge puts it and the services on one origin
+// with the routes of scripts/lib/routes.mjs, as oauth2-proxy does in Azure,
+// without sign-in.
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -118,10 +119,36 @@ export function parsePrivacyUrl(value) {
   return url && url.hostname !== "" && url.username === "" && url.password === "" ? value : undefined;
 }
 
-/** The end of the page's head, where the privacy-url tag goes. */
+/** The most characters that the text of the copyright link may have. */
+const MAX_COPYRIGHT_TEXT = 100;
+
+/**
+ * `{ url, text }` as the footer's copyright link: `url` as parsePrivacyUrl
+ * takes it, and `text`, what the link says, of 1 to 100 characters, not all
+ * blank, without control characters. It returns the link as it is, or
+ * undefined if it isn't one.
+ */
+export function parseCopyright(link) {
+  const { url, text } = link ?? {};
+  if (parsePrivacyUrl(url) === undefined || typeof text !== "string" || text.trim() === "") return undefined;
+  if ([...text].length > MAX_COPYRIGHT_TEXT || /\p{Cc}/u.test(text)) return undefined;
+  return { url, text };
+}
+
+/** The end of the page's head, where the footer's meta tags go. */
 const HEAD_END = /<\/head>/i;
 
 const ATTRIBUTE_ESCAPES = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" };
+
+/** `value`, for a double-quoted attribute. */
+function escapeAttribute(value) {
+  return value.replace(/[&"<>]/g, (character) => ATTRIBUTE_ESCAPES[character]);
+}
+
+/** `html` with `tag` at the end of its head; as it is, if it has no head. */
+function atHeadEnd(html, tag) {
+  return html.replace(HEAD_END, (end) => `${tag}${end}`);
+}
 
 /**
  * `html` with `privacy`, a URL that parsePrivacyUrl took, as a privacy-url
@@ -130,8 +157,19 @@ const ATTRIBUTE_ESCAPES = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;
  */
 export function withPrivacy(html, privacy) {
   if (!privacy) return html;
-  const content = privacy.replace(/[&"<>]/g, (character) => ATTRIBUTE_ESCAPES[character]);
-  return html.replace(HEAD_END, (end) => `<meta name="privacy-url" content="${content}" />${end}`);
+  return atHeadEnd(html, `<meta name="privacy-url" content="${escapeAttribute(privacy)}" />`);
+}
+
+/**
+ * `html` with `copyright`, a link that parseCopyright took, as a
+ * copyright-link meta tag at the end of its head: the link's URL as its
+ * content and its text as data-text, which the footer's link reads. Without
+ * a link, `html` as it is, and the page shows none.
+ */
+export function withCopyright(html, copyright) {
+  if (!copyright?.url || !copyright.text) return html;
+  const tag = `<meta name="copyright-link" content="${escapeAttribute(copyright.url)}" data-text="${escapeAttribute(copyright.text)}" />`;
+  return atHeadEnd(html, tag);
 }
 
 /**
@@ -139,17 +177,24 @@ export function withPrivacy(html, privacy) {
  * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
  * the portal's share links go on to; without it, they stay on the request's
  * own origin, as on the local edge. `privacy` is the deployment's privacy
- * statement, an https URL that the footer links to; without it, the page has
- * no such link. `onPage(request)` hears of each page served to a GET, for
- * usage telemetry. `stars`, from createStarCounts, adds the repository's star
- * count to the page.
+ * statement, an https URL, and `copyright` its copyright link, `{ url, text }`
+ * (parseCopyright); the footer shows each that is given, the privacy link
+ * first, and has no such link without it. `onPage(request)` hears of each
+ * page served to a GET, for usage telemetry. `stars`, from createStarCounts,
+ * adds the repository's star count to the page.
  */
-export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", onPage, stars } = {}) {
+export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", copyright, onPage, stars } = {}) {
   if (portal && URL.parse(portal)?.origin !== portal) {
     throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
   }
   if (privacy && parsePrivacyUrl(privacy) === undefined) {
     throw new Error(`The privacy statement must be given as an https URL, such as https://example.com/privacy, not ${privacy}.`);
+  }
+  const copyrightGiven = Boolean(copyright?.url || copyright?.text);
+  if (copyrightGiven && parseCopyright(copyright) === undefined) {
+    throw new Error(
+      `The copyright link must be given as an https URL, such as https://example.com/, and its text, such as © 2026 Example, of at most ${MAX_COPYRIGHT_TEXT} characters without control characters.`,
+    );
   }
   async function file(request, response, name, cacheControl) {
     const full = path.join(root, name);
@@ -162,9 +207,9 @@ export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", 
       if (error.code === "ENOENT" || error.code === "EISDIR") return notFound(request, response);
       throw error;
     }
-    if (name === "index.html" && (stars || privacy)) {
+    if (name === "index.html" && (stars || privacy || copyrightGiven)) {
       const html = stars ? withStars(body.toString("utf8"), stars) : body.toString("utf8");
-      body = Buffer.from(withPrivacy(html, privacy));
+      body = Buffer.from(withCopyright(withPrivacy(html, privacy), copyright));
     }
     send(request, response, 200, {
       "content-type": TYPES[path.extname(name)] ?? "application/octet-stream",

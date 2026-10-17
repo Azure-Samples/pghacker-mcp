@@ -579,6 +579,8 @@ variable "app_env" {
       "PGH_INDEXER_PASSWORD",
       "PGH_READER_PASSWORD",
       "PGH_SWARM_PASSWORD",
+      "PGHACKER_COPYRIGHT_TEXT",
+      "PGHACKER_COPYRIGHT_URL",
       "PGHACKER_CRAWL_MAX_SESSIONS",
       "PGHACKER_CRAWL_START_SESSIONS",
       "PGHACKER_DB_ADMIN_PASSWORD",
@@ -612,7 +614,7 @@ variable "app_env" {
       "PGHACKER_USAGE_DETAILS",
       "PGHACKER_USAGE_ID_KEY",
     ])) == 0
-    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, privacy statement, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
+    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, home page footer, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
   }
 }
 
@@ -657,6 +659,36 @@ variable "privacy_url" {
       && can(regex("^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^\\s\"'<>\\\\]*)?$", var.privacy_url))
     )
     error_message = "privacy_url must be null or an https URL, such as https://example.com/privacy, of at most 2048 characters: a host name, an optional port and path, without credentials, spaces, quotes, angle brackets or backslashes."
+  }
+}
+
+variable "copyright_url" {
+  description = "The page that the home page's footer links to as its copyright notice, to the right of the privacy link, with copyright_text as the link's text (PGHACKER_COPYRIGHT_URL): an https URL of your own, such as https://example.com/. Set it with copyright_text, or leave both null, the default, for no copyright link."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.copyright_url == null ? true : (
+      length(var.copyright_url) <= 2048
+      && can(regex("^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^\\s\"'<>\\\\]*)?$", var.copyright_url))
+    )
+    error_message = "copyright_url must be null or an https URL, such as https://example.com/, of at most 2048 characters: a host name, an optional port and path, without credentials, spaces, quotes, angle brackets or backslashes."
+  }
+
+  validation {
+    condition     = (var.copyright_url == null) == (var.copyright_text == null)
+    error_message = "copyright_url and copyright_text must be set together, or both left null."
+  }
+}
+
+variable "copyright_text" {
+  description = "What the home page footer's copyright link says (PGHACKER_COPYRIGHT_TEXT), such as \"© 2026 Example\": 1 to 100 characters, without control characters. Set it with copyright_url, or leave both null, the default, for no copyright link. The year isn't kept current: change it when it changes."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.copyright_text == null ? true : can(regex("^[^\\p{Cc}]{1,100}$", var.copyright_text)) && trimspace(var.copyright_text) != ""
+    error_message = "copyright_text must be null or 1 to 100 characters, not all blank, without control characters, such as \"© 2026 Example\"."
   }
 }
 

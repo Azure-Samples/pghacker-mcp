@@ -14,7 +14,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT, extractionEnvironment } from "./config.mjs";
-import { parsePrivacyUrl } from "./edge.mjs";
+import { parseCopyright, parsePrivacyUrl } from "./edge.mjs";
 import { PLACEHOLDER_KEY } from "./foundry.mjs";
 import { parseConnectionString } from "./monitor.mjs";
 import { oauth2ProxyRouteArgs } from "./routes.mjs";
@@ -134,6 +134,23 @@ function privacyUrl(env, name) {
   return url;
 }
 
+/**
+ * The deployment's copyright link, as { url, text }: PGHACKER_COPYRIGHT_URL
+ * and PGHACKER_COPYRIGHT_TEXT, both or neither; undefined when it has none.
+ */
+function copyrightLink(env) {
+  const url = value(env, "PGHACKER_COPYRIGHT_URL");
+  const text = value(env, "PGHACKER_COPYRIGHT_TEXT");
+  if (url === undefined && text === undefined) return undefined;
+  const link = parseCopyright({ url, text });
+  if (link === undefined) {
+    throw new Error(
+      "PGHACKER_COPYRIGHT_URL and PGHACKER_COPYRIGHT_TEXT must be set together: an https URL, such as https://example.com/, and the link's text, such as © 2026 Example, of at most 100 characters without control characters.",
+    );
+  }
+  return link;
+}
+
 function httpsOrigin(env, name) {
   const url = new URL(value(env, name));
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search) {
@@ -226,8 +243,9 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
         portalUrl: portalUrl.origin,
         hosts: [...new Set([publicUrl.hostname, portalUrl.hostname, ...list(env, "PGHACKER_PUBLIC_HOSTS")])],
         frontDoorId: value(env, "PGHACKER_FRONT_DOOR_ID"),
-        // The home page's footer links to it; without one, it has no link.
+        // The home page's footer shows these; without them, it has no such links.
         privacyUrl: privacyUrl(env, "PGHACKER_PRIVACY_URL"),
+        copyright: copyrightLink(env),
       }
       : undefined,
     rate: {
@@ -477,9 +495,9 @@ export function processEnvironments(config) {
     };
     // The home page's server: the built page, its port and the portal's
     // origin, Front Door's host name, which its share links go on to; the
-    // privacy statement its footer links to, if the deployment has one; and
-    // usage telemetry's settings, with the Front Door profile whose requests
-    // name their client; nothing else. It has a user of its own: a process
+    // privacy statement and copyright link its footer shows, if the
+    // deployment has them; and usage telemetry's settings, with the Front
+    // Door profile whose requests name their client; nothing else. It has a user of its own: a process
     // can read the environment of another of the same user, and
     // oauth2-proxy's holds its secrets.
     environments.home = {
@@ -488,6 +506,9 @@ export function processEnvironments(config) {
       PGHACKER_HOME_DIR: path.join(config.root, "home", "dist"),
       PGHACKER_PORTAL_URL: config.public.portalUrl,
       ...(config.public.privacyUrl ? { PGHACKER_PRIVACY_URL: config.public.privacyUrl } : {}),
+      ...(config.public.copyright
+        ? { PGHACKER_COPYRIGHT_URL: config.public.copyright.url, PGHACKER_COPYRIGHT_TEXT: config.public.copyright.text }
+        : {}),
       ...usage,
       ...(config.usage && config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
     };

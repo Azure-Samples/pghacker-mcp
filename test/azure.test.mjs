@@ -261,6 +261,43 @@ test("the privacy statement that the home page's footer links to reaches the hom
   }
 });
 
+test("the copyright link that the home page's footer shows reaches the home page's server alone, with its text, and only if the deployment has one", () => {
+  const link = { PGHACKER_COPYRIGHT_URL: "https://example.com/", PGHACKER_COPYRIGHT_TEXT: "© 2026 Example" };
+  assert.equal(readAzureConfig(ENV).public.copyright, undefined);
+  assert.deepEqual(readAzureConfig({ ...ENV, ...link }).public.copyright, { url: "https://example.com/", text: "© 2026 Example" });
+  assert.deepEqual(
+    readAzureConfig({ ...ENV, PGHACKER_COPYRIGHT_URL: " https://example.com/ ", PGHACKER_COPYRIGHT_TEXT: "  © 2026 Example  " }).public.copyright,
+    { url: "https://example.com/", text: "© 2026 Example" },
+  );
+  for (const [name, env] of Object.entries(processEnvironments(readAzureConfig({ ...ENV, ...link })))) {
+    const own = { PGHACKER_COPYRIGHT_URL: env.PGHACKER_COPYRIGHT_URL, PGHACKER_COPYRIGHT_TEXT: env.PGHACKER_COPYRIGHT_TEXT };
+    assert.deepEqual(own, name === "home" ? link : { PGHACKER_COPYRIGHT_URL: undefined, PGHACKER_COPYRIGHT_TEXT: undefined }, name);
+  }
+  // Unset or blank, there is no link.
+  for (const blank of [undefined, "", "  "]) {
+    const env = { ...ENV, PGHACKER_COPYRIGHT_URL: blank, PGHACKER_COPYRIGHT_TEXT: blank };
+    assert.equal(readAzureConfig(env).public.copyright, undefined, JSON.stringify(blank));
+    for (const [name, processEnv] of Object.entries(processEnvironments(readAzureConfig(env)))) {
+      assert.ok(!Object.keys(processEnv).some((key) => key.startsWith("PGHACKER_COPYRIGHT_")), `${name} with ${JSON.stringify(blank)}`);
+    }
+  }
+  // The jobs serve no page.
+  assert.equal(readAzureConfig({ ...ENV, ...link }, { serve: false }).public, undefined);
+  // The URL and the text go together, and each must be valid.
+  const unmatched = /PGHACKER_COPYRIGHT_URL and PGHACKER_COPYRIGHT_TEXT must be set together/;
+  for (const bad of [
+    { PGHACKER_COPYRIGHT_URL: "https://example.com/" },
+    { PGHACKER_COPYRIGHT_TEXT: "© 2026 Example" },
+    { ...link, PGHACKER_COPYRIGHT_URL: "http://example.com/" },
+    { ...link, PGHACKER_COPYRIGHT_URL: "https://user:secret@example.com/" },
+    { ...link, PGHACKER_COPYRIGHT_URL: "example.com" },
+    { ...link, PGHACKER_COPYRIGHT_TEXT: "© 2026\nExample" },
+    { ...link, PGHACKER_COPYRIGHT_TEXT: "x".repeat(101) },
+  ]) {
+    assert.throws(() => readAzureConfig({ ...ENV, ...bad }), unmatched, JSON.stringify(bad));
+  }
+});
+
 test("feedback's settings reach pghacker-mcp alone, and only with usage telemetry", () => {
   const settings = (env) => {
     const environments = processEnvironments(readAzureConfig(env));

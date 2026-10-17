@@ -74,6 +74,10 @@ crawl_max_sessions            = 4
 # The privacy statement that the home page's footer links to, as "Privacy": an
 # https URL of your own. Unset, the page has no privacy link.
 # privacy_url = "https://example.com/privacy"
+# A copyright link, to its right: the URL and what the link says. Set both, or
+# neither: the page then has no copyright link. The year isn't kept current.
+# copyright_url  = "https://example.com/"
+# copyright_text = "© 2026 Example"
 
 # Usage telemetry (PRIVACY.md); false records nothing.
 usage_enabled = true
