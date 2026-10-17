@@ -140,9 +140,9 @@ mod tests {
 
     #[test]
     fn the_form_asks_for_a_rating_with_no_default() {
-        let form = serde_json::to_value(form(false, "fb2.state".into())).unwrap();
+        let form = serde_json::to_value(form(false, "fb3.state".into())).unwrap();
         assert_eq!(form["resultType"], "input_required");
-        assert_eq!(form["requestState"], "fb2.state");
+        assert_eq!(form["requestState"], "fb3.state");
         let request = &form["inputRequests"][KEY];
         assert_eq!(request["method"], "elicitation/create");
         let params = &request["params"];
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn with_comments_the_form_adds_one_after_the_rating() {
-        let form = form(true, "fb2.state".into());
+        let form = form(true, "fb3.state".into());
         let schema = &serde_json::to_value(&form).unwrap()["inputRequests"][KEY]["params"]["requestedSchema"];
         assert_eq!(schema["properties"][REMARKS]["maxLength"], 500);
         assert_eq!(schema["required"], json!(["rating"]));

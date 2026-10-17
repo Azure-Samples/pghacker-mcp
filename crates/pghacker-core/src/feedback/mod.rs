@@ -15,14 +15,23 @@
 //! address ([`sampler`]), the server answers the call `input_required` with
 //! a form instead of running it ([`form`]), at most once an hour per
 //! address. The client asks the user and retries the call with the answer
-//! and the form's sealed `requestState` ([`token`]). The server records the
-//! answer in usage telemetry and runs the call, whatever the answer. The
-//! model takes no part.
+//! and the form's `requestState`, sealed to the app and the tool ([`token`]).
+//! The server records the answer in usage telemetry and runs the call,
+//! whatever the answer. The model takes no part.
+//!
+//! The answer may come from another address than the ask: behind gateways
+//! such as Global Secure Access, each new connection may leave from another
+//! address of a pool. It still counts, and the hour's ask and a decline
+//! count for the address that answered as well as the one asked. The address
+//! stays the client's identity otherwise, so such a client's questions are
+//! counted per address, and it may be asked again within the hour through a
+//! third.
 //!
 //! What is kept, in memory, follows the clients and keeps the asks rare: per
 //! client its questions, and per address the hour last asked, a pause after
-//! a decline and recent outcomes, and the asks answered. A restart forgets
-//! it; the draw doesn't change.
+//! a decline and recent outcomes; and the asks, with the asked address's /24
+//! (IPv6: /48), until they're answered or expire: a task forgets expired asks
+//! every minute. A restart forgets it all; the draw doesn't change.
 //!
 //! Off unless usage telemetry is on and PGHACKER_FEEDBACK_RATE is above 0.
 //! A request with no client identity (the internal listener), with
@@ -36,7 +45,8 @@ mod text;
 mod token;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, ensure};
@@ -58,9 +68,13 @@ const ADDRESS_OUTCOMES_PER_HOUR: u32 = 3;
 const OUTCOMES_PER_MINUTE: u32 = 60;
 /// Rejections recorded at most per minute in all; and per address, one.
 const REJECTIONS_PER_MINUTE: u32 = 60;
-/// Addresses and answered asks kept at most; beyond, the stale are forgotten.
+/// Addresses, asks and answered asks kept at most; beyond, the stale are
+/// forgotten.
 const MAX_ADDRESSES: usize = 100_000;
+const MAX_ASKS: usize = 100_000;
 const MAX_ANSWERED: usize = 100_000;
+/// How often a server forgets the asks whose state has expired.
+const SWEEP: Duration = Duration::from_secs(60);
 
 /// The apps asked by default: any whose `clientInfo` name contains one of
 /// these, ignoring case. That's Copilot CLI and the GitHub Copilot app
@@ -127,6 +141,9 @@ pub struct Caller<'a> {
     /// The usage identity's user, a keyed hash of the client's address.
     /// Without one, as on the internal listener, a client is never asked.
     pub user: Option<&'a str>,
+    /// The client's address. An ask keeps its network in memory, to compare
+    /// with its answer's; it's never recorded.
+    pub address: Option<IpAddr>,
     /// The app's `clientInfo` name.
     pub app: Option<String>,
     /// Whether the request declares form elicitation (MCP 2026-07-28).
@@ -219,6 +236,11 @@ pub struct Outcome {
     pub rating: Option<&'static str>,
     /// With comments on, what the user wrote.
     pub comment: Option<String>,
+    /// Where the answer came from, against the address asked: `same`, the
+    /// same /24 (`same24`; for IPv6, the same /48), the same /16 (`same16`;
+    /// for IPv6, /32), `other`, or `unknown` when the ask isn't in memory, as
+    /// after a restart.
+    pub answered_from: &'static str,
 }
 
 impl Feedback {
@@ -241,7 +263,9 @@ impl Feedback {
     ///   question after a client's first is asked ([`Settings::debug`]).
     ///
     /// It's on only with usage telemetry, where it records, and its keys
-    /// derive from usage telemetry's PGHACKER_USAGE_ID_KEY.
+    /// derive from usage telemetry's PGHACKER_USAGE_ID_KEY. On, it starts a
+    /// task, in the Tokio runtime that usage telemetry also needs, that
+    /// forgets expired asks every minute.
     pub fn from_env(env: &Env, usage: &Usage) -> Result<Self> {
         let rate: f64 = env.parse_or("PGHACKER_FEEDBACK_RATE", 0.0)?;
         ensure!(
@@ -296,7 +320,11 @@ impl Feedback {
             return Ok(Self::off());
         }
         let id_key = env.require("PGHACKER_USAGE_ID_KEY")?.trim();
-        Self::new(settings, id_key.as_bytes())
+        let feedback = Self::new(settings, id_key.as_bytes())?;
+        if let Some(inner) = &feedback.inner {
+            tokio::spawn(forget_in_background(Arc::downgrade(inner)));
+        }
+        Ok(feedback)
     }
 
     /// Feedback with `settings`, its keys derived from `id_key`.
@@ -424,8 +452,9 @@ impl Feedback {
             });
         };
         state.questions.hold(&key, now_ms);
+        let (request_state, id) = inner.tokens.issue(&key.app, tool);
+        state.keep_ask(id, &key.user, caller.address, secs);
         drop(state);
-        let (request_state, id) = inner.tokens.issue(&key.user, tool);
         Arrival::Ask(Ask {
             form: form::form(inner.settings.comments, request_state),
             ask_id: id.simple().to_string(),
@@ -443,8 +472,9 @@ impl Feedback {
     /// The retry of a call of `tool` by `caller` at `now`, carrying
     /// `responses` and `state`. It's never held, and belongs to the question
     /// the held call started. When it answers this server's form, from a
-    /// client that can be asked, the answer is recorded once, if the state is
-    /// the caller's and current, within the limits.
+    /// client that can be asked, the answer is recorded once, if the state
+    /// is the caller's app's for this tool and current, within the limits,
+    /// whichever address it comes from.
     pub fn resume(
         &self,
         caller: &Caller<'_>,
@@ -474,7 +504,7 @@ impl Feedback {
         // Only a client that could have been asked has an answer to record.
         if let (Some(key), true) = (&key, ours) {
             let user = key.user.as_str();
-            match state.and_then(|state| inner.tokens.open(state, user, tool)) {
+            match state.and_then(|state| inner.tokens.open(state, &key.app, tool)) {
                 None => rejection = guard.reject(user, secs).then_some("invalid"),
                 Some(id) if guard.answered(&id, secs) => {
                     rejection = guard.reject(user, secs).then_some("used");
@@ -487,12 +517,21 @@ impl Feedback {
                         responses.and_then(|responses| responses.get(form::KEY)),
                         inner.settings.comments,
                     );
-                    guard.record(user, id, secs, answer.outcome == "declined");
+                    let asked = guard.take_ask(&id, secs);
+                    let answered_from = answered_from(asked.as_ref(), user, caller.address);
+                    guard.record(
+                        user,
+                        asked.as_ref().map(|asked| asked.user.as_str()),
+                        id,
+                        secs,
+                        answer.outcome == "declined",
+                    );
                     outcome = Some(Outcome {
                         ask_id: id.simple().to_string(),
                         outcome: answer.outcome,
                         rating: answer.rating,
                         comment: answer.comment,
+                        answered_from,
                     });
                 }
             }
@@ -611,11 +650,77 @@ fn time(millis: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(millis)
 }
 
+/// Forgets the asks whose state has expired every [`SWEEP`], so that an ask
+/// never answered isn't kept past its expiry, until feedback is dropped.
+async fn forget_in_background(inner: Weak<Inner>) {
+    loop {
+        tokio::time::sleep(SWEEP).await;
+        let Some(inner) = inner.upgrade() else {
+            return;
+        };
+        inner.lock().forget_asks(millis(SystemTime::now()) / 1000);
+    }
+}
+
+/// The part of `address` an ask keeps: its /24, or for IPv6 its /48, all
+/// that telling how near an answer's address is takes.
+fn network(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            IpAddr::V4(Ipv4Addr::new(a, b, c, 0))
+        }
+        IpAddr::V6(ip) => {
+            let [a, b, c, ..] = ip.segments();
+            IpAddr::V6(Ipv6Addr::new(a, b, c, 0, 0, 0, 0, 0))
+        }
+    }
+}
+
+/// Where an answer from `user` at `address` came from, against the ask
+/// `asked`: see [`Outcome::answered_from`].
+fn answered_from(asked: Option<&Asked>, user: &str, address: Option<IpAddr>) -> &'static str {
+    let Some(asked) = asked else {
+        return "unknown";
+    };
+    if asked.user == user {
+        return "same";
+    }
+    let (Some(a), Some(b)) = (asked.address, address) else {
+        return "other";
+    };
+    match (a.to_canonical(), b.to_canonical()) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let (a, b) = (a.octets(), b.octets());
+            if a[..3] == b[..3] {
+                "same24"
+            } else if a[..2] == b[..2] {
+                "same16"
+            } else {
+                "other"
+            }
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let (a, b) = (a.segments(), b.segments());
+            if a[..3] == b[..3] {
+                "same24"
+            } else if a[..2] == b[..2] {
+                "same16"
+            } else {
+                "other"
+            }
+        }
+        _ => "other",
+    }
+}
+
 /// What feedback keeps, in memory.
 #[derive(Default)]
 struct State {
     questions: Questions,
     addresses: HashMap<String, Address>,
+    /// The asks not yet answered, until their state expires.
+    asks: HashMap<Uuid, Asked>,
     /// The asks answered, until their state expires (unix seconds).
     answered: HashMap<Uuid, u64>,
     /// The current minute, and the outcomes recorded in it.
@@ -626,6 +731,16 @@ struct State {
     /// asks and pause.
     rejected: HashMap<String, u64>,
     rejections: (u64, u32),
+}
+
+/// An ask: who was asked, to link with the address its answer comes from.
+struct Asked {
+    /// The address's user hash.
+    user: String,
+    /// The address's [`network`], kept in memory only.
+    address: Option<IpAddr>,
+    /// When its state expires (unix seconds).
+    until: u64,
 }
 
 /// An address's asks and outcomes. Only an ask makes one.
@@ -680,6 +795,36 @@ impl State {
         self.answered.get(id).is_some_and(|until| *until > secs)
     }
 
+    /// Keeps the ask `id`, made at `secs` of `user` at `address`, until its
+    /// state expires. When the table is full of current asks, it isn't kept:
+    /// its answer still counts, as from an `unknown` address.
+    fn keep_ask(&mut self, id: Uuid, user: &str, address: Option<IpAddr>, secs: u64) {
+        if self.asks.len() >= MAX_ASKS {
+            self.forget_asks(secs);
+            if self.asks.len() >= MAX_ASKS {
+                return;
+            }
+        }
+        self.asks.insert(
+            id,
+            Asked {
+                user: user.to_owned(),
+                address: address.map(network),
+                until: secs + token::LIFETIME.as_secs(),
+            },
+        );
+    }
+
+    /// The ask `id`, if it's kept and current at `secs`, forgotten now.
+    fn take_ask(&mut self, id: &Uuid, secs: u64) -> Option<Asked> {
+        self.asks.remove(id).filter(|asked| asked.until > secs)
+    }
+
+    /// Forgets the asks whose state has expired at `secs`.
+    fn forget_asks(&mut self, secs: u64) {
+        self.asks.retain(|_, asked| asked.until > secs);
+    }
+
     /// Whether an outcome of `user`'s at `secs` is within the limits: per
     /// minute in all, and, unless in debug mode, per address an hour.
     fn within_limits(&self, user: &str, secs: u64, debug: bool) -> bool {
@@ -692,8 +837,10 @@ impl State {
         address && all
     }
 
-    /// Records `user`'s outcome for the ask `id` at `secs`.
-    fn record(&mut self, user: &str, id: Uuid, secs: u64, declined: bool) {
+    /// Records the outcome `user` gave at `secs` for the ask `id`, made of
+    /// `asked`, if known. The hour's ask, and a decline's pause, count for
+    /// the address that answered and, if another, the one asked.
+    fn record(&mut self, user: &str, asked: Option<&str>, id: Uuid, secs: u64, declined: bool) {
         if self.answered.len() >= MAX_ANSWERED {
             self.answered.retain(|_, until| *until > secs);
             if self.answered.len() >= MAX_ANSWERED {
@@ -711,19 +858,24 @@ impl State {
             },
         );
         let hour = secs / 3600;
-        let Some(address) = self.address(user, secs) else {
-            return;
-        };
-        address.outcomes = (
-            hour,
-            if address.outcomes.0 == hour {
-                address.outcomes.1 + 1
-            } else {
-                1
-            },
-        );
-        if declined {
-            address.paused_until = secs + PAUSE;
+        if let Some(address) = self.address(user, secs) {
+            address.outcomes = (
+                hour,
+                if address.outcomes.0 == hour {
+                    address.outcomes.1 + 1
+                } else {
+                    1
+                },
+            );
+        }
+        let other = asked.filter(|asked| *asked != user);
+        for linked in std::iter::once(user).chain(other) {
+            if let Some(address) = self.address(linked, secs) {
+                address.asked_hour = Some(hour);
+                if declined {
+                    address.paused_until = secs + PAUSE;
+                }
+            }
         }
     }
 
@@ -781,6 +933,7 @@ mod tests {
     fn caller(user: &str) -> Caller<'_> {
         Caller {
             user: Some(user),
+            address: None,
             app: Some("copilot-cli".into()),
             elicits: true,
             opted_out: false,
@@ -989,7 +1142,7 @@ mod tests {
             text::PROMPT
         );
         let state = state_of(&ask);
-        assert!(state.starts_with("fb2."), "{state}");
+        assert!(state.starts_with("fb3."), "{state}");
         // Its retry, with the answer, runs as part of the fourth question.
         let (outcome, rejection) = resume(
             &feedback,
@@ -1007,6 +1160,7 @@ mod tests {
                 outcome: "rated",
                 rating: Some("up"),
                 comment: None,
+                answered_from: "same",
             })
         );
         run(&feedback, &me, t + 60, true);
@@ -1162,19 +1316,20 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_is_recorded_once_and_only_from_its_retry() {
+    fn the_answer_is_recorded_once_from_any_address_of_its_app() {
         let feedback = always();
         let me = caller(USER);
         let t = questions(&feedback, &me, 0, 3);
         let ask = ask(&feedback, &me, "search", t);
         let state = state_of(&ask);
-        // Another client's, another tool's, or a forged state records
-        // nothing: one rejection a minute.
-        let them = caller(OTHER);
+        // Another app's, another tool's, or a forged state records nothing:
+        // one rejection a minute per address.
+        let mut codex = caller(USER);
+        codex.app = Some("codex-mcp-client".into());
         assert_eq!(
             resume(
                 &feedback,
-                &them,
+                &codex,
                 "search",
                 Some(&state),
                 Some(&accept("up")),
@@ -1185,20 +1340,21 @@ mod tests {
         assert_eq!(
             resume(
                 &feedback,
-                &them,
-                "search",
-                Some("fb2.AAAA"),
+                &me,
+                "query",
+                Some(&state),
                 Some(&accept("up")),
                 t + 2
             ),
             (None, None)
         );
+        let them = caller(OTHER);
         assert_eq!(
             resume(
                 &feedback,
-                &me,
-                "query",
-                Some(&state),
+                &them,
+                "search",
+                Some("fb3.AAAA"),
                 Some(&accept("up")),
                 t + 3
             ),
@@ -1208,19 +1364,19 @@ mod tests {
             resume(&feedback, &me, "search", None, Some(&accept("up")), t + 4),
             (None, None)
         );
-        // Its own retry records the answer, once.
+        // Another address of the same app records the answer, once.
         let (outcome, rejection) = resume(
             &feedback,
-            &me,
+            &them,
             "search",
             Some(&state),
             Some(&accept("down")),
-            t + 10,
+            t + 70,
         );
         assert_eq!(rejection, None);
         assert_eq!(
-            outcome.map(|outcome| (outcome.outcome, outcome.rating)),
-            Some(("rated", Some("down")))
+            outcome.map(|outcome| (outcome.outcome, outcome.rating, outcome.answered_from)),
+            Some(("rated", Some("down"), "other"))
         );
         assert_eq!(
             resume(
@@ -1229,7 +1385,7 @@ mod tests {
                 "search",
                 Some(&state),
                 Some(&accept("up")),
-                t + 70
+                t + 130
             ),
             (None, Some("used"))
         );
@@ -1264,12 +1420,167 @@ mod tests {
                 &feedback,
                 &script,
                 "search",
-                Some("fb2.AAAA"),
+                Some("fb3.AAAA"),
                 Some(&accept("up")),
                 t + 300
             ),
             (None, None)
         );
+    }
+
+    /// `user` at `address`, with Copilot CLI.
+    fn client<'a>(user: &'a str, address: &str) -> Caller<'a> {
+        Caller {
+            address: Some(address.parse().unwrap()),
+            ..caller(user)
+        }
+    }
+
+    #[test]
+    fn an_answer_says_how_near_its_address_is_to_the_asked_one() {
+        let feedback = always();
+        let pairs = [
+            ("198.51.100.10", "198.51.100.10", "same"),
+            ("198.51.100.10", "198.51.100.77", "same24"),
+            ("198.51.100.10", "198.51.7.7", "same16"),
+            ("198.51.100.10", "203.0.113.5", "other"),
+            ("2001:db8:1:2::1", "2001:db8:1:3::1", "same24"),
+            ("2001:db8:1:2::1", "2001:db8:9::1", "same16"),
+            ("2001:db8:1:2::1", "2001:db9::1", "other"),
+            ("198.51.100.10", "2001:db8::1", "other"),
+            ("::ffff:198.51.100.10", "198.51.100.20", "same24"),
+        ];
+        for (n, (asked_at, answered_at, from)) in pairs.into_iter().enumerate() {
+            // Each pair its own addresses' users, so that each is asked.
+            let asked_user = format!("a{n:031x}");
+            let answering_user = if from == "same" {
+                asked_user.clone()
+            } else {
+                format!("b{n:031x}")
+            };
+            let asked = client(&asked_user, asked_at);
+            let t = questions(&feedback, &asked, 0, 3);
+            let held = ask(&feedback, &asked, "search", t);
+            let answering = client(&answering_user, answered_at);
+            let (outcome, rejection) = resume(
+                &feedback,
+                &answering,
+                "search",
+                Some(&state_of(&held)),
+                Some(&accept("up")),
+                t + 9,
+            );
+            assert_eq!(rejection, None, "{asked_at} -> {answered_at}");
+            assert_eq!(
+                outcome.map(|outcome| outcome.answered_from),
+                Some(from),
+                "{asked_at} -> {answered_at}"
+            );
+        }
+        // An ask the server doesn't know, as after a restart, still counts.
+        let restarted = always();
+        let asked = client(USER, "198.51.100.10");
+        let t = questions(&feedback, &asked, 0, 3);
+        let held = ask(&feedback, &asked, "search", t);
+        let (outcome, rejection) = resume(
+            &restarted,
+            &client(OTHER, "198.51.100.11"),
+            "search",
+            Some(&state_of(&held)),
+            Some(&accept("up")),
+            t + 9,
+        );
+        assert_eq!(rejection, None);
+        assert_eq!(
+            outcome.map(|outcome| outcome.answered_from),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn an_answer_from_another_address_counts_the_hours_ask_and_a_decline_for_both() {
+        // The address that answered isn't asked in that hour either.
+        let mut state = State::default();
+        let id = Uuid::new_v4();
+        assert_eq!(state.ask(USER, 0), Ok(()));
+        state.keep_ask(id, USER, None, 0);
+        assert!(
+            state
+                .take_ask(&id, 10)
+                .is_some_and(|asked| asked.user == USER)
+        );
+        assert!(state.take_ask(&id, 10).is_none());
+        state.record(OTHER, Some(USER), id, 10, false);
+        assert_eq!(state.ask(OTHER, 20), Err("already asked this hour"));
+        assert_eq!(state.ask(USER, 20), Err("already asked this hour"));
+        assert_eq!(state.ask(OTHER, 3600), Ok(()));
+        // A decline from another address pauses both for a day.
+        let mut state = State::default();
+        assert_eq!(state.ask(USER, 0), Ok(()));
+        state.record(OTHER, Some(USER), Uuid::new_v4(), 10, true);
+        for user in [USER, OTHER] {
+            assert_eq!(state.ask(user, 3600), Err("paused after a decline"));
+            assert_eq!(state.ask(user, 10 + PAUSE), Ok(()));
+        }
+        // From the address asked, or an ask the server doesn't know, only
+        // the address that answered: its hour, as when it's later than the
+        // ask's, and its pause.
+        for asked in [Some(USER), None] {
+            let mut state = State::default();
+            state.record(USER, asked, Uuid::new_v4(), 3610, false);
+            assert_eq!(state.ask(USER, 3620), Err("already asked this hour"));
+            assert_eq!(state.ask(OTHER, 3620), Ok(()));
+            let mut state = State::default();
+            state.record(USER, asked, Uuid::new_v4(), 10, true);
+            assert_eq!(state.ask(USER, 3600), Err("paused after a decline"));
+            assert_eq!(state.ask(OTHER, 3600), Ok(()));
+        }
+        // An ask keeps only its address's network, and is forgotten past its
+        // state's expiry, answered or not.
+        let mut state = State::default();
+        for (address, kept) in [
+            ("198.51.100.10", "198.51.100.0"),
+            ("::ffff:198.51.100.10", "198.51.100.0"),
+            ("2001:db8:1:2:3:4:5:6", "2001:db8:1::"),
+        ] {
+            let id = Uuid::new_v4();
+            state.keep_ask(id, USER, Some(address.parse().unwrap()), 0);
+            assert_eq!(state.asks[&id].address, Some(kept.parse().unwrap()));
+            assert!(state.take_ask(&id, token::LIFETIME.as_secs()).is_none());
+        }
+        let lifetime = token::LIFETIME.as_secs();
+        let (early, late) = (Uuid::new_v4(), Uuid::new_v4());
+        state.keep_ask(early, USER, None, 0);
+        state.keep_ask(late, OTHER, None, 100);
+        state.forget_asks(lifetime - 1);
+        assert_eq!(state.asks.len(), 2);
+        state.forget_asks(lifetime);
+        assert!(!state.asks.contains_key(&early) && state.asks.contains_key(&late));
+        state.forget_asks(lifetime + 100);
+        assert!(state.asks.is_empty());
+
+        // Through the flow: the address that answered, warmed up and armed,
+        // isn't asked at its next question in that hour, as another such
+        // address is.
+        let feedback = always();
+        let asked = client(USER, "198.51.100.10");
+        let answering = client(OTHER, "198.51.100.77");
+        let third = client("0123456789abcdef0123456789abcdef", "203.0.113.5");
+        let t = questions(&feedback, &asked, 0, 3);
+        questions(&feedback, &answering, 0, 3);
+        questions(&feedback, &third, 0, 3);
+        let held = ask(&feedback, &asked, "search", t);
+        let (outcome, _) = resume(
+            &feedback,
+            &answering,
+            "search",
+            Some(&state_of(&held)),
+            Some(&accept("up")),
+            t + 9,
+        );
+        assert_eq!(outcome.map(|outcome| outcome.answered_from), Some("same24"));
+        run(&feedback, &answering, t + 9 + STEP, true);
+        ask(&feedback, &third, "search", t + 9 + STEP);
     }
 
     #[test]
@@ -1284,7 +1595,7 @@ mod tests {
         assert!(state.addresses.is_empty());
         // Full of addresses that still matter, the table makes no room by
         // forgetting them: a newcomer isn't asked, and every pause stays.
-        state.record(USER, Uuid::new_v4(), 0, true);
+        state.record(USER, None, Uuid::new_v4(), 0, true);
         for n in 1..MAX_ADDRESSES {
             assert_eq!(state.ask(&format!("{n:032x}"), 0), Ok(()));
         }
@@ -1384,7 +1695,7 @@ mod tests {
         let mut state = State::default();
         for _ in 0..ADDRESS_OUTCOMES_PER_HOUR {
             assert!(state.within_limits(USER, 0, false));
-            state.record(USER, Uuid::new_v4(), 0, false);
+            state.record(USER, None, Uuid::new_v4(), 0, false);
         }
         assert!(!state.within_limits(USER, 0, false));
         assert!(state.within_limits(USER, 3600, false));

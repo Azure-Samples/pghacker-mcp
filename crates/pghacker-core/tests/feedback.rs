@@ -337,7 +337,7 @@ async fn an_interactive_client_is_asked_as_its_next_question_starts_and_its_retr
         })
     );
     let state = state_of(&form);
-    assert!(state.starts_with("fb2."), "{state}");
+    assert!(state.starts_with("fb3."), "{state}");
 
     // The retry carries the answer and the state, and gets the tool's result.
     let ran = client
@@ -414,6 +414,7 @@ async fn an_interactive_client_is_asked_as_its_next_question_starts_and_its_retr
     assert_eq!(ask_id.len(), 32);
     assert_eq!(properties(rated)["askId"], ask_id);
     assert_eq!(properties(rated)["rating"], "up");
+    assert_eq!(properties(rated)["answeredFrom"], "same");
     assert!(properties(rated).get("comment").is_none());
     assert_eq!(properties(rated)["clientName"], "copilot-cli");
     assert_eq!(rated["tags"]["ai.user.id"], asked["tags"]["ai.user.id"]);
@@ -575,16 +576,16 @@ async fn retry(client: &Client, state: Option<&str>) {
 }
 
 #[tokio::test]
-async fn a_state_is_its_clients_and_answers_once() {
+async fn a_state_answers_once_for_its_app_and_tool_from_any_address() {
     let ingestion = Ingestion::start().await;
     let (base, usage) = listen(server(settings(1)), Some(&ingestion)).await;
     let client = Client::new(&base, CLIENT);
     client.questions(1).await;
     let form = client.held().await;
     let state = state_of(&form);
-    // Another client's retry, or one without the state, records nothing.
-    let other = Client::new(&base, "198.51.100.7");
-    retry(&other, Some(state)).await;
+    // Another app's retry, or one without the state, records nothing.
+    let codex = Client::new(&base, "198.51.100.7").named(Some("codex-mcp-client"));
+    retry(&codex, Some(state)).await;
     retry(&client, None).await;
     // Another tool's retry neither.
     let ran = client
@@ -596,20 +597,32 @@ async fn a_state_is_its_clients_and_answers_once() {
         )
         .await;
     assert_eq!(ran["result"]["content"][0]["text"], "x\n");
-    // Its own records it, once.
+    // The app's retry from another address, as behind a gateway that gives
+    // each connection its own, records it, once.
+    retry(&Client::new(&base, "203.0.113.77"), Some(state)).await;
     retry(&client, Some(state)).await;
-    retry(&client, Some(state)).await;
+    retry(&Client::new(&base, "198.51.100.8"), Some(state)).await;
 
     usage.flush().await;
     let received = ingestion.received();
-    assert_eq!(events(&received, &["McpFeedback"]).len(), 1);
+    let recorded = events(&received, &["McpFeedback"]);
+    assert_eq!(recorded.len(), 1, "{received:#?}");
+    let asked = events(&received, &["McpFeedbackAsked"])[0];
+    assert_eq!(properties(recorded[0])["askId"], properties(asked)["askId"]);
+    assert_eq!(properties(recorded[0])["rating"], "down");
+    // From the asked address's /24, under the answering address's identity.
+    assert_eq!(properties(recorded[0])["answeredFrom"], "same24");
+    assert_ne!(
+        recorded[0]["tags"]["ai.user.id"],
+        asked["tags"]["ai.user.id"]
+    );
     let rejected: Vec<&str> = events(&received, &["McpFeedbackRejected"])
         .into_iter()
         .map(|event| properties(event)["reason"].as_str().unwrap())
         .collect();
-    // One rejection a minute per address: the other client's, and this
-    // client's first.
-    assert_eq!(rejected, ["invalid", "invalid"]);
+    // One rejection a minute per address: the other app's, this client's
+    // first, and the third address's.
+    assert_eq!(rejected, ["invalid", "invalid", "used"]);
 }
 
 #[tokio::test]
@@ -624,7 +637,7 @@ async fn feedback_off_in_the_url_is_never_asked_nor_recorded() {
             "echo",
             json!({ "text": "hi" }),
             Some(answer("up")),
-            Some("fb2.forged"),
+            Some("fb3.forged"),
         )
         .await;
 

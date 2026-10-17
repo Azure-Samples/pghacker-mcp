@@ -563,13 +563,15 @@ fn request_client(event: &mut usage::Event, context: &RequestContext<RoleServer>
     );
 }
 
-/// What a request tells feedback about its client: its identity, its app,
-/// whether it can show a form, and whether its URL turns feedback off.
+/// What a request tells feedback about its client: its identity and
+/// address, its app, whether it can show a form, and whether its URL turns
+/// feedback off.
 fn caller<'a>(context: &RequestContext<RoleServer>, scope: Option<&'a Scope>) -> Caller<'a> {
     Caller {
         user: scope
             .and_then(Scope::identity)
             .map(|identity| identity.user.as_str()),
+        address: scope.and_then(Scope::address),
         app: context.meta.client_info().map(|info| info.name),
         elicits: elicits_form(context),
         opted_out: feedback_off(context),
@@ -614,7 +616,12 @@ fn record_answer(
     scope: Option<&Scope>,
 ) {
     if let Some(outcome) = &outcome {
-        tracing::info!(tool, outcome = outcome.outcome, "feedback recorded");
+        tracing::info!(
+            tool,
+            outcome = outcome.outcome,
+            answered_from = outcome.answered_from,
+            "feedback recorded"
+        );
     }
     let Some(scope) = scope else {
         return;
@@ -624,7 +631,8 @@ fn record_answer(
         event
             .property("askId", &outcome.ask_id)
             .property("toolName", tool)
-            .property("outcome", outcome.outcome);
+            .property("outcome", outcome.outcome)
+            .property("answeredFrom", outcome.answered_from);
         if let Some(rating) = outcome.rating {
             event.property("rating", rating);
         }

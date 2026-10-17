@@ -129,6 +129,11 @@ impl Scope {
     pub fn identity(&self) -> Option<&Identity> {
         self.inner.identity.as_ref()
     }
+
+    /// The client's public address, if it has one.
+    pub fn address(&self) -> Option<IpAddr> {
+        self.inner.address
+    }
 }
 
 /// Where a request's client address comes from.

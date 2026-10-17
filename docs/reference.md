@@ -143,23 +143,24 @@ Now and then, pghacker-mcp asks an interactive client's user whether the last an
 - **Questions:** the server follows each client, an address (the usage identity) and an app (`clientInfo.name`), by the pauses between its tool calls. A call that comes more than `PGHACKER_FEEDBACK_QUESTION_GAP` (180 s) after the client's last call ended starts a new question; while a call runs, the next belongs to the same question. A pause under `PGHACKER_FEEDBACK_SESSION_GAP` (600 s) keeps the session active.
 - **The ask:** the server may hold a call that starts a question in an active session, when the client has asked `PGHACKER_FEEDBACK_MIN_QUESTIONS` (3) questions before it and the last one had a successful call. Instead of running it, it answers `input_required` (MCP 2026-07-28's multi round-trip requests) with an `elicitation/create` form: an empty message, as the client names the server, and a required rating, "Was the last answer helpful?", with no default: 👍 Helpful, 👎 Not helpful or Skip.
   - For each address and UTC clock hour, a keyed draw arms the hour with the chance `PGHACKER_FEEDBACK_RATE` (Terraform's `feedback_rate_per_hour`, 0.1). An armed hour has at most one ask, at its first such question.
-  - The form's `requestState` is a random ask id sealed with the address and the tool, valid for 6 hours.
+  - The form's `requestState` is a random ask id sealed with the app and the tool, valid for 6 hours. It answers once, from whatever address the retry comes: behind a gateway such as Global Secure Access, a client reaches the server from a new address on each connection.
   - The client asks the user and retries the call with the answer and the state. The server records the answer, then runs the call whatever it is: a rating, a Skip, a decline, a cancel, or a state that isn't valid.
 - **Who is asked:** only an app whose `clientInfo.name` contains one of the names in `PGHACKER_FEEDBACK_CLIENTS`, ignoring case, and whose requests declare form elicitation under 2026-07-28. Apps are told apart by their whole names.
   - The default names are `copilot` (Copilot CLI's and the GitHub Copilot app's `copilot-cli`), `codex` (`codex-mcp-client`), `Visual Studio Code` (and `Visual Studio Code - Insiders`), `claude` (Claude Code's `claude-code` and the Claude app's `claude-ai`) and `cursor` (`cursor-vscode`). A blank setting means these.
   - Never a request without a client identity (the internal listener), on an earlier protocol, or to a URL with `?feedback=off`, and such requests aren't followed either. `PGHACKER_AGENT_MCP_URL` gets `feedback=off`.
-  - A decline pauses asks at the address for a day.
+  - A decline pauses asks at the address for a day. An answer from another address than the ask's counts as the hour's ask, and a decline pauses, at both.
 - **Events:**
   - The held call is an `McpToolCall` with `activityStatus` `InputRequired`. With it, in the same operation, comes `McpFeedbackAsked`:
     - properties `askId`, `toolName`, and the rated question's `questionStart` and `questionEnd`;
     - measurements `question` (its number for the client), `questionCalls`, `questionFailed` and `gapSeconds`.
-  - The retry records `McpFeedback`, then its `McpToolCall`. `McpFeedback` has `askId`, `outcome` (`rated`, `skipped`, `declined` or `dismissed`) and `rating` (`up` or `down`).
-  - `McpFeedbackRejected` records a retry whose state isn't the client's or the tool's, has expired (`reason` `invalid`), or was used (`used`), or one over a limit (`limit`). A retry from a client that can't be asked records nothing.
+  - The retry records `McpFeedback`, then its `McpToolCall`. `McpFeedback` has `askId`, `outcome` (`rated`, `skipped`, `declined` or `dismissed`), `rating` (`up` or `down`) and `answeredFrom`: the address it came from against the one asked, `same`, the same /24 (`same24`; for IPv6, the same /48), the same /16 (`same16`; /32), `other`, or `unknown` when the server no longer has the ask, as after a restart. Its `UserId` is the address that answered. For that comparison only, the asked address's /24 (IPv6: /48) is kept in memory until the answer or the state's expiry.
+  - `McpFeedbackRejected` records a retry whose state isn't the app's or the tool's, has expired (`reason` `invalid`), or was used (`used`), or one over a limit (`limit`). A retry from a client that can't be asked records nothing.
 - **Limits:** one ask an hour per address; 3 outcomes per address an hour, 60 a minute per replica; rejections recorded once a minute per address, 60 a minute in all; with comments on, 500 characters. What follows the clients and keeps the asks rare lives in memory and is bounded, so a restart forgets it and the warm-up starts again; the draw doesn't change. When the memory is full of addresses still paused or asked, a new address isn't asked, rather than any pause being forgotten.
+- **Rotating addresses:** behind a gateway that gives each connection its own address from a pool, such as Global Secure Access, one person is several addresses. Each counts its questions and warm-up apart and has its own draw, so such a person may be asked more than once an hour, though not at the address asked or the one that answered.
 - **Off:** `PGHACKER_FEEDBACK_RATE=0`, or no usage telemetry: no call is held.
 - **Debug mode:** `PGHACKER_FEEDBACK_DEBUG=true`, to try the form by hand, asks at every question after a client's first, however long the pause before it, with no warm-up, draw, one ask an hour, pause after a decline or limit on an address's outcomes. It logs, at info, why each call that isn't held isn't. Only the client list, form elicitation, `?feedback=off` and the question gap still apply. Terraform doesn't set it and the Azure supervisor doesn't pass it, so a deployment made with this repository can't turn it on.
 
-The rated question's calls are the `McpToolCall` events with the ask's `UserId` and `clientName`, from `questionStart` to `questionEnd`. These queries read the results in `AppEvents`. Give the command the window to read, such as `az monitor app-insights query --apps <usage_app_id> --offset 30d --analytics-query '<query>'`: without `--offset` it reads only the last hour. For the thumbs-down query, the window must reach back to the rated questions, a few minutes before their asks.
+The rated question's calls are the `McpToolCall` events with the ask's `UserId` and `clientName`, from `questionStart` to `questionEnd`; behind a rotating gateway, the calls made from its other addresses are missing. These queries read the results in `AppEvents`. Give the command the window to read, such as `az monitor app-insights query --apps <usage_app_id> --offset 30d --analytics-query '<query>'`: without `--offset` it reads only the last hour. For the thumbs-down query, the window must reach back to the rated questions, a few minutes before their asks.
 
 ```kql
 // Asks, and what came of them, by client
@@ -205,6 +206,13 @@ downs
 | where TimeGenerated between (startedAt .. endedAt)
 | project askId, TimeGenerated, tool, query, version
 | order by askId asc, TimeGenerated asc
+```
+
+```kql
+// Where answers came from, against the address asked
+AppEvents
+| where tostring(Properties.action) == "McpFeedback"
+| summarize answers = count() by client = tostring(Properties.clientName), answeredFrom = tostring(Properties.answeredFrom)
 ```
 
 A thumbs-down's calls can seed the evaluation: the maintainer words the question and finds its answer with the tools, then adds it to `eval/questions.json` by hand. No user text goes into the repository.
