@@ -185,6 +185,16 @@ run "feedback_is_set_with_its_variables" {
   }
 }
 
+run "app_env_cannot_set_usage_details" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_USAGE_DETAILS = "true" }
+  }
+
+  expect_failures = [var.app_env]
+}
+
 run "usage_can_be_turned_off" {
   variables {
     usage_enabled = false

@@ -123,6 +123,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `github_org`, `github_team` | `"example-org"`, `"example-team"` | Placeholder access settings; replace with your organization and team (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`) |
 | `github_users` | `[]` | More GitHub logins allowed in (`PGHACKER_GITHUB_USERS`, omitted when empty) |
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
+| `privacy_url` | `null` | The privacy statement that the home page's footer links to, as "Privacy": an https URL of your own, such as `https://example.com/privacy` (`PGHACKER_PRIVACY_URL`, omitted when null). Null gives the home page no privacy link |
 | `app_env` | `{}` | More app environment variables, such as `RUST_LOG`, `PGHACKER_CRAWL`, `PGHACKER_CODE_HISTORY` and the extraction order's; can't replace the settings above or set `OAUTH2_PROXY_*`. Each process gets only those it uses |
 | `front_door_endpoint_name` | `"pghacker"` | Front Door endpoint, `<name>-<hash>.<zone>.azurefd.net`; changing it changes the public host name |
 | `front_door_custom_domain` | `null` | Optional hostname you own, such as `mcp.example.com` or `example.com`; managed TLS, a route of its own for the home page and `/mcp` only, and the canonical public and MCP URLs. The portal and its OAuth callback stay on Front Door's host name. Set it only in ignored environment settings; DNS stays with your provider. See [Custom domains](README.md#custom-domains). |

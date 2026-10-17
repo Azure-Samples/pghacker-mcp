@@ -11,10 +11,11 @@
 // on the portal's own host, Front Door's, since a custom domain doesn't
 // serve it (deploy/terraform/frontdoor.tf). Given star counts
 // (scripts/lib/github-stars.mjs), it adds the GitHub repository's stars to
-// the page it serves, once GitHub shows them. In Azure it serves alone behind
-// oauth2-proxy (scripts/home.mjs); locally, the edge puts it and the
-// services on one origin with the routes of scripts/lib/routes.mjs, as
-// oauth2-proxy does in Azure, without sign-in.
+// the page it serves, once GitHub shows them; and, given the deployment's
+// privacy statement, a privacy-url tag, which the footer links to. In Azure it
+// serves alone behind oauth2-proxy (scripts/home.mjs); locally, the edge puts
+// it and the services on one origin with the routes of scripts/lib/routes.mjs,
+// as oauth2-proxy does in Azure, without sign-in.
 import { readFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -100,17 +101,55 @@ export function withStars(html, stars) {
   return html.replace(meta[0], `<meta name="github-repo" content="${meta[1]}" data-stars="${count}" />`);
 }
 
+/** The longest privacy statement URL that a deployment may give. */
+const MAX_PRIVACY_URL = 2048;
+
+/**
+ * `value` as the URL of a privacy statement, which the page's footer links
+ * to: https, with a host, and without credentials, spaces, quotes, angle
+ * brackets or backslashes. It returns `value` as it is, or undefined if it
+ * isn't such a URL.
+ */
+export function parsePrivacyUrl(value) {
+  if (typeof value !== "string" || value.length > MAX_PRIVACY_URL || !/^https:\/\/[^\s"'<>\\]+$/.test(value)) {
+    return undefined;
+  }
+  const url = URL.parse(value);
+  return url && url.hostname !== "" && url.username === "" && url.password === "" ? value : undefined;
+}
+
+/** The end of the page's head, where the privacy-url tag goes. */
+const HEAD_END = /<\/head>/i;
+
+const ATTRIBUTE_ESCAPES = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" };
+
+/**
+ * `html` with `privacy`, a URL that parsePrivacyUrl took, as a privacy-url
+ * meta tag at the end of its head, which the footer's link reads. Without a
+ * URL, `html` as it is, and the page shows no link.
+ */
+export function withPrivacy(html, privacy) {
+  if (!privacy) return html;
+  const content = privacy.replace(/[&"<>]/g, (character) => ATTRIBUTE_ESCAPES[character]);
+  return html.replace(HEAD_END, (end) => `<meta name="privacy-url" content="${content}" />${end}`);
+}
+
 /**
  * A request handler for the home page in `root`, a directory Vite built.
  * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
  * the portal's share links go on to; without it, they stay on the request's
- * own origin, as on the local edge. `onPage(request)` hears of each page
- * served to a GET, for usage telemetry. `stars`, from createStarCounts, adds
- * the repository's star count to the page.
+ * own origin, as on the local edge. `privacy` is the deployment's privacy
+ * statement, an https URL that the footer links to; without it, the page has
+ * no such link. `onPage(request)` hears of each page served to a GET, for
+ * usage telemetry. `stars`, from createStarCounts, adds the repository's star
+ * count to the page.
  */
-export function createHomeHandler({ root = HOME_DIR, portal = "", onPage, stars } = {}) {
+export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", onPage, stars } = {}) {
   if (portal && URL.parse(portal)?.origin !== portal) {
     throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
+  }
+  if (privacy && parsePrivacyUrl(privacy) === undefined) {
+    throw new Error(`The privacy statement must be given as an https URL, such as https://example.com/privacy, not ${privacy}.`);
   }
   async function file(request, response, name, cacheControl) {
     const full = path.join(root, name);
@@ -123,7 +162,10 @@ export function createHomeHandler({ root = HOME_DIR, portal = "", onPage, stars 
       if (error.code === "ENOENT" || error.code === "EISDIR") return notFound(request, response);
       throw error;
     }
-    if (name === "index.html" && stars) body = Buffer.from(withStars(body.toString("utf8"), stars));
+    if (name === "index.html" && (stars || privacy)) {
+      const html = stars ? withStars(body.toString("utf8"), stars) : body.toString("utf8");
+      body = Buffer.from(withPrivacy(html, privacy));
+    }
     send(request, response, 200, {
       "content-type": TYPES[path.extname(name)] ?? "application/octet-stream",
       "content-length": body.length,

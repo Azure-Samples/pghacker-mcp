@@ -216,7 +216,7 @@ run "app_and_restore_job" {
       APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
       PGHACKER_USAGE_DETAILS                = "false"
     }
-    error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users."
+    error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users, and no PGHACKER_PRIVACY_URL, so no privacy link on the home page, without privacy_url."
   }
 
   assert {
@@ -398,6 +398,67 @@ run "app_env_cannot_replace_the_contract" {
 
   variables {
     app_env = { PGHACKER_DB_HOST = "elsewhere.example.com" }
+  }
+
+  expect_failures = [var.app_env]
+}
+
+run "privacy_url_reaches_only_the_app" {
+  state_key = "privacy"
+
+  variables {
+    create_app  = true
+    privacy_url = "https://example.com/privacy"
+  }
+
+  assert {
+    condition = (
+      { for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null }["PGHACKER_PRIVACY_URL"] == "https://example.com/privacy"
+      && !anytrue(flatten([
+        for job in azurerm_container_app_job.this : [
+          for env in job.template[0].container[0].env : env.name == "PGHACKER_PRIVACY_URL"
+        ]
+      ]))
+    )
+    error_message = "privacy_url must reach the app, and only the app, as PGHACKER_PRIVACY_URL, for the home page's footer."
+  }
+}
+
+run "privacy_url_must_be_https" {
+  command = plan
+
+  variables {
+    privacy_url = "http://example.com/privacy"
+  }
+
+  expect_failures = [var.privacy_url]
+}
+
+run "privacy_url_cannot_carry_credentials" {
+  command = plan
+
+  variables {
+    privacy_url = "https://user:secret@example.com/privacy"
+  }
+
+  expect_failures = [var.privacy_url]
+}
+
+run "privacy_url_cannot_hold_markup" {
+  command = plan
+
+  variables {
+    privacy_url = "https://example.com/privacy\"><script>"
+  }
+
+  expect_failures = [var.privacy_url]
+}
+
+run "app_env_cannot_set_the_privacy_url" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_PRIVACY_URL = "https://example.com/privacy" }
   }
 
   expect_failures = [var.app_env]

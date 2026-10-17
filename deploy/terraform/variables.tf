@@ -604,13 +604,15 @@ variable "app_env" {
       "PGHACKER_GITHUB_USERS",
       "PGHACKER_PORTAL_ROLE",
       "PGHACKER_PORTAL_URL",
+      "PGHACKER_PRIVACY_URL",
       "PGHACKER_PUBLIC_HOSTS",
       "PGHACKER_PUBLIC_URL",
       "PGHACKER_RATE_BURST",
       "PGHACKER_RATE_PER_MINUTE",
+      "PGHACKER_USAGE_DETAILS",
       "PGHACKER_USAGE_ID_KEY",
     ])) == 0
-    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
+    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, privacy statement, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
   }
 }
 
@@ -639,6 +641,22 @@ variable "front_door_custom_domain" {
       && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.front_door_custom_domain))
     )
     error_message = "front_door_custom_domain must be null or a lowercase DNS hostname of at most 64 characters, with valid labels and no scheme, path, port, wildcard or trailing dot."
+  }
+}
+
+# --- Home page --------------------------------------------------------------------
+
+variable "privacy_url" {
+  description = "The privacy statement that the home page's footer links to, as \"Privacy\" (PGHACKER_PRIVACY_URL): an https URL of your own, such as https://example.com/privacy. Null, the default, gives the home page no privacy link."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.privacy_url == null ? true : (
+      length(var.privacy_url) <= 2048
+      && can(regex("^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^\\s\"'<>\\\\]*)?$", var.privacy_url))
+    )
+    error_message = "privacy_url must be null or an https URL, such as https://example.com/privacy, of at most 2048 characters: a host name, an optional port and path, without credentials, spaces, quotes, angle brackets or backslashes."
   }
 }
 

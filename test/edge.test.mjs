@@ -3,14 +3,14 @@
 
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { CACHE, createEdgeServer, createHomeHandler, withStars } from "../scripts/lib/edge.mjs";
+import { CACHE, createEdgeServer, createHomeHandler, parsePrivacyUrl, withPrivacy, withStars } from "../scripts/lib/edge.mjs";
 
 const PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" src="/static/index-abc.js"></script>';
 
@@ -155,6 +155,79 @@ test("a count goes only into a well-formed github-repo tag, and only a whole one
   }
   const odd = '<meta name="github-repo" content="o/r/x">';
   assert.equal(withStars(odd, seven), odd);
+});
+
+test("given the deployment's privacy statement, the page carries it for its footer; without one, it carries nothing", async (t) => {
+  const root = distFixture(t);
+  const page = (head) => `<!doctype html><head><meta name="application-name" content="pghacker-mcp">${head}</head><body></body>`;
+  writeFileSync(path.join(root, "index.html"), page(""));
+  const privacy = "https://example.com/privacy?lang=en&page=1";
+  const tagged = page(`<meta name="privacy-url" content="https://example.com/privacy?lang=en&amp;page=1" />`);
+
+  const port = await listen(t, http.createServer(createHomeHandler({ root, privacy })));
+  const base = `http://127.0.0.1:${port}`;
+  assert.equal(await (await fetch(`${base}/`)).text(), tagged);
+  const head = await fetch(`${base}/`, { method: "HEAD" });
+  assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(tagged)));
+  // The page alone: not its files.
+  assert.equal(await (await fetch(`${base}/static/index-abc.js`)).text(), "console.log(1);\n");
+
+  // Unset or empty: the page as it was built.
+  for (const options of [{}, { privacy: "" }]) {
+    const barePort = await listen(t, http.createServer(createHomeHandler({ root, ...options })));
+    assert.equal(await (await fetch(`http://127.0.0.1:${barePort}/`)).text(), page(""));
+  }
+
+  // With the repository's stars too, both go in.
+  writeFileSync(path.join(root, "index.html"), page('<meta name="github-repo" content="o/r" />'));
+  const counted = createHomeHandler({ root, privacy, stars: { get: () => 5 } });
+  const countedPort = await listen(t, http.createServer(counted));
+  assert.equal(
+    await (await fetch(`http://127.0.0.1:${countedPort}/`)).text(),
+    page(`<meta name="github-repo" content="o/r" data-stars="5" /><meta name="privacy-url" content="https://example.com/privacy?lang=en&amp;page=1" />`),
+  );
+});
+
+test("a privacy statement is an https URL with a host: anything else is refused, not shown", () => {
+  for (const good of [
+    "https://example.com/privacy",
+    "https://example.com",
+    "https://privacy.example.com:8443/en-us/privacy?a=1&b=2#top",
+  ]) {
+    assert.equal(parsePrivacyUrl(good), good);
+    assert.doesNotThrow(() => createHomeHandler({ privacy: good }), good);
+  }
+  for (const bad of [
+    "http://example.com/privacy", "HTTPS://example.com/", "javascript:alert(1)", "//example.com/privacy", "/privacy",
+    "example.com/privacy", "https://", "https://:8443/", "https://user:secret@example.com/", "https://example.com/a b",
+    'https://example.com/"', "https://example.com/'", "https://example.com/<b>", "https://example.com/\\x",
+    `https://example.com/${"a".repeat(2048)}`, 5, {},
+  ]) {
+    assert.equal(parsePrivacyUrl(bad), undefined, String(bad));
+  }
+  assert.throws(() => createHomeHandler({ privacy: "http://example.com/privacy" }), /privacy statement must be given as an https URL/);
+  assert.throws(() => createHomeHandler({ privacy: "javascript:alert(1)" }), /privacy statement/);
+});
+
+test("the privacy tag goes before the end of the head, once, with the URL escaped and as it is", () => {
+  const tag = (content) => `<meta name="privacy-url" content="${content}" />`;
+  assert.equal(withPrivacy("<head><title>x</title></head>", "https://example.com/p"), `<head><title>x</title>${tag("https://example.com/p")}</head>`);
+  // Replacement patterns in a URL, such as $&, stay as they are.
+  assert.equal(withPrivacy("<head></head>", "https://example.com/$&x$1"), `<head>${tag("https://example.com/$&amp;x$1")}</head>`);
+  assert.equal(withPrivacy("<HEAD></HEAD>", "https://example.com/p"), `<HEAD>${tag("https://example.com/p")}</HEAD>`);
+  assert.equal(withPrivacy("<head></head><head></head>", "https://example.com/p").split("privacy-url").length, 2);
+  // Nothing to say, or nowhere to say it: the page as it is.
+  assert.equal(withPrivacy("<head></head>", ""), "<head></head>");
+  assert.equal(withPrivacy("<head></head>", undefined), "<head></head>");
+  assert.equal(withPrivacy("<p>no head</p>", "https://example.com/p"), "<p>no head</p>");
+});
+
+test("the page's own index.html takes the privacy tag, and has none of its own", () => {
+  const html = readFileSync(new URL("../home/index.html", import.meta.url), "utf8");
+  assert.ok(!/<meta[^>]+name="privacy-url"/.test(html));
+  const tagged = withPrivacy(html, "https://example.com/privacy");
+  assert.equal(tagged.match(/<meta name="privacy-url"/g).length, 1);
+  assert.ok(tagged.indexOf('name="privacy-url"') < tagged.indexOf("</head>"));
 });
 
 test("fingerprinted files are kept a year, the page's other files an hour", async (t) => {

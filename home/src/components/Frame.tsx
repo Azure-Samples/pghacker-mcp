@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+import { useState } from "react";
 import { PRODUCT } from "../content.ts";
+import { readPrivacyUrl } from "../privacy.ts";
 import { GitHubLink } from "./GitHubLink.tsx";
 import { ThemeMenu } from "./ThemeMenu.tsx";
 
@@ -39,7 +41,15 @@ export function TopBar() {
   );
 }
 
+/**
+ * The footer. It links to a privacy statement only if the deployment has one:
+ * its server then adds the statement's URL to the page as the privacy-url meta
+ * tag. Without the tag, the footer has no privacy link.
+ */
 export function Footer() {
+  const [privacy] = useState(() =>
+    readPrivacyUrl(document.querySelector<HTMLMetaElement>('meta[name="privacy-url"]')),
+  );
   return (
     <footer className="footer">
       <p>
@@ -47,9 +57,11 @@ export function Footer() {
         pgsql-hackers archive at postgresql.org and PostgreSQL's git repository. Not affiliated with the PostgreSQL
         Global Development Group.
       </p>
-      <p>
-        <a href="https://go.microsoft.com/fwlink/?LinkId=521839">Privacy</a>
-      </p>
+      {privacy && (
+        <p>
+          <a href={privacy}>Privacy</a>
+        </p>
+      )}
     </footer>
   );
 }

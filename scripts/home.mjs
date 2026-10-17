@@ -6,8 +6,10 @@
 // It reads only the built page, and asks GitHub's API, without a token, for
 // the stars of the repository the page links to (scripts/lib/github-stars.mjs).
 // Its settings are its port, the page's directory, and the portal's origin
-// (PGHACKER_PORTAL_URL), which the portal's share links go on to; and, when
-// the app has Application Insights, usage telemetry's (scripts/lib/usage.mjs),
+// (PGHACKER_PORTAL_URL), which the portal's share links go on to; the
+// deployment's privacy statement, if it has one (PGHACKER_PRIVACY_URL), which
+// the footer links to, and without which it has no such link; and, when the
+// app has Application Insights, usage telemetry's (scripts/lib/usage.mjs),
 // whose users' key is its one secret.
 import { readFileSync } from "node:fs";
 import http from "node:http";
@@ -23,10 +25,11 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 const root = process.env.PGHACKER_HOME_DIR || HOME_DIR;
 const portal = process.env.PGHACKER_PORTAL_URL || "";
+const privacy = process.env.PGHACKER_PRIVACY_URL || "";
 const { version } = JSON.parse(readFileSync(path.join(APP_ROOT, "package.json"), "utf8"));
 const usage = createUsage(readUsageSettings(), { role: "pghacker-home", version });
 
-const server = http.createServer(createHomeHandler({ root, portal, onPage: usage.pageView, stars: createStarCounts() }));
+const server = http.createServer(createHomeHandler({ root, portal, privacy, onPage: usage.pageView, stars: createStarCounts() }));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     // The last page views go before the process does.

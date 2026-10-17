@@ -14,6 +14,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT, extractionEnvironment } from "./config.mjs";
+import { parsePrivacyUrl } from "./edge.mjs";
 import { PLACEHOLDER_KEY } from "./foundry.mjs";
 import { parseConnectionString } from "./monitor.mjs";
 import { oauth2ProxyRouteArgs } from "./routes.mjs";
@@ -124,6 +125,15 @@ function feedbackSettings(env) {
   };
 }
 
+/** The URL of the deployment's privacy statement; undefined when it has none. */
+function privacyUrl(env, name) {
+  const raw = value(env, name);
+  if (raw === undefined) return undefined;
+  const url = parsePrivacyUrl(raw);
+  if (url === undefined) throw new Error(`${name} must be an https URL with a host, such as https://example.com/privacy.`);
+  return url;
+}
+
 function httpsOrigin(env, name) {
   const url = new URL(value(env, name));
   if (url.protocol !== "https:" || url.pathname !== "/" || url.search) {
@@ -216,6 +226,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
         portalUrl: portalUrl.origin,
         hosts: [...new Set([publicUrl.hostname, portalUrl.hostname, ...list(env, "PGHACKER_PUBLIC_HOSTS")])],
         frontDoorId: value(env, "PGHACKER_FRONT_DOOR_ID"),
+        // The home page's footer links to it; without one, it has no link.
+        privacyUrl: privacyUrl(env, "PGHACKER_PRIVACY_URL"),
       }
       : undefined,
     rate: {
@@ -464,7 +476,8 @@ export function processEnvironments(config) {
       OAUTH2_PROXY_COOKIE_SECRET: config.github.cookieSecret,
     };
     // The home page's server: the built page, its port and the portal's
-    // origin, Front Door's host name, which its share links go on to; and
+    // origin, Front Door's host name, which its share links go on to; the
+    // privacy statement its footer links to, if the deployment has one; and
     // usage telemetry's settings, with the Front Door profile whose requests
     // name their client; nothing else. It has a user of its own: a process
     // can read the environment of another of the same user, and
@@ -474,6 +487,7 @@ export function processEnvironments(config) {
       PORT: String(PORTS.home),
       PGHACKER_HOME_DIR: path.join(config.root, "home", "dist"),
       PGHACKER_PORTAL_URL: config.public.portalUrl,
+      ...(config.public.privacyUrl ? { PGHACKER_PRIVACY_URL: config.public.privacyUrl } : {}),
       ...usage,
       ...(config.usage && config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
     };

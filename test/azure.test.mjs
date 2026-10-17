@@ -238,6 +238,29 @@ test("usage telemetry reaches pghacker-mcp and the home page through the supervi
   );
 });
 
+test("the privacy statement that the home page's footer links to reaches the home page's server alone, and only if the deployment has one", () => {
+  const privacyUrl = "https://example.com/privacy";
+  assert.equal(readAzureConfig(ENV).public.privacyUrl, undefined);
+  assert.equal(readAzureConfig({ ...ENV, PGHACKER_PRIVACY_URL: ` ${privacyUrl} ` }).public.privacyUrl, privacyUrl);
+  for (const [name, env] of Object.entries(processEnvironments(readAzureConfig({ ...ENV, PGHACKER_PRIVACY_URL: privacyUrl })))) {
+    assert.equal(env.PGHACKER_PRIVACY_URL, name === "home" ? privacyUrl : undefined, name);
+  }
+  // Unset or blank, there is no setting, so no link.
+  for (const blank of [undefined, "", "  "]) {
+    for (const [name, env] of Object.entries(processEnvironments(readAzureConfig({ ...ENV, PGHACKER_PRIVACY_URL: blank })))) {
+      assert.ok(!("PGHACKER_PRIVACY_URL" in env), `${name} with ${JSON.stringify(blank)}`);
+    }
+  }
+  // The jobs serve no page.
+  assert.equal(readAzureConfig({ ...ENV, PGHACKER_PRIVACY_URL: privacyUrl }, { serve: false }).public, undefined);
+  for (const bad of [
+    "http://example.com/privacy", "https://user:secret@example.com/privacy", "javascript:alert(1)", "example.com/privacy",
+    "https://example.com/a b", `https://example.com/${"a".repeat(2048)}`,
+  ]) {
+    assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_PRIVACY_URL: bad }), /PGHACKER_PRIVACY_URL must be an https URL/, bad);
+  }
+});
+
 test("feedback's settings reach pghacker-mcp alone, and only with usage telemetry", () => {
   const settings = (env) => {
     const environments = processEnvironments(readAzureConfig(env));

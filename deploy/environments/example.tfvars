@@ -71,6 +71,10 @@ mcp_rate_burst                = 30
 crawl_start_sessions          = 2
 crawl_max_sessions            = 4
 
+# The privacy statement that the home page's footer links to, as "Privacy": an
+# https URL of your own. Unset, the page has no privacy link.
+# privacy_url = "https://example.com/privacy"
+
 # Usage telemetry (PRIVACY.md); false records nothing.
 usage_enabled = true
 # Whether it also records what users type into tools: arguments' values, error
