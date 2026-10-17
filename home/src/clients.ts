@@ -74,14 +74,14 @@ export const CLIENTS: readonly Client[] = [
   {
     id: "copilot-cli",
     label: "Copilot CLI",
-    action: "Run in a terminal, or use /mcp add in the CLI:",
+    action: "Run in a terminal, or use /mcp add in the CLI with HTTP transport:",
     command: (url) => `copilot mcp add --transport http ${SERVER_NAME} ${url}`,
     config: copilotConfig,
   },
   {
     id: "copilot-app",
     label: "Copilot app",
-    action: "In the GitHub Copilot app, click Customize in the sidebar, then MCP, and add a custom server with this URL.",
+    action: "In the GitHub Copilot app, click Customize in the sidebar, then MCP, and add a custom server with this URL. Use HTTP transport.",
     config: copilotConfig,
   },
   {
@@ -108,7 +108,7 @@ export const CLIENTS: readonly Client[] = [
   {
     id: "other",
     label: "Other",
-    action: "Add a remote MCP server with this URL. It speaks Streamable HTTP and needs no sign-in, key or headers.",
+    action: "Add a remote MCP server with this URL. Use HTTP transport (Streamable HTTP); it needs no sign-in, key or headers.",
   },
 ];
 

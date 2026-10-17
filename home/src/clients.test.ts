@@ -55,7 +55,15 @@ test("every configuration file sits behind a disclosure that names it", () => {
 test("the GitHub Copilot app adds the server in its UI, or from Copilot CLI's file, which it loads", () => {
   const app = byId("copilot-app");
   assert.equal(app.command, undefined);
-  assert.match(app.action, /Customize.*MCP/);
+  assert.match(app.action, /Customize.*MCP.*Use HTTP transport\./);
   assert.equal(app.config?.file, "~/.copilot/mcp-config.json");
   assert.equal(app.config?.file, byId("copilot-cli").config?.file);
+});
+
+test("where a form picks the transport, the steps say HTTP; the commands pass it", () => {
+  for (const id of ["vscode", "copilot-cli", "copilot-app", "other"]) {
+    assert.match(byId(id).action, /\bHTTP\b/, id);
+  }
+  assert.match(byId("claude-code").command?.(URL) ?? "", /--transport http /);
+  assert.match(byId("copilot-cli").command?.(URL) ?? "", /--transport http /);
 });
