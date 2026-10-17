@@ -22,9 +22,10 @@ function GitHubMark() {
 }
 
 /**
- * The top bar's link to the GitHub repository, with its stars once the
- * repository is public: until then, GitHub shows no count, and the link
- * stands alone.
+ * The top bar's link to the GitHub repository: GitHub's mark, with the
+ * repository's stars once it is public. Until then, GitHub shows no count,
+ * and the mark stands alone. The repository's name is the link's label and
+ * tooltip.
  */
 export function GitHubLink() {
   const [repository] = useState(() =>
@@ -36,7 +37,6 @@ export function GitHubLink() {
   return (
     <a className="btn btn-ghost github-link" href={url} aria-label={label} title={label}>
       <GitHubMark />
-      <span className="github-name">{name}</span>
       {stars !== undefined && (
         <span className="github-stars">
           <Star aria-hidden="true" />

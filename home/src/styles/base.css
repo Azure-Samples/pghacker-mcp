@@ -166,9 +166,10 @@ main:focus {
   margin-left: auto;
 }
 
-.github-link {
+/* The mark alone is as square as the theme button; .btn's padding comes later. */
+.btn.github-link {
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 8px;
 }
 
 .github-link:hover {
