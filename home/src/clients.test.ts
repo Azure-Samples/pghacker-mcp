@@ -61,7 +61,7 @@ test("the GitHub Copilot app adds the server in its UI, or from Copilot CLI's fi
 });
 
 test("where a form picks the transport, the steps say HTTP; the commands pass it", () => {
-  for (const id of ["vscode", "copilot-cli", "copilot-app", "other"]) {
+  for (const id of ["vscode", "copilot-app", "other"]) {
     assert.match(byId(id).action, /\bHTTP\b/, id);
   }
   assert.match(byId("claude-code").command?.(URL) ?? "", /--transport http /);
