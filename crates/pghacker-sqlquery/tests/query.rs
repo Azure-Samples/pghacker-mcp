@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use pghacker_core::mcp::Output;
 use pghacker_core::testing::TestDb;
+use pghacker_core::usage::{Endpoint, Scope, Usage};
 use pghacker_sqlquery::{MAX_CSV_BYTES, QueryArgs, QueryTool, TIMEOUT_MESSAGE};
 
 async fn tool(pool: usize) -> (TestDb, QueryTool) {
@@ -40,6 +41,17 @@ async fn failure(tool: &QueryTool, sql: &str) -> String {
         Ok(text) => panic!("{sql} should fail, but returned {text}"),
         Err(message) => message,
     }
+}
+
+/// What a call of `sql` adds to its usage event: its annotations.
+async fn annotations(tool: &QueryTool, sql: &str) -> Vec<(String, String)> {
+    let scope = Scope::new(Usage::off(), Endpoint::Public, None, None, Instant::now());
+    let args = QueryArgs {
+        sql: sql.to_owned(),
+        max_rows: None,
+    };
+    tool.run_with_usage(args, Some(&scope)).await;
+    scope.take_annotations()
 }
 
 /// The one field of a one-column, one-row result, as the CSV has it.
@@ -204,8 +216,31 @@ async fn a_statement_past_the_timeout_is_cancelled() {
         elapsed >= Duration::from_millis(9500) && elapsed < Duration::from_millis(11500),
         "{elapsed:?}"
     );
+    // The call's usage has PostgreSQL's code for a cancelled statement.
+    assert_eq!(
+        annotations(&tool, "SELECT count(*) FROM threads").await,
+        [("errorCode".to_owned(), "57014".to_owned())]
+    );
     lock.rollback().await.unwrap();
     assert_eq!(value(&tool, "SELECT 1").await, "1");
+}
+
+#[tokio::test]
+async fn a_failed_statements_usage_has_its_sqlstate_and_others_none() {
+    let (_db, tool) = tool(1).await;
+    let code = |code: &str| vec![("errorCode".to_owned(), code.to_owned())];
+    assert_eq!(
+        annotations(&tool, "SELECT no_such_column FROM threads").await,
+        code("42703")
+    );
+    assert_eq!(annotations(&tool, "SELECT 1 +").await, code("42601"));
+    assert_eq!(
+        annotations(&tool, "SELECT * FROM no_such_table").await,
+        code("42P01")
+    );
+    // Succeeded, or refused before it ran: no code.
+    assert!(annotations(&tool, "SELECT 1").await.is_empty());
+    assert!(annotations(&tool, "DELETE FROM threads").await.is_empty());
 }
 
 #[tokio::test]

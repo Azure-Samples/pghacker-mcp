@@ -41,6 +41,10 @@ pub const MAX_VALUE: usize = 8192;
 #[derive(Clone, Debug)]
 pub struct Event {
     failed: bool,
+    /// Whether the event records what users type into tools: arguments'
+    /// values, error messages and sqlparser's errors. A scope's events
+    /// follow its usage's setting.
+    details: bool,
     time: DateTime<Utc>,
     tags: BTreeMap<&'static str, String>,
     properties: BTreeMap<String, String>,
@@ -52,6 +56,7 @@ impl Event {
     pub fn new(action: &str) -> Self {
         let mut event = Self {
             failed: false,
+            details: true,
             time: Utc::now(),
             tags: BTreeMap::new(),
             properties: BTreeMap::new(),
@@ -59,6 +64,17 @@ impl Event {
         };
         event.property("action", action);
         event
+    }
+
+    /// Whether the event records what users type into tools.
+    pub fn details(&self) -> bool {
+        self.details
+    }
+
+    /// Makes the event leave out what users type into tools.
+    pub fn without_details(&mut self) -> &mut Self {
+        self.details = false;
+        self
     }
 
     /// Marks the event failed: it's named [`ERROR`] rather than [`ACTION`].

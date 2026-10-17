@@ -51,8 +51,23 @@ pub enum QueryResponse {
     },
     /// The statement ran past its timeout and was cancelled.
     TimedOut,
-    /// PostgreSQL's error, as psql prints it, or why the statement didn't run.
-    Failed(String),
+    /// PostgreSQL's error, as psql prints it, or why the statement didn't
+    /// run.
+    Failed {
+        message: String,
+        /// The error's SQLSTATE, such as `42703`, if it's PostgreSQL's.
+        sqlstate: Option<String>,
+    },
+}
+
+impl QueryResponse {
+    /// A failure that isn't PostgreSQL's error, such as the driver's.
+    fn failed(message: String) -> Self {
+        QueryResponse::Failed {
+            message,
+            sqlstate: None,
+        }
+    }
 }
 
 /// Compose the truncation banner shown above a CSV when the row cap is hit.
@@ -156,7 +171,7 @@ pub async fn run_readonly_query(
 ) -> QueryResponse {
     let txn = match client.transaction().await {
         Ok(t) => t,
-        Err(e) => return QueryResponse::Failed(describe_error(&e, sql)),
+        Err(e) => return failure(&e, sql),
     };
 
     // `client.transaction()` issues `BEGIN`; `SET TRANSACTION READ ONLY` runs
@@ -204,7 +219,7 @@ pub async fn run_readonly_query(
         setup.push_str(&format!(" SET LOCAL statement_timeout = {ms};"));
     }
     if let Err(e) = txn.batch_execute(&setup).await {
-        return QueryResponse::Failed(describe_error(&e, sql));
+        return failure(&e, sql);
     }
 
     let inner = run_query_capture(&txn, sql, max_result_rows, statement_timeout_ms).await;
@@ -304,7 +319,7 @@ fn render_row(row: &Row, columns: &[Column]) -> Result<String, QueryResponse> {
         match value_at(row, index, column.type_()) {
             Ok(value) => push_field(&mut line, value.as_deref()),
             Err(e) => {
-                return Err(QueryResponse::Failed(format_executing_error(&format!(
+                return Err(QueryResponse::failed(format_executing_error(&format!(
                     "could not deserialize column \"{}\" (type {}): {}",
                     column.name(),
                     column.type_(),
@@ -325,7 +340,15 @@ fn map_query_error(
     {
         return QueryResponse::TimedOut;
     }
-    QueryResponse::Failed(describe_error(&e, sql))
+    failure(&e, sql)
+}
+
+/// The failure `e`: its message, and its SQLSTATE if it's PostgreSQL's.
+fn failure(e: &tokio_postgres::Error, sql: &str) -> QueryResponse {
+    QueryResponse::Failed {
+        message: describe_error(e, sql),
+        sqlstate: e.code().map(|code| code.code().to_owned()),
+    }
 }
 
 /// PostgreSQL's error as psql prints it, or the driver's.

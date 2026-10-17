@@ -34,6 +34,7 @@ use pghacker_core::db::{self, Pool};
 use pghacker_core::mcp::Output;
 use pghacker_core::text::truncate_chars;
 use pghacker_core::usage::Scope;
+use tokio_postgres::error::SqlState;
 
 use crate::QueryArgs;
 use crate::execute::{QueryResponse, run_readonly_query};
@@ -94,8 +95,9 @@ pub fn check(sql: &str) -> Result<Checked, String> {
 const PARSE_ERROR_CHARS: usize = 1024;
 
 /// A statement that passed by its tokens: logged with why, but not
-/// sqlparser's error, which quotes the SQL; and recorded, error included, in
-/// the call's usage, whose operation the event shares.
+/// sqlparser's error, which quotes the SQL; and recorded in the call's
+/// usage, whose operation the event shares, the error included only if the
+/// usage records details.
 fn record_fallback(fallback: &Fallback, scope: Option<&Scope>) {
     tracing::info!(
         fallback = fallback.kind(),
@@ -108,10 +110,21 @@ fn record_fallback(fallback: &Fallback, scope: Option<&Scope>) {
     event
         .property("toolName", crate::NAME)
         .property("fallback", fallback.kind());
-    if let Fallback::Unparsed(error) = fallback {
+    if let Fallback::Unparsed(error) = fallback
+        && event.details()
+    {
         event.property_cut("parseError", error, PARSE_ERROR_CHARS);
     }
     scope.record(event);
+}
+
+/// Adds PostgreSQL's SQLSTATE for a failed statement, such as `42703`, to
+/// the call's usage event as `errorCode`. Unlike the error's message, it
+/// doesn't quote the SQL, so it's recorded with or without details.
+fn record_error_code(sqlstate: &str, scope: Option<&Scope>) {
+    if let Some(scope) = scope {
+        scope.annotate("errorCode", sqlstate);
+    }
 }
 
 /// The query tool, with its pool of pgh_reader connections. Cheap to clone:
@@ -179,10 +192,14 @@ impl QueryTool {
         match response {
             QueryResponse::TimedOut => {
                 tracing::info!(outcome = "timeout", duration_ms, "a query timed out");
+                record_error_code(SqlState::QUERY_CANCELED.code(), scope);
                 Output::Failed(TIMEOUT_MESSAGE.to_owned())
             }
-            QueryResponse::Failed(message) => {
-                tracing::info!(outcome = "failed", duration_ms, error = %truncate_chars(&message, 300), "a query failed");
+            QueryResponse::Failed { message, sqlstate } => {
+                tracing::info!(outcome = "failed", duration_ms, sqlstate = sqlstate.as_deref(), error = %truncate_chars(&message, 300), "a query failed");
+                if let Some(sqlstate) = &sqlstate {
+                    record_error_code(sqlstate, scope);
+                }
                 Output::Failed(message)
             }
             QueryResponse::Rows {
@@ -569,7 +586,7 @@ mod tests {
             assert!(check(sql).is_err(), "{sql}");
             assert!(
                 matches!(unchecked(&tool, sql).await,
-                    QueryResponse::Failed(reason) if reason.contains("read-only transaction")),
+                    QueryResponse::Failed { message: reason, .. } if reason.contains("read-only transaction")),
                 "{sql}"
             );
         }
@@ -632,7 +649,7 @@ mod tests {
             assert_eq!(csv(&tool, "SHOW work_mem").await, work_mem, "{sql}");
             let missing = unchecked(&tool, r#"EXECUTE "caller, ""one""""#).await;
             assert!(
-                matches!(&missing, QueryResponse::Failed(message) if message.contains("does not exist")),
+                matches!(&missing, QueryResponse::Failed { message, .. } if message.contains("does not exist")),
                 "{missing:?}"
             );
             for _ in 0..2 {
@@ -650,7 +667,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(&failed, QueryResponse::Failed(message) if message.contains("after prepare")),
+            matches!(&failed, QueryResponse::Failed { message, .. } if message.contains("after prepare")),
             "{failed:?}"
         );
         assert_eq!(csv(&tool, "SELECT pg_backend_pid() AS pid").await, pid);
@@ -714,67 +731,80 @@ mod tests {
         use pghacker_core::usage::testing::Ingestion;
         use pghacker_core::usage::{ACTION, Endpoint, Settings, Usage};
 
-        let ingestion = Ingestion::start().await;
-        let usage = Usage::new(Settings {
-            endpoint: ingestion.url.clone(),
-            instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
-            id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
-            role: "pghacker-mcp".into(),
-            version: "0.1.0".into(),
-            instance: None,
-        })
-        .unwrap();
-        let scope = Scope::new(
-            usage.clone(),
-            Endpoint::Public,
-            Some("203.0.113.9".parse().unwrap()),
-            None,
-            Instant::now(),
-        );
-        // No database: the event comes before the statement runs.
-        let tool = QueryTool::new("postgresql://pgh_reader@127.0.0.1:1/no_database", 1).unwrap();
-        for sql in [
-            "SELECT * FROM cypher('pghacker_graph', $$ MATCH (n) RETURN n $$) AS (n agtype)",
-            "SELECT 1",
-            "SELECT * FROM cypher('pghacker_graph', $$ CREATE (n) $$) AS (n agtype)",
-        ] {
+        // sqlparser's error quotes the SQL: it's recorded only with details.
+        for details in [true, false] {
+            let ingestion = Ingestion::start().await;
+            let usage = Usage::new(Settings {
+                endpoint: ingestion.url.clone(),
+                instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+                id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+                role: "pghacker-mcp".into(),
+                version: "0.1.0".into(),
+                instance: None,
+                details,
+            })
+            .unwrap();
+            let scope = Scope::new(
+                usage.clone(),
+                Endpoint::Public,
+                Some("203.0.113.9".parse().unwrap()),
+                None,
+                Instant::now(),
+            );
+            // No database: the event comes before the statement runs.
+            let tool =
+                QueryTool::new("postgresql://pgh_reader@127.0.0.1:1/no_database", 1).unwrap();
+            for sql in [
+                "SELECT * FROM cypher('pghacker_graph', $$ MATCH (n) RETURN n $$) AS (n agtype)",
+                "SELECT 1",
+                "SELECT * FROM cypher('pghacker_graph', $$ CREATE (n) $$) AS (n agtype)",
+            ] {
+                let args = QueryArgs {
+                    sql: sql.to_owned(),
+                    max_rows: None,
+                };
+                assert!(
+                    matches!(
+                        tool.run_with_usage(args, Some(&scope)).await,
+                        Output::Failed(_)
+                    ),
+                    "{sql}"
+                );
+            }
+            // Not PostgreSQL's errors: no SQLSTATE for the call's event.
+            assert!(scope.take_annotations().is_empty());
+            // Without a scope, as run is, nothing is recorded.
             let args = QueryArgs {
-                sql: sql.to_owned(),
+                sql: "SELECT 1 +".to_owned(),
                 max_rows: None,
             };
-            assert!(
-                matches!(
-                    tool.run_with_usage(args, Some(&scope)).await,
-                    Output::Failed(_)
-                ),
-                "{sql}"
-            );
-        }
-        // Without a scope, as run is, nothing is recorded.
-        let args = QueryArgs {
-            sql: "SELECT 1 +".to_owned(),
-            max_rows: None,
-        };
-        tool.run(args).await;
-        usage.flush().await;
+            tool.run(args).await;
+            usage.flush().await;
 
-        // The parsed read and the refused write record nothing of their own.
-        let events = ingestion.received();
-        assert_eq!(events.len(), 1, "{events:#?}");
-        let event = &events[0];
-        let properties = &event["data"]["baseData"]["properties"];
-        assert_eq!(event["data"]["baseData"]["name"], ACTION);
-        assert_eq!(properties["action"], "McpQueryFallback");
-        assert_eq!(properties["toolName"], "query");
-        assert_eq!(properties["endpoint"], "public");
-        assert_eq!(properties["fallback"], "unparsed");
-        assert!(
-            properties["parseError"]
-                .as_str()
-                .is_some_and(|error| error.starts_with("sql parser error")),
-            "{properties}"
-        );
-        assert_eq!(event["tags"]["ai.operation.name"], "query");
-        assert!(event["tags"]["ai.user.id"].is_string(), "{event}");
+            // The parsed read and the refused write record nothing of their
+            // own.
+            let events = ingestion.received();
+            assert_eq!(events.len(), 1, "{events:#?}");
+            let event = &events[0];
+            let properties = &event["data"]["baseData"]["properties"];
+            assert_eq!(event["data"]["baseData"]["name"], ACTION);
+            assert_eq!(properties["action"], "McpQueryFallback");
+            assert_eq!(properties["toolName"], "query");
+            assert_eq!(properties["endpoint"], "public");
+            assert_eq!(properties["fallback"], "unparsed");
+            if details {
+                assert!(
+                    properties["parseError"]
+                        .as_str()
+                        .is_some_and(|error| error.starts_with("sql parser error")),
+                    "{properties}"
+                );
+            } else {
+                assert!(properties.get("parseError").is_none(), "{properties}");
+                assert_eq!(properties["common.details"], "off");
+            }
+            assert_eq!(event["tags"]["ai.operation.name"], "query");
+            assert!(event["tags"]["ai.user.id"].is_string(), "{event}");
+        }
     }
 }

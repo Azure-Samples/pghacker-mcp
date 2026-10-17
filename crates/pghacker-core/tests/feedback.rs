@@ -105,6 +105,15 @@ fn server(settings: FeedbackSettings) -> McpServer<Echo> {
 /// A listener for `server`, recording usage to `ingestion` unless that's
 /// `None`. Clients name their address in X-Test-Client, or are [`CLIENT`].
 async fn listen(server: McpServer<Echo>, ingestion: Option<&Ingestion>) -> (String, Usage) {
+    listen_with(server, ingestion, true).await
+}
+
+/// [`listen`], recording usage with `details` or without.
+async fn listen_with(
+    server: McpServer<Echo>,
+    ingestion: Option<&Ingestion>,
+    details: bool,
+) -> (String, Usage) {
     let mut app = router(server, None);
     let usage = match ingestion {
         Some(ingestion) => Usage::new(Settings {
@@ -114,6 +123,7 @@ async fn listen(server: McpServer<Echo>, ingestion: Option<&Ingestion>) -> (Stri
             role: "pghacker-mcp".into(),
             version: "0.1.0".into(),
             instance: None,
+            details,
         })
         .unwrap(),
         None => Usage::off(),
@@ -661,40 +671,48 @@ async fn requests_without_an_identity_are_never_asked() {
 
 #[tokio::test]
 async fn with_comments_on_the_form_takes_one_after_the_rating() {
-    let ingestion = Ingestion::start().await;
-    let (base, usage) = listen(
-        server(FeedbackSettings {
-            comments: true,
-            ..settings(1)
-        }),
-        Some(&ingestion),
-    )
-    .await;
-    let client = Client::new(&base, CLIENT);
-    client.questions(1).await;
-    let form = client.held().await;
-    let schema = &form["inputRequests"]["feedback"]["params"]["requestedSchema"];
-    assert_eq!(schema["required"], json!(["rating"]));
-    assert_eq!(schema["properties"]["remarks"]["maxLength"], 500);
-    let response = json!({ "feedback": { "action": "accept", "content": {
-        "rating": "down", "remarks": "cited the wrong thread" } } });
-    client
-        .call(
-            "echo",
-            json!({ "text": "next" }),
-            Some(response),
-            Some(state_of(&form)),
+    // Comments are recorded with usage details or without: comments alone
+    // decide.
+    for details in [true, false] {
+        let ingestion = Ingestion::start().await;
+        let (base, usage) = listen_with(
+            server(FeedbackSettings {
+                comments: true,
+                ..settings(1)
+            }),
+            Some(&ingestion),
+            details,
         )
         .await;
+        let client = Client::new(&base, CLIENT);
+        client.questions(1).await;
+        let form = client.held().await;
+        let schema = &form["inputRequests"]["feedback"]["params"]["requestedSchema"];
+        assert_eq!(schema["required"], json!(["rating"]));
+        assert_eq!(schema["properties"]["remarks"]["maxLength"], 500);
+        let response = json!({ "feedback": { "action": "accept", "content": {
+            "rating": "down", "remarks": "cited the wrong thread" } } });
+        client
+            .call(
+                "echo",
+                json!({ "text": "next" }),
+                Some(response),
+                Some(state_of(&form)),
+            )
+            .await;
 
-    usage.flush().await;
-    let received = ingestion.received();
-    let rated = events(&received, &["McpFeedback"]);
-    assert_eq!(properties(rated[0])["comment"], "cited the wrong thread");
-    assert_eq!(measurements(rated[0])["commentLength"], 22.0);
-    // The comment comes from the form, never from the call's arguments.
-    for call in events(&received, &["McpToolCall"]) {
-        assert!(properties(call).get("arg.remarks").is_none());
+        usage.flush().await;
+        let received = ingestion.received();
+        let rated = events(&received, &["McpFeedback"]);
+        assert_eq!(properties(rated[0])["comment"], "cited the wrong thread");
+        assert_eq!(measurements(rated[0])["commentLength"], 22.0);
+        let marked = if details { json!(null) } else { json!("off") };
+        assert_eq!(properties(rated[0])["common.details"], marked);
+        // The comment comes from the form, never from the call's arguments.
+        for call in events(&received, &["McpToolCall"]) {
+            assert!(properties(call).get("arg.remarks").is_none());
+            assert_eq!(properties(call).get("arg.text").is_some(), details);
+        }
     }
 }
 

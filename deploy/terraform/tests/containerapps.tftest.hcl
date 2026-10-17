@@ -214,6 +214,7 @@ run "app_and_restore_job" {
       PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
       # The mocked resource's, which only names it: local authentication is off.
       APPLICATIONINSIGHTS_CONNECTION_STRING = "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
+      PGHACKER_USAGE_DETAILS                = "false"
     }
     error_message = "The app's plain variables must be exactly the contract's, with the deployment's values; no PGHACKER_GITHUB_USERS without github_users."
   }

@@ -99,6 +99,7 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
         role: "pghacker-mcp".into(),
         version: "0.1.0".into(),
         instance: None,
+        details: true,
     })
     .unwrap();
     let server = McpServer::new(Echo, "echo", "1", "Echo.");
@@ -233,6 +234,7 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
         role: "pghacker-mcp".into(),
         version: "0.1.0".into(),
         instance: None,
+        details: true,
     })
     .unwrap();
     let server =
@@ -325,6 +327,7 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
         role: "pghacker-mcp".into(),
         version: "0.1.0".into(),
         instance: None,
+        details: true,
     })
     .unwrap();
     // Every hour armed, no warm-up, and questions apart after 100 ms.
@@ -415,4 +418,130 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
         .collect();
     assert_eq!(asks.len(), 1);
     assert_eq!(properties(&asks[0])["endpoint"], "public");
+}
+
+/// The served tools, each answering without running.
+#[derive(Clone)]
+struct Served;
+
+impl Tools for Served {
+    fn specs(&self) -> &'static [ToolSpec] {
+        crate::tools::served()
+    }
+
+    async fn call(&self, _name: &str, _arguments: Value) -> Result<Output, ErrorData> {
+        Ok(Output::Text("ok".into()))
+    }
+}
+
+/// The served tools' fixed-choice arguments, each with one of its choices.
+const CHOICES: &[(&str, &str, &str)] = &[
+    ("search_threads", "mode", r#""hybrid""#),
+    ("get_thread", "full_text", "true"),
+    ("search_extracts", "kind", r#""decision""#),
+    ("search_extracts", "mode", r#""semantic""#),
+    ("author_perspective", "mode", r#""fulltext""#),
+    ("search", "case_sensitive", "false"),
+    ("search", "group_by", r#""file""#),
+    ("search", "match", r#""identifier""#),
+    ("search", "order", r#""coverage""#),
+    ("search", "output", r#""counts""#),
+    ("search", "whole_word", "true"),
+    ("search_patches", "case_sensitive", "true"),
+    ("blame", "ignore_revs", "false"),
+    ("blame", "proposals", "true"),
+    ("blame", "reverse", "false"),
+    ("get_commit", "diff", "true"),
+    ("search_commits", "ignore_case", "true"),
+    ("search_commits", "occurrences_regex", "false"),
+];
+
+#[tokio::test]
+async fn without_details_calls_of_the_served_tools_keep_only_their_choices() {
+    const SECRET: &str = "what the user typed";
+    let ingestion = Ingestion::start().await;
+    let usage = Usage::new(Settings {
+        endpoint: ingestion.url.clone(),
+        instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+        id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+        role: "pghacker-mcp".into(),
+        version: "0.1.0".into(),
+        instance: None,
+        details: false,
+    })
+    .unwrap();
+    let server = McpServer::new(Served, "pghacker-mcp", "1", "Served.");
+    let base = listen(internal(router(server, None), &usage)).await;
+    let client = reqwest::Client::new();
+
+    // Every argument of every tool: a choice where the schema offers some,
+    // else text, and the choices again as text.
+    let mut expected = std::collections::BTreeMap::new();
+    for (id, spec) in crate::tools::served().iter().enumerate() {
+        let schema = (spec.schema)();
+        let names = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut chosen = serde_json::Map::new();
+        let mut typed = serde_json::Map::new();
+        for name in &names {
+            let choice = CHOICES
+                .iter()
+                .find(|(tool, argument, _)| *tool == spec.name && argument == name);
+            let value = match choice {
+                Some((_, _, value)) => serde_json::from_str(value).unwrap(),
+                None => json!(SECRET),
+            };
+            chosen.insert(name.clone(), value);
+            typed.insert(name.clone(), json!(SECRET));
+        }
+        let choices: std::collections::BTreeMap<String, String> = CHOICES
+            .iter()
+            .filter(|(tool, _, _)| *tool == spec.name)
+            .map(|(_, argument, value)| {
+                assert!(
+                    names.contains(&argument.to_string()),
+                    "{}.{argument}",
+                    spec.name
+                );
+                let value: Value = serde_json::from_str(value).unwrap();
+                let text = value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_owned);
+                (format!("arg.{argument}"), text)
+            })
+            .collect();
+        for (arguments, kept) in [(chosen, choices), (typed, Default::default())] {
+            let request = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": spec.name, "arguments": arguments } });
+            assert_eq!(post(&client, &base, &[], request).await, 200);
+            usage.flush().await;
+            let mut names = names.clone();
+            names.sort();
+            expected.insert(
+                ingestion.received().len(),
+                (spec.name, kept, Value::from(names).to_string()),
+            );
+        }
+    }
+
+    let events = ingestion.received();
+    assert_eq!(events.len(), expected.len());
+    for (count, (tool, kept, names)) in expected {
+        let properties = properties(&events[count - 1]).as_object().unwrap();
+        assert_eq!(properties["toolName"], tool);
+        assert_eq!(properties["common.details"], "off");
+        assert_eq!(properties["argumentNames"], names.as_str(), "{tool}");
+        let recorded: std::collections::BTreeMap<String, String> = properties
+            .iter()
+            .filter(|(key, _)| key.starts_with("arg."))
+            .map(|(key, value)| (key.clone(), value.as_str().unwrap().to_owned()))
+            .collect();
+        assert_eq!(recorded, kept, "{tool}");
+        let event = events[count - 1].to_string();
+        assert!(!event.contains(SECRET), "{event}");
+    }
+    assert_eq!(usage.lost(), 0);
 }

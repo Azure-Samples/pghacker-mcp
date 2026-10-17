@@ -14,6 +14,12 @@
 //! from which Application Insights derives a country, region and city before
 //! it discards the address. A keyed hash of the address tells users apart,
 //! and the server starts a new session after 30 idle minutes.
+//!
+//! What users type into tools (arguments' values, error messages and
+//! sqlparser's errors) is recorded only with details on
+//! (PGHACKER_USAGE_DETAILS); without them, a call keeps its arguments' names
+//! and size and the values of its fixed-choice ones, and every event says
+//! `common.details` `off`.
 
 mod event;
 mod http;
@@ -64,6 +70,9 @@ pub struct Settings {
     pub version: String,
     /// Its instance, `ai.cloud.roleInstance`: the Container App revision.
     pub instance: Option<String>,
+    /// Whether events record what users type into tools: arguments' values,
+    /// error messages and sqlparser's errors.
+    pub details: bool,
 }
 
 /// The telemetry's handle: cheap to clone, and off by default.
@@ -91,8 +100,9 @@ impl Usage {
 
     /// Usage telemetry as the environment configures it for `role` at
     /// `version`: off without PGHACKER_USAGE_ENDPOINT; with it,
-    /// PGHACKER_USAGE_IKEY and PGHACKER_USAGE_ID_KEY are required, and
-    /// CONTAINER_APP_REVISION names the instance.
+    /// PGHACKER_USAGE_IKEY and PGHACKER_USAGE_ID_KEY are required,
+    /// CONTAINER_APP_REVISION names the instance, and PGHACKER_USAGE_DETAILS
+    /// (false by default) records what users type into tools.
     pub fn from_env(env: &Env, role: &str, version: &str) -> Result<Self> {
         let Some(endpoint) = env.get("PGHACKER_USAGE_ENDPOINT") else {
             return Ok(Self::off());
@@ -118,6 +128,7 @@ impl Usage {
             role: role.to_owned(),
             version: version.to_owned(),
             instance: env.get("CONTAINER_APP_REVISION").map(str::to_owned),
+            details: env.parse_or("PGHACKER_USAGE_DETAILS", false)?,
         })
     }
 
@@ -132,7 +143,11 @@ impl Usage {
         let identities = Arc::new(Identities::new(settings.id_key.clone()));
         let sender = Arc::new(sender);
         tokio::spawn(send_in_background(sender.clone(), identities.clone()));
-        tracing::info!(endpoint = %settings.endpoint, "usage telemetry is on");
+        tracing::info!(
+            endpoint = %settings.endpoint,
+            details = settings.details,
+            "usage telemetry is on"
+        );
         Self {
             inner: Some(Arc::new(Inner {
                 settings,
@@ -146,6 +161,13 @@ impl Usage {
         self.inner.is_some()
     }
 
+    /// Whether events record what users type into tools.
+    pub fn details(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.settings.details)
+    }
+
     /// The identity of the client at `ip` (a public address) at `now`.
     pub fn identify(&self, ip: IpAddr, now: Instant) -> Option<Identity> {
         let inner = self.inner.as_ref()?;
@@ -153,7 +175,8 @@ impl Usage {
     }
 
     /// Queues `event`, with what every event carries: the service, its
-    /// version and instance.
+    /// version and instance, and, if it was made without details,
+    /// `common.details` `off`.
     pub fn record(&self, mut event: Event) {
         let Some(inner) = &self.inner else {
             return;
@@ -167,6 +190,9 @@ impl Usage {
             .property("common.extversion", &settings.version);
         if let Some(instance) = &settings.instance {
             event.tag(tags::ROLE_INSTANCE, instance.clone());
+        }
+        if !event.details() {
+            event.property("common.details", "off");
         }
         let envelope = event.envelope(&settings.instrumentation_key);
         inner.sender.push(envelope.to_string());
@@ -282,6 +308,71 @@ mod tests {
         assert_eq!(properties["common.extversion"], "0.1.0");
         assert_eq!(properties["toolName"], "search");
         assert_eq!(usage.lost(), 0);
+    }
+
+    #[tokio::test]
+    async fn details_are_off_unless_the_environment_turns_them_on() {
+        let ingestion = Ingestion::start().await;
+        let env = |details: Option<&str>| {
+            let mut pairs = vec![
+                ("PGHACKER_USAGE_ENDPOINT", ingestion.url.as_str()),
+                ("PGHACKER_USAGE_IKEY", IKEY),
+                ("PGHACKER_USAGE_ID_KEY", ID_KEY),
+            ];
+            pairs.extend(details.map(|details| ("PGHACKER_USAGE_DETAILS", details)));
+            Env::from_pairs(pairs)
+        };
+        assert!(!Usage::from_env(&env(None), "r", "1").unwrap().details());
+        assert!(
+            !Usage::from_env(&env(Some("false")), "r", "1")
+                .unwrap()
+                .details()
+        );
+        assert!(
+            Usage::from_env(&env(Some("true")), "r", "1")
+                .unwrap()
+                .details()
+        );
+        let error = Usage::from_env(&env(Some("yes")), "r", "1").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("PGHACKER_USAGE_DETAILS"),
+            "{error:#}"
+        );
+        assert!(!Usage::off().details());
+    }
+
+    #[tokio::test]
+    async fn an_event_made_without_details_says_so() {
+        let ingestion = Ingestion::start().await;
+        let usage = Usage::new(Settings {
+            endpoint: ingestion.url.clone(),
+            instrumentation_key: IKEY.into(),
+            id_key: ID_KEY.as_bytes().to_vec(),
+            role: "pghacker-mcp".into(),
+            version: "0.1.0".into(),
+            instance: None,
+            details: false,
+        })
+        .unwrap();
+        let mut with = Event::new("McpToolCall");
+        with.property("n", "with");
+        usage.record(with);
+        let mut without = Event::new("McpToolCall");
+        without.property("n", "without").without_details();
+        usage.record(without);
+        usage.flush().await;
+
+        let received = ingestion.received();
+        assert_eq!(received.len(), 2, "{received:?}");
+        for envelope in &received {
+            let properties = &envelope["data"]["baseData"]["properties"];
+            let expected = if properties["n"] == "without" {
+                serde_json::json!("off")
+            } else {
+                serde_json::Value::Null
+            };
+            assert_eq!(properties["common.details"], expected, "{envelope}");
+        }
     }
 
     #[test]

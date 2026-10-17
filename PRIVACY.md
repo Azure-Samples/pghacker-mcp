@@ -8,3 +8,7 @@ The software may collect information about you and your use of the software and 
 
 - **Deployed with this repository's Terraform (telemetry is on by default):** set `usage_enabled = false` in your `.tfvars` and run `terraform apply`. No Application Insights resource is created and the app gets no connection string, so nothing is sent.
 - **Run any other way:** `npm start` never sends telemetry, and the binaries on their own send none unless `PGHACKER_USAGE_ENDPOINT` is set.
+
+## Recording less
+
+What users type into tools is recorded only if a deployment sets `usage_details_enabled = true` (`PGHACKER_USAGE_DETAILS`): the tools' arguments, such as SQL and search terms; error messages, which can quote them; and the parser's errors for SQL that `query` checks by its tokens. It's off by default. Without it, a call keeps which tool it was, its arguments' names and size, the values of arguments that are one of a fixed set of choices (such as a search mode, or true or false), its outcome and, for a failed `query`, PostgreSQL's error code. Feedback comments are recorded only with `feedback_comments_enabled = true`, whatever this setting.

@@ -123,7 +123,10 @@ locals {
       PGHACKER_PORTAL_ROLE          = var.portal_role
     },
     length(var.github_users) > 0 ? { PGHACKER_GITHUB_USERS = join(",", var.github_users) } : {},
-    var.usage_enabled ? { APPLICATIONINSIGHTS_CONNECTION_STRING = nonsensitive(azurerm_application_insights.usage[0].connection_string) } : {},
+    var.usage_enabled ? {
+      APPLICATIONINSIGHTS_CONNECTION_STRING = nonsensitive(azurerm_application_insights.usage[0].connection_string)
+      PGHACKER_USAGE_DETAILS                = tostring(var.usage_details_enabled)
+    } : {},
     # Feedback records with usage telemetry, so it goes with it.
     var.usage_enabled ? {
       PGHACKER_FEEDBACK_RATE          = tostring(var.feedback_rate_per_hour)

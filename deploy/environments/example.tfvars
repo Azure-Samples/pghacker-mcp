@@ -73,6 +73,10 @@ crawl_max_sessions            = 4
 
 # Usage telemetry (PRIVACY.md); false records nothing.
 usage_enabled = true
+# Whether it also records what users type into tools: arguments' values, error
+# messages and sqlparser's errors. False, the default, keeps the rest: which
+# tools, argument names and size, fixed-choice values, outcomes, SQLSTATEs.
+usage_details_enabled = false
 # Feedback (PRIVACY.md): the chance that an address's hour of use brings one
 # "Was the last answer helpful?" to an interactive client, as its user's next
 # question starts; 0 asks nothing. feedback_question_gap_seconds (180),

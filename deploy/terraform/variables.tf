@@ -687,6 +687,13 @@ variable "usage_total_retention_days" {
   }
 }
 
+variable "usage_details_enabled" {
+  description = "Whether usage telemetry records what users type into tools: their arguments' values, error messages, and sqlparser's errors for the statements query lets through by their tokens (PGHACKER_USAGE_DETAILS; PRIVACY.md). Off by default: a call then keeps which tool, its arguments' names and size, the values of its fixed-choice arguments (enums and booleans), its outcome and, for query, PostgreSQL's SQLSTATE. Feedback comments don't depend on it: feedback_comments_enabled alone decides."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "feedback_rate_per_hour" {
   description = "The chance, from 0 to 1, that an address's hour of use of the public MCP endpoint brings one request for feedback, \"Was the last answer helpful?\", which an interactive client's own form shows as the user's next question starts (PGHACKER_FEEDBACK_RATE; PRIVACY.md). Only the apps in feedback_clients that declare form elicitation, under MCP 2026-07-28, are asked, after feedback_min_questions questions and only in an active session. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
   type        = number

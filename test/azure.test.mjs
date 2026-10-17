@@ -187,6 +187,7 @@ test("usage telemetry reaches pghacker-mcp and the home page through the supervi
     audience: "https://monitor.azure.com",
     idKey: USAGE_ENV.PGHACKER_USAGE_ID_KEY,
     revision: "pghacker-example--0000016",
+    details: false,
   });
   const environments = processEnvironments(config);
   for (const name of ["mcp", "home"]) {
@@ -198,6 +199,16 @@ test("usage telemetry reaches pghacker-mcp and the home page through the supervi
     assert.equal(env.PGHACKER_FRONT_DOOR_ID, ENV.PGHACKER_FRONT_DOOR_ID, name);
   }
   assert.equal(MONITOR_PROXY, `http://127.0.0.1:${PORTS.monitor}`);
+  // Details are pghacker-mcp's alone, and off unless set.
+  assert.equal(environments.mcp.PGHACKER_USAGE_DETAILS, "false");
+  assert.equal(environments.home.PGHACKER_USAGE_DETAILS, undefined);
+  const detailed = readAzureConfig({ ...USAGE_ENV, PGHACKER_USAGE_DETAILS: "true" });
+  assert.equal(detailed.usage.details, true);
+  assert.equal(processEnvironments(detailed).mcp.PGHACKER_USAGE_DETAILS, "true");
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, PGHACKER_USAGE_DETAILS: "yes" }),
+    /PGHACKER_USAGE_DETAILS must be true or false/,
+  );
   // The users' key reaches those two alone, and the connection string none:
   // the supervisor's proxy holds the way in.
   for (const [name, env] of Object.entries(environments)) {

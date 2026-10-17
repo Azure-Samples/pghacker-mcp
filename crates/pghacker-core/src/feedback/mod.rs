@@ -1052,6 +1052,7 @@ mod tests {
             role: "pghacker-mcp".into(),
             version: "0.1.0".into(),
             instance: None,
+            details: true,
         })
         .unwrap();
         let env = |pairs: &[(&str, &str)]| {

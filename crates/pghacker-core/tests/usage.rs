@@ -87,6 +87,7 @@ impl Tools for Noting {
             let mut event = scope.event("TestNote", name);
             event.property("text", &args.text);
             scope.record(event);
+            scope.annotate("noteKind", "test");
         }
         Ok(Output::Json(json!({ "noted": true })))
     }
@@ -100,6 +101,11 @@ async fn serve(ingestion: &Ingestion) -> (String, Usage) {
 
 /// [`serve`], with `tools`.
 async fn serve_tools<T: Tools>(ingestion: &Ingestion, tools: T) -> (String, Usage) {
+    serve_with(ingestion, tools, true).await
+}
+
+/// [`serve_tools`], recording usage with `details` or without.
+async fn serve_with<T: Tools>(ingestion: &Ingestion, tools: T, details: bool) -> (String, Usage) {
     let usage = Usage::new(Settings {
         endpoint: ingestion.url.clone(),
         instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
@@ -107,6 +113,7 @@ async fn serve_tools<T: Tools>(ingestion: &Ingestion, tools: T) -> (String, Usag
         role: "pghacker-mcp".into(),
         version: "0.1.0".into(),
         instance: Some("rev-1".into()),
+        details,
     })
     .unwrap();
     let recorder = Recorder::new(usage.clone(), Endpoint::Public, |request| {
@@ -286,6 +293,8 @@ async fn each_mcp_request_is_recorded_with_its_client_and_outcome() {
         assert_eq!(event["tags"]["ai.cloud.roleInstance"], "rev-1");
         assert_eq!(properties(event)["endpoint"], "public");
         assert_eq!(properties(event)["common.extname"], "pghacker-mcp");
+        assert!(properties(event).get("common.details").is_none());
+        assert!(properties(event).get("argumentNames").is_none());
     }
 
     let legacy = properties(initialized);
@@ -458,4 +467,106 @@ async fn a_tool_records_its_own_events_in_its_calls_operation() {
         assert!(note["tags"][tag].is_string(), "{tag}: {note}");
         assert_eq!(note["tags"][tag], called["tags"][tag], "{tag}");
     }
+}
+
+#[tokio::test]
+async fn a_tools_annotations_join_its_calls_event_with_or_without_details() {
+    for details in [true, false] {
+        let ingestion = Ingestion::start().await;
+        let (base, usage) = serve_with(&ingestion, Noting, details).await;
+        let client = reqwest::Client::new();
+        assert_eq!(
+            rpc(&client, &base, call(1, "note", json!({ "text": "hello" }))).await,
+            200
+        );
+        usage.flush().await;
+
+        let events = ingestion.received();
+        let action = |event: &&Value| properties(event)["action"].clone();
+        let called = events
+            .iter()
+            .find(|event| action(event) == "McpToolCall")
+            .expect("the call's event");
+        let note = events
+            .iter()
+            .find(|event| action(event) == "TestNote")
+            .expect("the tool's event");
+        assert_eq!(properties(called)["noteKind"], "test", "{called}");
+        assert!(properties(note).get("noteKind").is_none(), "{note}");
+    }
+}
+
+#[tokio::test]
+async fn without_details_requests_keep_what_they_did_but_not_what_users_typed() {
+    const TYPED: &str = "what the user typed";
+    let ingestion = Ingestion::start().await;
+    let (base, usage) = serve_with(&ingestion, Echo, false).await;
+    let client = reqwest::Client::new();
+
+    let initialize = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": { "name": "legacy", "version": "1.0" } } });
+    assert_eq!(rpc(&client, &base, initialize).await, 200);
+    let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} });
+    assert_eq!(rpc(&client, &base, list).await, 200);
+    let calls = [
+        ("echo", json!({ "text": TYPED })),
+        ("fail", json!({ "text": TYPED })),
+        ("echo", json!({ "text": 1, "more": TYPED })),
+        (&*"n".repeat(300), json!({ "q": TYPED })),
+    ];
+    for (id, (name, arguments)) in calls.into_iter().enumerate() {
+        let id = id as u64 + 3;
+        assert_eq!(rpc(&client, &base, call(id, name, arguments)).await, 200);
+    }
+
+    usage.flush().await;
+    let events = ingestion.received();
+    let seen: Vec<(&str, &str)> = events
+        .iter()
+        .map(|event| {
+            let properties = properties(event);
+            (
+                properties["action"].as_str().unwrap(),
+                properties["errorType"].as_str().unwrap_or(""),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("McpInitialize", ""),
+            ("McpToolsList", ""),
+            ("McpToolCall", ""),
+            ("McpToolCall", "ToolError"),
+            ("McpToolCall", "InvalidParams"),
+            ("McpToolCall", "UnknownTool"),
+        ],
+        "{events:#?}"
+    );
+    for event in &events {
+        assert!(!event.to_string().contains(TYPED), "{event}");
+        let properties = properties(event);
+        assert_eq!(properties["common.details"], "off");
+        assert!(properties.get("errorMessage").is_none(), "{event}");
+        assert_eq!(event["tags"]["ai.location.ip"], CLIENT);
+    }
+    let [initialized, _, echoed, failing, invalid, unknown] = &events[..] else {
+        unreachable!()
+    };
+    assert_eq!(properties(initialized)["clientName"], "legacy");
+    let echo = properties(echoed);
+    assert_eq!(echo["argumentNames"], r#"["text"]"#);
+    assert_eq!(echo["activityStatus"], "Succeeded");
+    assert_eq!(echo["result.mode"], "fts");
+    assert!(echo.get("arg.text").is_none());
+    assert!(echoed["data"]["baseData"]["measurements"]["argumentsLength"].as_f64() > Some(0.0));
+    assert_eq!(properties(failing)["activityStatus"], "Failed");
+    assert_eq!(properties(invalid)["argumentNames"], r#"["more","text"]"#);
+    // An unknown tool's name is the client's: cut.
+    let cut = "n".repeat(128);
+    assert_eq!(properties(unknown)["toolName"], cut.as_str());
+    assert_eq!(unknown["tags"]["ai.operation.name"], cut.as_str());
+    assert_eq!(properties(unknown)["argumentNames"], r#"["q"]"#);
+    assert_eq!(usage.lost(), 0);
 }

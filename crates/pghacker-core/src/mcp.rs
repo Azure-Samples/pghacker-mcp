@@ -294,15 +294,23 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         let name = request.name.to_string();
         let arguments = request.arguments.unwrap_or_default();
         let scope = usage_scope(&context);
+        let tool = self.list.iter().find(|tool| tool.name == name);
         // The call's usage event, if the endpoint records usage.
         let usage = scope.clone().map(|scope| {
-            let mut event = scope.event("McpToolCall", &name);
-            event.property("toolName", &name);
+            // An unknown tool's name is the client's, cut without details.
+            let recorded = if tool.is_some() || scope.details() {
+                name.as_str()
+            } else {
+                crate::text::truncate_chars(&name, UNKNOWN_TOOL_CHARS)
+            };
+            let mut event = scope.event("McpToolCall", recorded);
+            event.property("toolName", recorded);
             request_client(&mut event, &context);
-            usage::mcp::arguments(&mut event, &arguments);
+            let schema = tool.map(|tool| tool.input_schema.as_ref());
+            usage::mcp::arguments(&mut event, &arguments, schema);
             (scope, event)
         });
-        if !self.tools.specs().iter().any(|spec| spec.name == name) {
+        if tool.is_none() {
             let error = ErrorData::invalid_params(format!("unknown tool {name}"), None);
             if let Some((scope, mut event)) = usage {
                 usage::mcp::failed(&mut event, "UnknownTool", &error.message);
@@ -356,6 +364,7 @@ impl<T: Tools> ServerHandler for McpServer<T> {
                     if let Some((scope, mut event)) = usage {
                         usage::mcp::duration(&mut event, elapsed);
                         usage::mcp::failed(&mut event, "Abandoned", "the client went away");
+                        annotate(&mut event, &scope);
                         scope.record(event);
                     }
                     return Err(ErrorData::internal_error("the client went away", None));
@@ -387,6 +396,7 @@ impl<T: Tools> ServerHandler for McpServer<T> {
                     usage::mcp::failed(&mut event, error_type, &error.message);
                 }
             }
+            annotate(&mut event, &scope);
             scope.record(event);
         }
         let result = match outcome {
@@ -509,6 +519,9 @@ impl<T: Tools> ServerHandler for McpServer<T> {
 
 /// A URI's characters in a usage event, at most.
 const URI_CHARS: usize = 1024;
+/// An unknown tool's name's characters in a usage event without details, at
+/// most.
+const UNKNOWN_TOOL_CHARS: usize = 128;
 
 impl<T> McpServer<T> {
     /// The answer to `skills/list` or `skills/get`. One page holds every
@@ -541,6 +554,14 @@ fn usage_scope(context: &RequestContext<RoleServer>) -> Option<Scope> {
         .extensions
         .get::<Scope>()
         .cloned()
+}
+
+/// Adds to a tool call's event what the tool added to its scope
+/// ([`Scope::annotate`]).
+fn annotate(event: &mut usage::Event, scope: &Scope) {
+    for (key, value) in scope.take_annotations() {
+        event.property(key, value);
+    }
 }
 
 /// The client as a request describes it: a 2026-07-28 client in each

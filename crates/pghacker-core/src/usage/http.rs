@@ -46,8 +46,9 @@ impl Endpoint {
 const USER_AGENT_CHARS: usize = 512;
 
 /// What the events of one request share: the client's address, which only
-/// their location tag carries, its identity, and the request's ID. The MCP
-/// server's hooks read it from the request (`crate::mcp`).
+/// their location tag carries, its identity, the request's ID, and whether
+/// they record details. The MCP server's hooks read it from the request
+/// (`crate::mcp`).
 #[derive(Clone)]
 pub struct Scope {
     inner: Arc<ScopeInner>,
@@ -61,6 +62,8 @@ struct ScopeInner {
     operation: String,
     user_agent: Option<String>,
     recorded: AtomicBool,
+    /// Properties a tool adds to its call's event ([`Scope::annotate`]).
+    annotations: Mutex<Vec<(String, String)>>,
 }
 
 impl Scope {
@@ -86,6 +89,7 @@ impl Scope {
                 user_agent: user_agent
                     .map(|agent| truncate_chars(agent, USER_AGENT_CHARS).to_owned()),
                 recorded: AtomicBool::new(false),
+                annotations: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -96,6 +100,9 @@ impl Scope {
         let inner = &self.inner;
         inner.recorded.store(true, Ordering::Relaxed);
         let mut event = Event::new(action);
+        if !inner.usage.details() {
+            event.without_details();
+        }
         // Without an address of its own, Application Insights would locate
         // the event's sender, this server.
         let location = inner
@@ -119,6 +126,35 @@ impl Scope {
 
     pub fn record(&self, event: Event) {
         self.inner.usage.record(event);
+    }
+
+    /// Whether this request's events record what users type into tools.
+    pub fn details(&self) -> bool {
+        self.inner.usage.details()
+    }
+
+    /// Adds `key`: `value` to the event of the tool call this request makes,
+    /// which the MCP server records when the tool returns. For what the tool
+    /// alone knows, such as a failed query's SQLSTATE; it's recorded whether
+    /// or not the scope records details, so it must not quote the user.
+    pub fn annotate(&self, key: &str, value: impl Into<String>) {
+        self.inner
+            .annotations
+            .lock()
+            .expect("the scope's annotations' lock")
+            .push((key.to_owned(), value.into()));
+    }
+
+    /// Takes the properties tools added ([`Scope::annotate`]), as the MCP
+    /// server does to add them to the call's event.
+    pub fn take_annotations(&self) -> Vec<(String, String)> {
+        std::mem::take(
+            &mut *self
+                .inner
+                .annotations
+                .lock()
+                .expect("the scope's annotations' lock"),
+        )
     }
 
     /// Whether an event of this request was made.

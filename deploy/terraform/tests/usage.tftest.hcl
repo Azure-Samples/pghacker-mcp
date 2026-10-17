@@ -131,6 +131,33 @@ run "usage_is_recorded_by_default" {
     )
     error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments."
   }
+
+  assert {
+    condition = (
+      {
+        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
+      }["PGHACKER_USAGE_DETAILS"] == "false"
+      && !anytrue(flatten([
+        for job in azurerm_container_app_job.this : [
+          for env in job.template[0].container[0].env : env.name == "PGHACKER_USAGE_DETAILS"
+        ]
+      ]))
+    )
+    error_message = "By default the app must record usage without details, what users type into tools; the jobs record no usage."
+  }
+}
+
+run "usage_details_are_set_with_their_variable" {
+  variables {
+    usage_details_enabled = true
+  }
+
+  assert {
+    condition = {
+      for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
+    }["PGHACKER_USAGE_DETAILS"] == "true"
+    error_message = "usage_details_enabled = true must have the app record usage with details."
+  }
 }
 
 run "feedback_is_set_with_its_variables" {
@@ -177,7 +204,7 @@ run "usage_can_be_turned_off" {
 
   assert {
     condition = (
-      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
+      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
       && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
     )
     error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."

@@ -172,7 +172,8 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     throw new Error("PGHACKER_CODE_HISTORY must name a schema, such as pghacker.");
   }
   // Usage telemetry, when the app has Application Insights: its resource,
-  // and the key of the users' keyed hashes.
+  // the key of the users' keyed hashes, and whether pghacker-mcp records
+  // what users type into tools (PRIVACY.md).
   const connectionString = value(env, "APPLICATIONINSIGHTS_CONNECTION_STRING");
   let usage;
   if (serve && connectionString !== undefined) {
@@ -180,7 +181,12 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
     if (idKey === undefined || [...idKey].length < 32) {
       throw new Error("APPLICATIONINSIGHTS_CONNECTION_STRING needs PGHACKER_USAGE_ID_KEY, of at least 32 characters.");
     }
-    usage = { ...parseConnectionString(connectionString), idKey, revision: value(env, "CONTAINER_APP_REVISION") };
+    usage = {
+      ...parseConnectionString(connectionString),
+      idKey,
+      revision: value(env, "CONTAINER_APP_REVISION"),
+      details: flag(env, "PGHACKER_USAGE_DETAILS", false),
+    };
   }
   // Feedback, which records with usage telemetry, so only with it.
   const feedback = usage ? feedbackSettings(env) : undefined;
@@ -439,6 +445,7 @@ export function processEnvironments(config) {
       PGHACKER_RATE_BURST: String(config.rate.burst),
       ...(config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
       ...usage,
+      ...(config.usage ? { PGHACKER_USAGE_DETAILS: String(config.usage.details) } : {}),
       ...(config.feedback
         ? {
           PGHACKER_FEEDBACK_RATE: String(config.feedback.rate),
