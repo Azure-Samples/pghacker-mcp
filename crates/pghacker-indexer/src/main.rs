@@ -3,9 +3,8 @@
 
 //! pghacker-indexer's command line: `bootstrap` (as the database's
 //! administrator), `serve` (workers and the MCP server), `status`,
-//! `graph-reconcile`, `restore-addresses`, `rethread-mail`, the local-only
-//! `reset`, and `history` (building, syncing and checking the commit
-//! history).
+//! `graph-reconcile`, `rethread-mail`, the local-only `reset`, and `history`
+//! (building, syncing and checking the commit history).
 
 use std::path::PathBuf;
 
@@ -17,7 +16,7 @@ use pghacker_core::config::Env;
 use pghacker_core::mcp::{McpServer, router, serve, shutdown_signal};
 use pghacker_core::{db, migrate, telemetry};
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, addresses, graph, jobs, rethread, status, tools};
+use pghacker_indexer::{Indexer, graph, jobs, rethread, status, tools};
 
 #[derive(Parser)]
 #[command(name = "pghacker-indexer", version, about)]
@@ -39,10 +38,6 @@ enum Command {
     /// Asks for a full graph sync, which recomputes the whole graph from the
     /// tables and repairs any difference; the graph sync job runs it next.
     GraphReconcile,
-    /// Queues jobs that give mail stored before ingest kept email addresses
-    /// its addresses back, retrieving it from the archive again: every
-    /// stored month, and the messages from thread pages.
-    RestoreAddresses,
     /// Queues threading stored mail again (`rethread_mail()`): a dry run,
     /// whose report the job records, or with --apply, the apply of the plan
     /// it reported. The indexer's jobs run it.
@@ -157,17 +152,6 @@ async fn main() -> Result<()> {
             graph::request_full(&client, "requested from the command line").await?;
             jobs::wake(&client, jobs::kind::GRAPH_SYNC).await?;
             println!("A full graph sync is requested; the graph sync job runs it next.");
-            Ok(())
-        }
-        Command::RestoreAddresses => {
-            let settings = Settings::from_env(&env)?;
-            let client = db::connect(&settings.database_url, "pghacker-indexer").await?;
-            let queued = addresses::queue_restore(&client).await?;
-            println!(
-                "Queued {} months and {} batches of {} messages from thread pages; \
-                 the indexer's jobs restore them (ingest_status shows the jobs).",
-                queued.months, queued.batches, queued.messages
-            );
             Ok(())
         }
         Command::RethreadMail { apply } => {

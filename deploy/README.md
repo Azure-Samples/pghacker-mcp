@@ -195,7 +195,6 @@ Startup applies the migrations a database lacks, in name order and each in its o
 | --- | --- |
 | `0013_duplicate_candidates` | `find_duplicates`' pairs, found as extracts arrive |
 | `0014_commit_graph` | The commit history in the graph |
-| `0015_restore_addresses` | `restore_addresses()` ([Email addresses](#email-addresses)) |
 | `0016_retire_snapshots` | Drops the snapshots ([Commit history](#commit-history)) |
 | `0017_extraction_lease_versions` | The thread versions each extraction lease read |
 | `0018_feature_release_at` | When a feature's release was stated |
@@ -253,18 +252,6 @@ Images before `0021`, such as `aad595a` and `33616a4`, save releases as their th
 UPDATE pghacker.features SET release = pghacker.shipped_release(release)
 WHERE release IS DISTINCT FROM pghacker.shipped_release(release);
 ```
-
-### Email addresses
-
-An image with migration `0015_restore_addresses` stores mail's email addresses as written: subjects, bodies, patches and senders' names. Mail stored before it has `[email]` in their place, and senders' names without them, until restored. After deploying it, as `pgh_indexer` from the operator environment (Graph index preparation):
-
-```sql
-SELECT * FROM pghacker.restore_addresses();
-```
-
-- It queues a `restore_addresses` job per stored month, which downloads the month again, and one per 200 messages from thread pages, which are fetched one by one at the archive's rate (2 requests a second). `ingest_status` shows the jobs.
-- They change only text stored exactly as ingest once made it of the archive's, and count the rest as `differs`. Changed chunks are embedded again through Foundry, changed patches are indexed again by the `patch_lines` job, and the graph follows.
-- Running it again restores whatever is left; a job that's queued or running is left as it is.
 
 ### Threads
 
@@ -391,7 +378,7 @@ doesn't know, and ask for a full sync:
 
 ```sql
 UPDATE pghacker.jobs SET state = 'cancelled'
-WHERE kind IN ('duplicates', 'restore_addresses', 'patch_series', 'rethread_mail') AND state IN ('queued', 'running');
+WHERE kind IN ('duplicates', 'patch_series', 'rethread_mail') AND state IN ('queued', 'running');
 DELETE FROM pghacker.graph_changes WHERE label IN ('BACKPATCH_OF', 'COMMITTED');
 SELECT pghacker.graph_request_full('rolled back past 0014');
 ```
@@ -402,13 +389,13 @@ It ignores the other added columns and tables: leave them, and the
 migration records, in place.
 
 While rolled back, the image stores new mail with `[email]` in place of
-addresses, and sets features' releases in extraction order without dating
-them (`release_at`), so keep extraction off (`PGHACKER_CRAWL=off`). After
-rolling forward, run `SELECT * FROM pghacker.restore_addresses();`. If it
-extracted, check the releases it set or changed against their threads
-before extraction resumes, and date those without `release_at` as `0018`
-did: the latest `last_at` of the feature's threads. Then rename the
-development names it saved ([Shipped release names](#shipped-release-names)).
+addresses, which no later image puts back. It also sets features' releases
+in extraction order without dating them (`release_at`), so keep extraction
+off (`PGHACKER_CRAWL=off`). After rolling forward, if it extracted, check
+the releases it set or changed against their threads before extraction
+resumes, and date those without `release_at` as `0018` did: the latest
+`last_at` of the feature's threads. Then rename the development names it
+saved ([Shipped release names](#shipped-release-names)).
 
 ## Custom domains
 

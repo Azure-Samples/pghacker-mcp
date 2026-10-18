@@ -406,7 +406,7 @@ pub(super) fn check_function(name: &str) -> Result<(), String> {
             "Run the read without a sleep",
         ),
         "pg_notify" => ("sends notifications", "Read without notifications"),
-        "graph_request_full" | "restore_addresses" | "rethread_mail" => (
+        "graph_request_full" | "rethread_mail" => (
             "changes corpus maintenance state",
             "Query the corpus tables without scheduling repair or sync jobs",
         ),

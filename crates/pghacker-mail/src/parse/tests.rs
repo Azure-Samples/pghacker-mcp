@@ -193,15 +193,6 @@ fn names_keep_their_addresses() {
         Some("eve@example.org")
     );
     assert_eq!(display_name("", None), "unknown");
-    // The names stored before, recognized from the names stored now.
-    let before = |name: &str| {
-        let email = Some("dave@example.org");
-        display_name_without_addresses(&display_name(name, email), email)
-    };
-    assert_eq!(before("\"dave@example.org\""), "dave");
-    assert_eq!(before("Dave Example (dave@example.org)"), "Dave Example");
-    assert_eq!(before(""), "dave");
-    assert_eq!(before("Dave Example"), "Dave Example");
 }
 
 #[test]

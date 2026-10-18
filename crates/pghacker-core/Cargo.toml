@@ -19,7 +19,6 @@ hmac.workspace = true
 http.workspace = true
 include_dir.workspace = true
 pgvector.workspace = true
-regex.workspace = true
 reqwest.workspace = true
 rmcp.workspace = true
 rustls.workspace = true

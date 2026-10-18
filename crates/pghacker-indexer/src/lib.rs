@@ -7,7 +7,6 @@
 //! project the tables into the AGE graph; and the MCP tools that crawler
 //! sessions use to manage sources, watch progress and submit extracts.
 
-pub mod addresses;
 pub mod anchors;
 pub mod duplicates;
 pub mod embedding;

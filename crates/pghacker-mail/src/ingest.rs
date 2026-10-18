@@ -3,15 +3,13 @@
 
 //! The ingestion pipelines the indexer's job workers run: a month's mbox, or
 //! a thread from its flat page and raw messages. Both are idempotent and
-//! commit in batches, so an interrupted run resumes where it stopped. So are
-//! the restores that give mail stored before ingest kept email addresses its
-//! addresses back, from the same months and raw messages.
+//! commit in batches, so an interrupted run resumes where it stopped.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use pghacker_core::db::Pool;
 use serde::Serialize;
 use tokio_postgres::error::SqlState;
@@ -305,11 +303,11 @@ async fn store_batch(
 /// Rounds of [`store_batch`] for messages that deadlocked.
 const RETRY_ROUNDS: usize = 3;
 
-/// [`store::refresh_threads`], retried if it deadlocks; false if it still
-/// fails, with the transaction usable without it. A retry releases only the
-/// locks the refresh took, so it can't break a deadlock over the
-/// transaction's earlier locks.
-async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<bool> {
+/// [`store::refresh_threads`], retried if it deadlocks; if it still fails,
+/// the transaction stays usable without it. A retry releases only the locks
+/// the refresh took, so it can't break a deadlock over the transaction's
+/// earlier locks.
+async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<()> {
     for attempt in 1..=RETRY_ROUNDS {
         tx.batch_execute("SAVEPOINT pghacker_refresh_threads")
             .await?;
@@ -317,7 +315,7 @@ async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<bo
             Ok(()) => {
                 tx.batch_execute("RELEASE SAVEPOINT pghacker_refresh_threads")
                     .await?;
-                return Ok(true);
+                return Ok(());
             }
             Err(error) => {
                 tx.batch_execute(
@@ -327,13 +325,13 @@ async fn refresh(tx: &tokio_postgres::Transaction<'_>, ids: &[i64]) -> Result<bo
                 .await?;
                 if attempt == RETRY_ROUNDS || !is_transient(&error) {
                     tracing::warn!(error = %format!("{error:#}"), "cannot refresh threads");
-                    return Ok(false);
+                    return Ok(());
                 }
                 tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
             }
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 fn is_transient(error: &anyhow::Error) -> bool {
@@ -346,188 +344,4 @@ fn is_transient(error: &anyhow::Error) -> bool {
                     || *code == SqlState::T_R_SERIALIZATION_FAILURE
             })
     })
-}
-
-/// What a restore of email addresses did.
-#[derive(Debug, Default, Clone, Serialize)]
-pub struct RestoreStats {
-    /// Messages in the mbox, or raw messages retrieved.
-    pub fetched: usize,
-    /// Of those, the stored ones, compared with what's stored.
-    pub stored: usize,
-    /// Stored messages that got their addresses back.
-    pub restored: usize,
-    /// Stored messages whose text isn't what ingest once made of the
-    /// archive's, left as they are.
-    pub differs: usize,
-    /// Messages that could not be retrieved, parsed or restored.
-    pub failed: usize,
-}
-
-/// Gives the stored messages of `list`'s mbox for `month` the email
-/// addresses that ingest once replaced ([`store::restore_addresses`]), from
-/// the month as the archive or the cache has it.
-pub async fn restore_mbox_month(
-    pool: &Pool,
-    client: &ArchiveClient,
-    list: &str,
-    month: &str,
-) -> Result<RestoreStats> {
-    let started = Instant::now();
-    let data = Arc::new(client.mbox_month_again(list, month).await?);
-    let ranges = {
-        let data = data.clone();
-        tokio::task::spawn_blocking(move || mbox::ranges(&data)).await?
-    };
-    let mut stats = RestoreStats {
-        fetched: ranges.len(),
-        ..Default::default()
-    };
-    for batch in ranges.chunks(BATCH) {
-        let batch = batch.to_vec();
-        let ids = {
-            let data = data.clone();
-            let batch = batch.clone();
-            tokio::task::spawn_blocking(move || {
-                batch
-                    .iter()
-                    .map(|range| parse::header_message_id(&data[range.clone()]))
-                    .collect::<Vec<_>>()
-            })
-            .await?
-        };
-        let known = stored_ids(pool, ids.iter().flatten().cloned().collect()).await?;
-        let todo: Vec<_> = batch
-            .into_iter()
-            .zip(ids)
-            .filter(|(_, id)| id.as_ref().is_some_and(|id| known.contains(id)))
-            .map(|(range, _)| range)
-            .collect();
-        stats.stored += todo.len();
-        let parsed = {
-            let data = data.clone();
-            tokio::task::spawn_blocking(move || {
-                todo.into_iter()
-                    .map(|range| parse::parse(&data[range]))
-                    .collect::<Vec<_>>()
-            })
-            .await?
-        };
-        let mut messages = Vec::with_capacity(parsed.len());
-        for result in parsed {
-            match result {
-                Ok(message) => messages.push(message),
-                Err(error) => {
-                    stats.failed += 1;
-                    tracing::warn!(%month, error = %format!("{error:#}"), "cannot parse a message");
-                }
-            }
-        }
-        restore_batch(pool, &messages, &mut stats).await?;
-    }
-    tracing::info!(
-        %list,
-        %month,
-        ?stats,
-        seconds = started.elapsed().as_secs_f64(),
-        "restored a month's email addresses"
-    );
-    Ok(stats)
-}
-
-/// Gives stored messages the email addresses that ingest once replaced
-/// ([`store::restore_addresses`]), each retrieved raw from the archive or
-/// the cache: those that came from thread pages rather than a month.
-pub async fn restore_messages(
-    pool: &Pool,
-    client: &ArchiveClient,
-    message_ids: &[String],
-) -> Result<RestoreStats> {
-    let started = Instant::now();
-    let mut stats = RestoreStats::default();
-    for batch in message_ids.chunks(THREAD_BATCH) {
-        let known = stored_ids(pool, batch.to_vec()).await?;
-        let mut raws = Vec::with_capacity(batch.len());
-        for id in batch.iter().filter(|id| known.contains(*id)) {
-            match client.raw_message(id).await {
-                Ok(raw) => {
-                    stats.fetched += 1;
-                    raws.push(raw);
-                }
-                Err(error) => {
-                    stats.failed += 1;
-                    tracing::warn!(message_id = %id, error = %format!("{error:#}"), "cannot retrieve a message");
-                }
-            }
-        }
-        stats.stored += raws.len();
-        let parsed = tokio::task::spawn_blocking(move || {
-            raws.iter().map(|raw| parse::parse(raw)).collect::<Vec<_>>()
-        })
-        .await?;
-        let mut messages = Vec::with_capacity(parsed.len());
-        for result in parsed {
-            match result {
-                Ok(message) => messages.push(message),
-                Err(error) => {
-                    stats.failed += 1;
-                    tracing::warn!(error = %format!("{error:#}"), "cannot parse a message");
-                }
-            }
-        }
-        restore_batch(pool, &messages, &mut stats).await?;
-    }
-    tracing::info!(
-        messages = message_ids.len(),
-        ?stats,
-        seconds = started.elapsed().as_secs_f64(),
-        "restored messages' email addresses"
-    );
-    Ok(stats)
-}
-
-/// Restores messages in one transaction and refreshes the threads whose
-/// subjects may have changed. A message that fails is counted and skipped.
-/// Without its refresh the batch rolls back, and fails for the job's retry
-/// to restore it again: a thread's subject gets its addresses back only
-/// from the refresh, and a run after a commit would find the messages
-/// restored and refresh nothing.
-async fn restore_batch(
-    pool: &Pool,
-    messages: &[ParsedMessage],
-    stats: &mut RestoreStats,
-) -> Result<()> {
-    if messages.is_empty() {
-        return Ok(());
-    }
-    let mut client = pool
-        .get()
-        .await
-        .context("cannot get a database connection")?;
-    let tx = client.transaction().await?;
-    let mut threads = BTreeSet::new();
-    for message in messages {
-        match store::restore_addresses(&tx, message).await {
-            Ok(store::Restored::Restored { thread_id }) => {
-                stats.restored += 1;
-                threads.insert(thread_id);
-            }
-            Ok(store::Restored::Differs) => stats.differs += 1,
-            Ok(store::Restored::Unchanged) => {}
-            Err(error) => {
-                stats.failed += 1;
-                tracing::warn!(
-                    message_id = %message.message_id,
-                    error = %format!("{error:#}"),
-                    "cannot restore a message's email addresses"
-                );
-            }
-        }
-    }
-    let ids: Vec<i64> = threads.into_iter().collect();
-    if !refresh(&tx, &ids).await? {
-        bail!("cannot refresh the restored messages' threads; the batch rolled back");
-    }
-    tx.commit().await?;
-    Ok(())
 }

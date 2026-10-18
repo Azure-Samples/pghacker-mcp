@@ -7,12 +7,9 @@ use std::sync::LazyLock;
 
 use pghacker_core::testing::TestDb;
 use pghacker_mail::parse::{self, ParsedMessage};
-use pghacker_mail::store::{self, Restored, StoreContext, Stored};
+use pghacker_mail::store::{self, StoreContext, Stored};
 use regex::Regex;
 use tokio_postgres::Client;
-
-mod common;
-use common::{store_as_once, stored_text};
 
 const MULTIPART: &[u8] = include_bytes!("fixtures/multipart_patch.eml");
 
@@ -1180,188 +1177,6 @@ async fn stored_text_keeps_addresses() {
     assert_eq!(emails, ["erin@example.org"]);
 }
 
-/// Restores a message in a transaction of its own, as a restore's batch
-/// does.
-async fn restore(client: &mut Client, msg: &ParsedMessage) -> Restored {
-    let tx = client.transaction().await.unwrap();
-    let restored = store::restore_addresses(&tx, msg).await.unwrap();
-    if let Restored::Restored { thread_id } = restored {
-        store::refresh_threads(&tx, &[thread_id]).await.unwrap();
-    }
-    tx.commit().await.unwrap();
-    restored
-}
-
-#[tokio::test]
-async fn restoring_gives_stored_text_its_addresses_back() {
-    let db = TestDb::create().await.unwrap();
-    let mut client = db.indexer().await.unwrap();
-    let msg = addressed_message();
-    store_each(&mut client, &[&msg]).await;
-    let written = stored_text(&client, "redact@example.org").await;
-    store_as_once(&client, "redact@example.org", msg.from_email.as_deref()).await;
-    let once = stored_text(&client, "redact@example.org").await;
-    assert!(once.contains(&"Ping [email]".to_owned()), "{once:#?}");
-    assert!(once.contains(&"erin".to_owned()), "{once:#?}");
-    client
-        .batch_execute("DELETE FROM graph_changes")
-        .await
-        .unwrap();
-
-    let restored = restore(&mut client, &msg).await;
-    assert!(
-        matches!(restored, Restored::Restored { .. }),
-        "{restored:?}"
-    );
-    assert_eq!(stored_text(&client, "redact@example.org").await, written);
-    // Its chunks are embedded again and its patches indexed again; the
-    // author's names, which decide who committed commits, go to the graph.
-    let (embedded, indexed): (i64, i64) = client
-        .query_one(
-            "SELECT (SELECT count(*) FROM message_chunks WHERE embedding IS NOT NULL),
-                    (SELECT count(*) FROM patches WHERE text_ids IS NOT NULL)",
-            &[],
-        )
-        .await
-        .map(|r| (r.get(0), r.get(1)))
-        .unwrap();
-    assert_eq!((embedded, indexed), (0, 0));
-    let author_changed: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT FROM graph_changes c JOIN messages m ON c.key = 'author:' || m.author_id)",
-            &[],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert!(author_changed);
-    // Again, nothing to do.
-    assert_eq!(restore(&mut client, &msg).await, Restored::Unchanged);
-    assert_eq!(stored_text(&client, "redact@example.org").await, written);
-}
-
-#[tokio::test]
-async fn restoring_leaves_text_that_differs() {
-    let db = TestDb::create().await.unwrap();
-    let mut client = db.indexer().await.unwrap();
-    let in_subject = raw_message(
-        "subject@example.org",
-        ALICE,
-        "Ping carol@example.org",
-        "Date: 1 Jun 2026 10:00:00 +0000\n",
-        "Plain text.\n",
-    );
-    let in_body = raw_message(
-        "body@example.org",
-        ALICE,
-        "Plain subject",
-        "Date: 1 Jun 2026 11:00:00 +0000\n",
-        "Ask carol@example.org.\n",
-    );
-    let plain = message("plain@example.org", BOB, "2 Jun 2026", "Plain", &[]);
-    let missing = message("missing@example.org", BOB, "3 Jun 2026", "Gone", &[]);
-    store_each(&mut client, &[&in_subject, &in_body, &plain]).await;
-    for msg in [&in_subject, &in_body] {
-        store_as_once(&client, &msg.message_id, msg.from_email.as_deref()).await;
-    }
-    // As if parsing or cleaning had changed since ingest: these fields
-    // aren't what ingest once made of the archive's.
-    client
-        .batch_execute(
-            "UPDATE messages SET subject = subject || ' (edited)' WHERE message_id = 'subject@example.org';
-             UPDATE messages SET body = body || 'Edited.' WHERE message_id = 'body@example.org';",
-        )
-        .await
-        .unwrap();
-    let before = stored_text(&client, "subject@example.org").await;
-    assert_eq!(restore(&mut client, &in_subject).await, Restored::Differs);
-    assert_eq!(stored_text(&client, "subject@example.org").await, before);
-    // Each field on its own: the cleaned body gets its address back, the
-    // edited body stays.
-    assert!(matches!(
-        restore(&mut client, &in_body).await,
-        Restored::Restored { .. }
-    ));
-    let (body, clean): (String, String) = client
-        .query_one(
-            "SELECT body, body_clean FROM messages WHERE message_id = 'body@example.org'",
-            &[],
-        )
-        .await
-        .map(|r| (r.get(0), r.get(1)))
-        .unwrap();
-    assert!(
-        body.starts_with("Ask [email].") && body.ends_with("Edited."),
-        "{body:?}"
-    );
-    assert_eq!(clean, "Ask carol@example.org.");
-    assert_eq!(restore(&mut client, &plain).await, Restored::Unchanged);
-    assert_eq!(restore(&mut client, &missing).await, Restored::Unchanged);
-}
-
-#[tokio::test]
-async fn concurrent_restores_of_a_thread_both_refresh_it() {
-    let db = TestDb::create().await.unwrap();
-    let mut client = db.indexer().await.unwrap();
-    let mut other = db.indexer().await.unwrap();
-    let root = raw_message(
-        "root@example.org",
-        ALICE,
-        "Ping carol@example.org",
-        "Date: 1 Jun 2026 10:00:00 +0000\n",
-        "Ask carol@example.org.\n",
-    );
-    let reply = raw_message(
-        "reply@example.org",
-        BOB,
-        "Re: Ping carol@example.org",
-        "Date: 2 Jun 2026 10:00:00 +0000\nIn-Reply-To: <root@example.org>\nReferences: <root@example.org>\n",
-        "Done, carol@example.org.\n",
-    );
-    let stored = store_each(&mut client, &[&root, &reply]).await;
-    let thread = stored[0].thread_id;
-    assert_eq!(stored[1].thread_id, thread);
-    for msg in [&root, &reply] {
-        store_as_once(&client, &msg.message_id, msg.from_email.as_deref()).await;
-    }
-    let tx = client.transaction().await.unwrap();
-    store::refresh_threads(&tx, &[thread]).await.unwrap();
-    tx.commit().await.unwrap();
-    assert_eq!(thread_subject(&client, thread).await, "Ping [email]");
-
-    // Each restores a message of the thread, as two batches restoring months
-    // that share it do; chunking it again locks the thread FOR KEY SHARE
-    // until the transaction ends. Then both refresh the thread.
-    let first = client.transaction().await.unwrap();
-    let second = other.transaction().await.unwrap();
-    for (tx, msg) in [(&first, &root), (&second, &reply)] {
-        let restored = store::restore_addresses(tx, msg).await.unwrap();
-        assert_eq!(restored, Restored::Restored { thread_id: thread });
-    }
-    tokio::join!(
-        async {
-            store::refresh_threads(&first, &[thread]).await.unwrap();
-            first.commit().await.unwrap();
-        },
-        async {
-            store::refresh_threads(&second, &[thread]).await.unwrap();
-            second.commit().await.unwrap();
-        },
-    );
-    assert_eq!(
-        thread_subject(&client, thread).await,
-        "Ping carol@example.org"
-    );
-}
-
-async fn thread_subject(client: &Client, id: i64) -> String {
-    client
-        .query_one("SELECT subject FROM threads WHERE id = $1", &[&id])
-        .await
-        .unwrap()
-        .get(0)
-}
-
 type ThreadStats = (i32, i32, String, String, i32, String, String);
 
 /// Message and participant counts, subject, key, version, first and last day.
@@ -1428,6 +1243,61 @@ async fn thread_statistics_follow_their_messages() {
     assert_eq!(subject, "[PATCH] Topic");
     assert_eq!(first, "2026-06-01");
     assert!(new_version > version);
+}
+
+#[tokio::test]
+async fn a_refresh_and_another_store_into_its_thread_do_not_deadlock() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let mut other = db.indexer().await.unwrap();
+    let watcher = db.indexer().await.unwrap();
+    let root = message("root@example.org", ALICE, "1 Jun 2026", "Topic", &[]);
+    let thread = store_each(&mut client, &[&root]).await[0].thread_id;
+    let first = message(
+        "r1@example.org",
+        BOB,
+        "2 Jun 2026",
+        "Re: Topic",
+        &["root@example.org"],
+    );
+    let second = message(
+        "r2@example.org",
+        ALICE,
+        "3 Jun 2026",
+        "Re: Topic",
+        &["root@example.org"],
+    );
+    // A transaction stores a reply, and updates the thread's counts.
+    let tx = client.transaction().await.unwrap();
+    let stored = store::upsert_message(&tx, &ctx(), &first).await.unwrap();
+    assert_eq!(stored.thread_id, thread);
+    tokio::join!(
+        // Another stores a reply too: inserting it locks the thread FOR KEY
+        // SHARE, and its count update waits for the first transaction.
+        async {
+            let tx = other.transaction().await.unwrap();
+            let stored = store::upsert_message(&tx, &ctx(), &second).await.unwrap();
+            assert_eq!(stored.thread_id, thread);
+            tx.commit().await.unwrap();
+        },
+        // Then the first refreshes the thread, which a FOR UPDATE lock would
+        // make wait for the second: a deadlock.
+        async {
+            let waiting = "SELECT count(*) FROM pg_stat_activity
+                           WHERE datname = current_database() AND wait_event_type = 'Lock'";
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while count(&watcher, waiting).await == 0 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the second store didn't wait"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            store::refresh_threads(&tx, &[thread]).await.unwrap();
+            tx.commit().await.unwrap();
+        },
+    );
+    assert_eq!(thread_stats(&client, thread).await.0, 3);
 }
 
 #[tokio::test]

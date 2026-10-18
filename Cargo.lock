@@ -2630,7 +2630,6 @@ dependencies = [
  "http",
  "include_dir",
  "pgvector",
- "regex",
  "reqwest",
  "rmcp",
  "rustls",

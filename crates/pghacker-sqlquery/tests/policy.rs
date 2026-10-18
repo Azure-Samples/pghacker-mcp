@@ -65,10 +65,7 @@ fn dangerous_function_families_are_refused() {
         ),
         ("delays", vec!["pg_sleep", "pg_sleep_for", "pg_sleep_until"]),
         ("notification", vec!["pg_notify"]),
-        (
-            "maintenance",
-            vec!["graph_request_full", "restore_addresses", "rethread_mail"],
-        ),
+        ("maintenance", vec!["graph_request_full", "rethread_mail"]),
         ("coordination", vec!["pg_export_snapshot"]),
         ("sequence", vec!["nextval", "setval"]),
         (

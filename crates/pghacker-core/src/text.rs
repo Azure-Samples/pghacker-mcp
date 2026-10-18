@@ -1,14 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Text helpers: truncation on character boundaries, whitespace-insensitive
-//! quote checks for citations, and recognizing the email redaction that
-//! ingest once applied.
-
-use std::borrow::Cow;
-use std::sync::LazyLock;
-
-use regex::Regex;
+//! Text helpers: truncation on character boundaries and whitespace-insensitive
+//! quote checks for citations.
 
 /// The Message-ID a commit's Discussion trailer names, as messages store it
 /// (no angle brackets): a postgr.es/m or postgresql.org/message-id link, or
@@ -92,29 +86,6 @@ pub fn quote_in(body: &str, quote: &str) -> bool {
     normalize_for_quote(body).contains(&quote)
 }
 
-static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[A-Za-z0-9._%+=-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}").unwrap()
-});
-
-/// `text` as ingest once stored it: email addresses replaced by `[email]`,
-/// Message-IDs in URLs (`/message-id/<id>`, `postgr.es/m/<id>`), which look
-/// like addresses, kept. Text is now stored as written; this recognizes the
-/// text stored before, to give it its addresses back.
-pub fn redact_emails(text: &str) -> Cow<'_, str> {
-    EMAIL.replace_all(text, |caps: &regex::Captures<'_>| {
-        let m = caps.get(0).unwrap();
-        let before = &text[..m.start()];
-        if before.ends_with('/')
-            || before.ends_with("message-id:")
-            || before.ends_with("Message-ID: <")
-        {
-            m.as_str().to_owned()
-        } else {
-            "[email]".to_owned()
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,15 +124,5 @@ mod tests {
         ));
         assert!(!quote_in(body, "we should commit this patch"));
         assert!(!quote_in(body, "Agreed."));
-    }
-
-    #[test]
-    fn redacts_addresses_but_not_message_id_urls() {
-        let text =
-            "Tom Lane <tgl@sss.pgh.pa.us> wrote. See https://postgr.es/m/CA+abc=d@mail.gmail.com";
-        assert_eq!(
-            redact_emails(text),
-            "Tom Lane <[email]> wrote. See https://postgr.es/m/CA+abc=d@mail.gmail.com"
-        );
     }
 }

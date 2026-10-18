@@ -2082,8 +2082,8 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
             .await?;
             if moved["names"].is_array() {
                 // The names count each message under its sender's name as
-                // stored. That is the logged names' unless restore_addresses
-                // gave the moved messages' names their addresses back since.
+                // stored, not as logged: a merge logged while stored mail
+                // lacked its senders' addresses logged the names without them.
                 let names: Vec<(String, i32)> = tx
                     .query(
                         "SELECT from_name, count(*)::int FROM messages WHERE id = ANY ($1) GROUP BY from_name",

@@ -269,22 +269,6 @@ pub fn display_name(name: &str, email: Option<&str>) -> String {
     }
 }
 
-/// The name ingest once stored for a sender: the display name without its
-/// addresses, else the address's local part. Names are now stored as
-/// written; this recognizes the names stored before, to give them their
-/// addresses back.
-pub fn display_name_without_addresses(name: &str, email: Option<&str>) -> String {
-    let name = decode_encoded_words(name);
-    let name = trim_name(clean_header(&ADDRESS.replace_all(&name, "")));
-    if name.chars().any(char::is_alphanumeric) {
-        return name;
-    }
-    match email.and_then(|e| e.split('@').next()) {
-        Some(local) if !local.is_empty() => local.to_owned(),
-        _ => "unknown".to_owned(),
-    }
-}
-
 /// A name without empty brackets, or quotes and commas around it.
 fn trim_name(mut name: String) -> String {
     loop {

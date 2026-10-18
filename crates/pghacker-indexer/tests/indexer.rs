@@ -7,7 +7,7 @@
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
-use pghacker_indexer::{Indexer, addresses, duplicates, extraction, graph, jobs, sources};
+use pghacker_indexer::{Indexer, duplicates, extraction, graph, jobs, sources};
 use serde_json::{Value, json};
 
 const FIXTURE: &str = r#"
@@ -931,6 +931,32 @@ async fn merges_are_logged_and_undone() {
 }
 
 #[tokio::test]
+async fn undoing_a_merge_counts_the_names_as_stored() {
+    let (db, indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    let merged = extraction::merge_authors(
+        &indexer,
+        args(json!({ "from_id": 3, "into_id": 2, "reason": "Same person, work address" })),
+    )
+    .await
+    .unwrap();
+    // A merge logged while stored mail lacked its senders' addresses logged
+    // the names without them, which the messages have since.
+    client
+        .batch_execute(
+            "UPDATE messages SET from_name = 'Bob R. (bob@work.example.org)' WHERE id = 103;
+             UPDATE author_names SET name = 'Bob R. (bob@work.example.org)'
+             WHERE author_id = 2 AND name = 'Bob R.';",
+        )
+        .await
+        .unwrap();
+    extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
+        .await
+        .unwrap();
+    assert_eq!(miscounted_names(&client).await, 0);
+}
+
+#[tokio::test]
 async fn chained_author_merges_are_undone_last_first() {
     let (db, indexer) = corpus().await;
     let client = db.indexer().await.unwrap();
@@ -1484,86 +1510,6 @@ async fn the_history_sync_fetches_and_applies_new_commits() {
     assert_eq!(listed["sources"], json!([]));
 }
 
-/// Erin's message from a month and Dave's from a thread page, each its
-/// author's only one, in the cache (no network) and stored as ingest once
-/// stored them; with Erin's and Dave's authors.
-async fn stored_before_addresses(
-    db: &TestDb,
-    indexer: &Indexer,
-) -> (tokio_postgres::Client, i64, i64) {
-    let month = "From list-owner+archive@lists.example.org Mon Jun 01 10:00:00 2026
-From: \"erin@example.org\" <erin@example.org>
-Subject: Ping frank@example.org
-Message-ID: <j1@example.org>
-Date: Mon, 1 Jun 2026 10:00:00 +0000
-
-Ask carol@example.org, please.
-";
-    let raw = "From dave@example.org Thu Jun  4 10:00:00 2026
-From: <dave@example.org>
-Subject: Seed by dave@example.org
-Message-ID: <t1@example.org>
-Date: Thu, 4 Jun 2026 10:00:00 +0000
-
-Write to dave@example.org.
-";
-    for (path, text) in [
-        (indexer.archive.mbox_path("pgsql-hackers", "2026-06"), month),
-        (indexer.archive.raw_message_path("t1@example.org"), raw),
-    ] {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-    pghacker_mail::ingest::ingest_mbox_month(
-        &indexer.pool,
-        &indexer.archive,
-        "pgsql-hackers",
-        "2026-06",
-        None,
-        false,
-    )
-    .await
-    .unwrap();
-    let mut client = db.indexer().await.unwrap();
-    {
-        let tx = client.transaction().await.unwrap();
-        let ctx = pghacker_mail::store::StoreContext {
-            list: "pgsql-hackers".into(),
-            source_id: None,
-            archive_month: None,
-        };
-        let message = pghacker_mail::parse::parse(raw.as_bytes()).unwrap();
-        pghacker_mail::store::upsert_message(&tx, &ctx, &message)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-    }
-    client
-        .batch_execute(
-            "UPDATE messages SET subject = 'Ping [email]', from_name = 'erin',
-                 body = replace(body, 'carol@example.org', '[email]'),
-                 body_clean = replace(body_clean, 'carol@example.org', '[email]')
-             WHERE message_id = 'j1@example.org';
-             UPDATE messages SET subject = 'Seed by [email]', from_name = 'dave',
-                 body = replace(body, 'dave@example.org', '[email]'),
-                 body_clean = replace(body_clean, 'dave@example.org', '[email]')
-             WHERE message_id = 't1@example.org';
-             UPDATE author_names SET name = split_part(name, '@', 1);
-             UPDATE authors SET display_name = split_part(display_name, '@', 1);",
-        )
-        .await
-        .unwrap();
-    let row = client
-        .query_one(
-            "SELECT (SELECT author_id FROM messages WHERE message_id = 'j1@example.org'),
-                    (SELECT author_id FROM messages WHERE message_id = 't1@example.org')",
-            &[],
-        )
-        .await
-        .unwrap();
-    (client, row.get(0), row.get(1))
-}
-
 /// Senders' names whose count isn't their author's messages under the name.
 async fn miscounted_names(client: &tokio_postgres::Client) -> i64 {
     client
@@ -1576,128 +1522,6 @@ async fn miscounted_names(client: &tokio_postgres::Client) -> i64 {
         .await
         .unwrap()
         .get(0)
-}
-
-/// Erin's and Dave's messages restored: subject, sender's name, and their
-/// author's display name.
-async fn assert_restored(client: &tokio_postgres::Client) {
-    let restored: Vec<(String, String, String)> = client
-        .query(
-            "SELECT m.subject, m.from_name, a.display_name FROM messages m JOIN authors a ON a.id = m.author_id
-             ORDER BY m.message_id",
-            &[],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|r| (r.get(0), r.get(1), r.get(2)))
-        .collect();
-    assert_eq!(
-        restored,
-        [
-            (
-                "Ping frank@example.org".to_owned(),
-                "erin@example.org".to_owned(),
-                "erin@example.org".to_owned()
-            ),
-            (
-                "Seed by dave@example.org".to_owned(),
-                "dave@example.org".to_owned(),
-                "dave@example.org".to_owned()
-            ),
-        ]
-    );
-}
-
-#[tokio::test]
-async fn restoring_addresses_queues_jobs_that_restore_them() {
-    use std::time::{Duration, Instant};
-    use tokio_util::sync::CancellationToken;
-    let db = TestDb::create().await.unwrap();
-    let indexer = indexer(&db).await;
-    let (client, erin, dave) = stored_before_addresses(&db, &indexer).await;
-    // Erin's message is restored while merged into Dave, and the merge is
-    // undone after.
-    let merged = extraction::merge_authors(
-        &indexer,
-        args(json!({ "from_id": erin, "into_id": dave, "reason": "Same person, another address" })),
-    )
-    .await
-    .unwrap();
-
-    let queued = addresses::queue_restore(&client).await.unwrap();
-    assert_eq!((queued.months, queued.batches, queued.messages), (1, 1, 1));
-    let again = addresses::queue_restore(&client).await.unwrap();
-    assert_eq!((again.months, again.batches), (0, 0), "queued ones stay");
-    let shutdown = CancellationToken::new();
-    let workers = tokio::spawn(jobs::run(indexer.clone(), 2, shutdown.clone()));
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let (done, failed): (i64, i64) = client
-            .query_one(
-                "SELECT count(*) FILTER (WHERE state = 'done'), count(*) FILTER (WHERE state = 'failed')
-                 FROM jobs WHERE kind = 'restore_addresses'",
-                &[],
-            )
-            .await
-            .map(|r| (r.get(0), r.get(1)))
-            .unwrap();
-        assert_eq!(failed, 0);
-        if done == 2 {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the restore jobs didn't finish");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(30), workers)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
-        .await
-        .unwrap();
-    assert_eq!(miscounted_names(&client).await, 0);
-    assert_restored(&client).await;
-    // Finished ones are queued again.
-    let requeued = addresses::queue_restore(&client).await.unwrap();
-    assert_eq!((requeued.months, requeued.batches), (1, 1));
-}
-
-#[tokio::test]
-async fn names_stay_counted_through_a_restore_then_a_merge() {
-    let db = TestDb::create().await.unwrap();
-    let indexer = indexer(&db).await;
-    let (client, erin, dave) = stored_before_addresses(&db, &indexer).await;
-    let month = pghacker_mail::ingest::restore_mbox_month(
-        &indexer.pool,
-        &indexer.archive,
-        "pgsql-hackers",
-        "2026-06",
-    )
-    .await
-    .unwrap();
-    let pages = pghacker_mail::ingest::restore_messages(
-        &indexer.pool,
-        &indexer.archive,
-        &["t1@example.org".to_owned()],
-    )
-    .await
-    .unwrap();
-    assert_eq!((month.restored, pages.restored), (1, 1));
-    let merged = extraction::merge_authors(
-        &indexer,
-        args(json!({ "from_id": erin, "into_id": dave, "reason": "Same person, another address" })),
-    )
-    .await
-    .unwrap();
-    assert_eq!(miscounted_names(&client).await, 0);
-    extraction::undo_merge(&indexer, args(json!({ "merge_id": merged["merge_id"] })))
-        .await
-        .unwrap();
-    assert_eq!(miscounted_names(&client).await, 0);
-    assert_restored(&client).await;
 }
 
 /// Runs the jobs, as the leading indexer does, until every patch_series job
