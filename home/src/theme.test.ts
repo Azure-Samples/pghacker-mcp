@@ -6,13 +6,12 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import {
-  DARK_SCHEME_QUERY,
   THEME_STORAGE_KEY,
   applyTheme,
-  parseThemePreference,
-  readPreference,
-  resolveTheme,
-  writePreference,
+  otherTheme,
+  parseTheme,
+  readTheme,
+  writeTheme,
   type KeyValueStore,
 } from "./theme.ts";
 
@@ -40,18 +39,17 @@ const shown = (root: ReturnType<typeof fakeRoot>) => ({
 
 const STORED = [null, "light", "dark", "system", "Dark", ""];
 
-test("the page is light unless dark or the system's scheme is chosen", () => {
-  assert.equal(parseThemePreference(null), "light");
-  assert.equal(parseThemePreference("light"), "light");
-  assert.equal(parseThemePreference("dark"), "dark");
-  assert.equal(parseThemePreference("system"), "system");
-  assert.equal(parseThemePreference("Dark"), "light");
-  for (const systemDark of [false, true]) {
-    assert.equal(resolveTheme("light", systemDark), "light");
-    assert.equal(resolveTheme("dark", systemDark), "dark");
-  }
-  assert.equal(resolveTheme("system", false), "light");
-  assert.equal(resolveTheme("system", true), "dark");
+test("the page is light unless dark is kept, a kept \"system\" included", () => {
+  assert.equal(parseTheme(null), "light");
+  assert.equal(parseTheme("light"), "light");
+  assert.equal(parseTheme("dark"), "dark");
+  assert.equal(parseTheme("system"), "light");
+  assert.equal(parseTheme("Dark"), "light");
+});
+
+test("the toggle switches between the two themes", () => {
+  assert.equal(otherTheme("light"), "dark");
+  assert.equal(otherTheme("dark"), "light");
 });
 
 test("a theme is the dark class and the color scheme on <html>", () => {
@@ -62,16 +60,16 @@ test("a theme is the dark class and the color scheme on <html>", () => {
   assert.deepEqual(shown(root), { theme: "light", colorScheme: "light" });
 });
 
-test("the choice is kept, and storage that fails leaves the page light", () => {
+test("the theme is kept, and storage that fails leaves the page light", () => {
   const items = new Map<string, string>();
   const store: KeyValueStore = {
     getItem: (key) => items.get(key) ?? null,
     setItem: (key, value) => void items.set(key, value),
   };
-  assert.equal(readPreference(store), "light");
-  writePreference(store, "system");
-  assert.equal(items.get(THEME_STORAGE_KEY), "system");
-  assert.equal(readPreference(store), "system");
+  assert.equal(readTheme(store), "light");
+  writeTheme(store, "dark");
+  assert.equal(items.get(THEME_STORAGE_KEY), "dark");
+  assert.equal(readTheme(store), "dark");
 
   const refusing: KeyValueStore = {
     getItem: () => {
@@ -81,9 +79,9 @@ test("the choice is kept, and storage that fails leaves the page light", () => {
       throw new Error("QuotaExceededError");
     },
   };
-  assert.equal(readPreference(refusing), "light");
-  assert.doesNotThrow(() => writePreference(refusing, "dark"));
-  assert.equal(readPreference(undefined), "light");
+  assert.equal(readTheme(refusing), "light");
+  assert.doesNotThrow(() => writeTheme(refusing, "dark"));
+  assert.equal(readTheme(undefined), "light");
 });
 
 test("theme-boot.js shows the theme that theme.ts would, before the page's script", () => {
@@ -101,21 +99,13 @@ test("theme-boot.js shows the theme that theme.ts would, before the page's scrip
     vm.runInNewContext(source, context);
     return shown(root);
   };
-  const scheme = (systemDark: boolean) => (query: string) => ({ matches: query === DARK_SCHEME_QUERY && systemDark });
 
   for (const stored of STORED) {
-    for (const systemDark of [false, true]) {
-      const expected = resolveTheme(parseThemePreference(stored), systemDark);
-      const localStorage = { getItem: (key: string) => (key === THEME_STORAGE_KEY ? stored : null) };
-      assert.deepEqual(
-        boot({ localStorage, matchMedia: scheme(systemDark) }),
-        { theme: expected, colorScheme: expected },
-        `kept ${JSON.stringify(stored)}, system ${systemDark ? "dark" : "light"}`,
-      );
-    }
+    const expected = parseTheme(stored);
+    const localStorage = { getItem: (key: string) => (key === THEME_STORAGE_KEY ? stored : null) };
+    assert.deepEqual(boot({ localStorage }), { theme: expected, colorScheme: expected }, `kept ${JSON.stringify(stored)}`);
   }
 
-  // No storage, or no matchMedia: light, as theme.ts.
-  assert.deepEqual(boot({ matchMedia: scheme(true) }, { refuseStorage: true }), { theme: "light", colorScheme: "light" });
-  assert.deepEqual(boot({ localStorage: { getItem: () => "system" } }), { theme: "light", colorScheme: "light" });
+  // No storage: light, as theme.ts.
+  assert.deepEqual(boot({}, { refuseStorage: true }), { theme: "light", colorScheme: "light" });
 });

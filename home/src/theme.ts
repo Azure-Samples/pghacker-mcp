@@ -1,37 +1,30 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-/**
- * The colour theme: light, dark, or the system's, kept in localStorage. The
- * page is light unless someone chooses otherwise. theme-boot.js shows the
- * choice before the first paint, with the same key and rules; the theme menu
- * changes it.
+/*
+ * The colour theme: light or dark, kept in localStorage. The page is light
+ * unless someone switches it to dark with the toggle in the top bar.
+ * theme-boot.js shows the kept theme before the first paint, with the same
+ * key and rule; the toggle changes it.
  *
  * The theme is the `dark` class on <html>, which tokens.css gives the dark
  * tokens, and <html>'s color-scheme.
  */
 
-/** The theme that someone chose. */
-export type ThemePreference = "light" | "dark" | "system";
-
 /** The theme that the page shows. */
 export type Theme = "light" | "dark";
 
-/** Where the choice is kept; theme-boot.js reads the same key. */
+/** Where the theme is kept; theme-boot.js reads the same key. */
 export const THEME_STORAGE_KEY = "pghacker-mcp.theme";
 
-/** The media query for the system's dark scheme. */
-export const DARK_SCHEME_QUERY = "(prefers-color-scheme: dark)";
-
-/** The kept choice: light unless it's "dark" or "system". */
-export function parseThemePreference(value: string | null): ThemePreference {
-  return value === "dark" || value === "system" ? value : "light";
+/** The kept theme: dark if "dark" is kept, light otherwise, "system" from before included. */
+export function parseTheme(value: string | null): Theme {
+  return value === "dark" ? "dark" : "light";
 }
 
-/** The theme that `preference` shows, given whether the system's scheme is dark. */
-export function resolveTheme(preference: ThemePreference, systemDark: boolean): Theme {
-  if (preference === "system") return systemDark ? "dark" : "light";
-  return preference;
+/** The other theme, which the toggle switches to. */
+export function otherTheme(theme: Theme): Theme {
+  return theme === "dark" ? "light" : "dark";
 }
 
 /** What {@link applyTheme} changes: <html>. */
@@ -59,22 +52,22 @@ export function browserStorage(): KeyValueStore | undefined {
 }
 
 /**
- * The kept choice. The browser can refuse storage, in a private window or
- * when it's full: the page is light then, and a choice lasts until it reloads.
+ * The kept theme. The browser can refuse storage, in a private window or
+ * when it's full: the page is light then, and a switch lasts until it reloads.
  */
-export function readPreference(store: KeyValueStore | undefined): ThemePreference {
+export function readTheme(store: KeyValueStore | undefined): Theme {
   try {
-    return parseThemePreference(store?.getItem(THEME_STORAGE_KEY) ?? null);
+    return parseTheme(store?.getItem(THEME_STORAGE_KEY) ?? null);
   } catch {
     return "light";
   }
 }
 
-/** Keeps `preference`, unless storage fails. */
-export function writePreference(store: KeyValueStore | undefined, preference: ThemePreference): void {
+/** Keeps `theme`, unless storage fails. */
+export function writeTheme(store: KeyValueStore | undefined, theme: Theme): void {
   try {
-    store?.setItem(THEME_STORAGE_KEY, preference);
+    store?.setItem(THEME_STORAGE_KEY, theme);
   } catch {
-    // The choice lasts until the page reloads.
+    // The theme lasts until the page reloads.
   }
 }

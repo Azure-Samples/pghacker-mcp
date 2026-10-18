@@ -5,7 +5,7 @@ import { useState } from "react";
 import { PRODUCT } from "../content.ts";
 import { readCopyright, readPrivacyUrl } from "../footer.ts";
 import { GitHubLink } from "./GitHubLink.tsx";
-import { ThemeMenu } from "./ThemeMenu.tsx";
+import { ThemeToggle } from "./ThemeToggle.tsx";
 
 /** The mark: a speech bubble with a quotation, for cited answers, on the brand colour. */
 export function BrandMark({ size = 32 }: { size?: number }) {
@@ -34,7 +34,7 @@ export function TopBar() {
         </a>
         <div className="topbar-actions">
           <GitHubLink />
-          <ThemeMenu />
+          <ThemeToggle />
         </div>
       </div>
     </header>
