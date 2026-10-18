@@ -16,8 +16,17 @@ export const PRODUCT = {
   citationNote: "Every answer cites its evidence: Message-IDs with verbatim quotes, and file paths with line numbers.",
 } as const;
 
-/** What the service runs on, said under the headline. */
-export const POWERED_BY = { prefix: "Powered by", name: "HorizonDB" } as const;
+/**
+ * What the service runs on, said beside HorizonDB's logo above the connect
+ * panel. The logo is Azure HorizonDB's product icon, loaded from Microsoft's
+ * CDN, where azure.microsoft.com/products/horizondb gets it; the page's CSP
+ * allows that host (scripts/lib/edge.mjs).
+ */
+export const POWERED_BY = {
+  prefix: "Powered by",
+  name: "HorizonDB",
+  logo: "https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24",
+} as const;
 
 export type CapabilityIcon = "history" | "people" | "code" | "sql";
 

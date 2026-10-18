@@ -44,11 +44,14 @@ export const CACHE = {
   none: "no-store",
 };
 
-/** The page loads only its own files and is never framed. */
+/**
+ * The page loads only its own files, and HorizonDB's logo from Microsoft's
+ * CDN (home/src/content.ts), and is never framed.
+ */
 export const SECURITY_HEADERS = {
   "content-security-policy": [
     "default-src 'self'",
-    "img-src 'self' data:",
+    "img-src 'self' data: https://cdn-dynmedia-1.microsoft.com",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'none'",

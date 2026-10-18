@@ -40,52 +40,58 @@
 
 /* --- Powered by ----------------------------------------------------------- */
 
-/* A ring from the accent to teal around the card's own surface, with a glow in the same two colours. */
+/*
+ * HorizonDB's logo and name, centered between the lede and the connect panel
+ * on a horizon: hairlines in the logo's blue and cyan, fading out to each side.
+ */
 .powered-by {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 820px;
+  margin-top: 30px;
+}
+
+.powered-by-rule {
+  flex: 1 1 0;
+  min-width: 24px;
+  max-width: 200px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hdb-blue));
+  filter: drop-shadow(0 0 3px var(--hdb-glow));
+}
+
+.powered-by-rule:last-child {
+  background: linear-gradient(90deg, var(--hdb-cyan), transparent);
+}
+
+.powered-by-lockup {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 10px;
-  height: 38px;
-  margin-top: 28px;
-  padding: 0 18px 0 5px;
-  border: 1.5px solid transparent;
-  border-radius: 999px;
-  background:
-    linear-gradient(var(--card), var(--card)) padding-box,
-    linear-gradient(110deg, var(--horizon-from), var(--horizon-to)) border-box;
-  box-shadow:
-    0 0 0 3px var(--horizon-halo),
-    -10px 6px 22px -8px var(--horizon-glow-from),
-    10px 6px 22px -8px var(--horizon-glow-to);
-  color: var(--fg-2);
-  font-size: 13.5px;
-  white-space: nowrap;
+  font-size: 14.5px;
 }
 
-.powered-by-mark {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  place-items: center;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--horizon-from), var(--horizon-to));
-  color: #ffffff;
+.powered-by-logo {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
 }
 
-.powered-by-mark svg {
-  width: 14px;
-  height: 14px;
+.powered-by-prefix {
+  color: var(--muted-foreground);
 }
 
-.powered-by strong {
-  color: var(--horizon-text);
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+.powered-by-name {
+  color: var(--hdb-text);
+  font-weight: 650;
 }
 
 .powered-by + .connect {
-  margin-top: 22px;
+  margin-top: 24px;
 }
 
 /* --- The connect panel --------------------------------------------------- */

@@ -10,8 +10,10 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
+import { POWERED_BY } from "../home/src/content.ts";
 import {
-  CACHE, createEdgeServer, createHomeHandler, parseCopyright, parsePrivacyUrl, withCopyright, withPrivacy, withStars,
+  CACHE, SECURITY_HEADERS, createEdgeServer, createHomeHandler, parseCopyright, parsePrivacyUrl, withCopyright, withPrivacy,
+  withStars,
 } from "../scripts/lib/edge.mjs";
 
 const PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" src="/static/index-abc.js"></script>';
@@ -100,6 +102,16 @@ test("the home page is checked again on each visit, under a strict policy", asyn
   assert.equal(head.status, 200);
   assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(PAGE)));
   assert.equal(await head.text(), "");
+});
+
+test("images may come from HorizonDB's logo's host, and from no other", () => {
+  const imgSrc = SECURITY_HEADERS["content-security-policy"]
+    .split("; ")
+    .find((directive) => directive.startsWith("img-src "))
+    .split(" ")
+    .slice(1);
+  assert.equal(new URL(POWERED_BY.logo).protocol, "https:");
+  assert.deepEqual(imgSrc.filter((source) => source.includes("://")), [new URL(POWERED_BY.logo).origin]);
 });
 
 test("the page's views are heard, for usage telemetry: GETs of the page alone", async (t) => {
