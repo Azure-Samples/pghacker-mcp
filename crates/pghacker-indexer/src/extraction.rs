@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use pgvector::HalfVector;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -20,6 +20,7 @@ use tokio_postgres::GenericClient;
 use uuid::Uuid;
 
 use pghacker_core::text::{quote_in, truncate_chars};
+use pghacker_mail::anchors::development_version;
 
 use crate::Indexer;
 use crate::lanes::{self, Lane, NEEDS_EXTRACTION, Order};
@@ -187,7 +188,7 @@ pub struct FeatureIn {
     /// What the thread shows by its last messages (see status_signals). A
     /// reused feature keeps the most advanced status any of its threads showed.
     pub status: FeatureStatus,
-    /// The major version it targeted or shipped in, such as "19". A feature's release comes from its thread with the latest message, saved by the name it shipped as: 6.6 as 7.0, 7.5 as 8.0, 8.5 as 9.0, 9.7 as 10.
+    /// The one major version it shipped in, or targets until it's committed: "9.6" before 10 (two parts), "19" from 10 on. A committed feature shipped in the release whose development it was committed in, even if it was back-patched: never give a branch it was back-ported to, a list or a range of versions, or a minor release (17.2, 8.0.1), which aren't saved. Leave it out when the thread doesn't settle it. It replaces the feature's release, by the name it shipped as: 6.6 as 7.0, 7.5 as 8.0, 8.5 as 9.0, 9.7 as 10.
     #[serde(default)]
     pub release: Option<String>,
     /// Paths of files whose changes implement it, from this thread's patches or file anchors.
@@ -577,7 +578,7 @@ async fn commit_signals(client: &impl GenericClient, thread_id: i64) -> Result<V
 async fn existing_extracts(client: &impl GenericClient, thread_id: i64) -> Result<Value> {
     let features: Vec<Value> = client
         .query(
-            "SELECT f.id, f.slug, f.name, f.status, f.release FROM feature_threads ft
+            "SELECT f.id, f.slug, f.name, f.status, f.release, f.release_at FROM feature_threads ft
              JOIN features f ON f.id = ft.feature_id WHERE ft.thread_id = $1 ORDER BY f.id",
             &[&thread_id],
         )
@@ -585,7 +586,8 @@ async fn existing_extracts(client: &impl GenericClient, thread_id: i64) -> Resul
         .iter()
         .map(|row| {
             json!({ "id": row.get::<_, i64>(0), "slug": row.get::<_, String>(1), "name": row.get::<_, String>(2),
-                    "status": row.get::<_, String>(3), "release": row.get::<_, Option<String>>(4) })
+                    "status": row.get::<_, String>(3), "release": row.get::<_, Option<String>>(4),
+                    "release_evidence_at": row.get::<_, Option<DateTime<Utc>>>(5) })
         })
         .collect();
     let decisions: Vec<Value> = client
@@ -696,6 +698,9 @@ pub struct Candidate {
     pub summary: String,
     pub status: Option<String>,
     pub release: Option<String>,
+    /// When the thread that gave its release ended (features.release_at).
+    #[serde(default)]
+    pub release_evidence_at: Option<DateTime<Utc>>,
     /// Cosine similarity of the embeddings, when both have one.
     pub semantic: Option<f64>,
     /// Trigram similarity of the names.
@@ -718,8 +723,18 @@ async fn candidates(
     embedding: Option<&HalfVector>,
 ) -> Result<Vec<Candidate>> {
     let (table, label, summary, extra) = match kind {
-        DraftKind::Feature => ("features", "name", "description", "status, release"),
-        DraftKind::Decision => ("decisions", "title", "outcome", "NULL::text, NULL::text"),
+        DraftKind::Feature => (
+            "features",
+            "name",
+            "description",
+            "status, release, release_at",
+        ),
+        DraftKind::Decision => (
+            "decisions",
+            "title",
+            "outcome",
+            "NULL::text, NULL::text, NULL::timestamptz",
+        ),
     };
     let mut ids: Vec<i64> = client
         .query(
@@ -786,8 +801,9 @@ async fn candidates(
             summary: truncate_chars(&row.get::<_, String>(2), 400).to_owned(),
             status: row.get(3),
             release: row.get(4),
-            name_similarity: row.get::<_, Option<f64>>(5).unwrap_or(0.0),
-            semantic: row.get(6),
+            release_evidence_at: row.get(5),
+            name_similarity: row.get::<_, Option<f64>>(6).unwrap_or(0.0),
+            semantic: row.get(7),
         })
         .collect();
     list.sort_by(|a, b| {
@@ -859,6 +875,7 @@ pub async fn match_extracts(indexer: &Indexer, args: MatchArgs) -> Result<Value>
             "near_duplicate": found.iter().any(Candidate::near_duplicate),
             "candidates": found.iter().map(|c| json!({
                 "id": c.id, "name": c.label, "summary": c.summary, "status": c.status, "release": c.release,
+                "release_evidence_at": c.release_evidence_at,
                 "semantic": c.semantic.map(|s| (s * 1000.0).round() / 1000.0),
                 "name_similarity": (c.name_similarity * 1000.0).round() / 1000.0,
                 "near_duplicate": c.near_duplicate(),
@@ -885,6 +902,36 @@ struct ThreadMessage {
 
 static SLUG: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new("^[a-z0-9]+(-[a-z0-9]+)*$").unwrap());
+
+/// A release as one major version: `9.6` before 10, `17` from 10 on, after
+/// an optional `v` or `PG`. A major's first release (`17.0`, `9.6.0`), betas,
+/// release candidates and development (`18beta1`) are the major. A list, a
+/// range, a minor release (`17.2`, `8.0.1`) or a bare `8` isn't one.
+static MAJOR_RELEASE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:v|pg ?)?(?:([6-9])\.(\d)(?:\.0)?|([1-9]\d)(?:\.0)?)(?:beta\d*|rc\d*|devel)?$",
+    )
+    .unwrap()
+});
+
+/// `release` as the one major version that submit saves, or None. Before 10,
+/// one that shipped, or the development name that `shipped_release()`
+/// renames (6.6, 7.5, 8.5 or 9.7); from 10, up to `development` + 2, as mail
+/// anchors bound the releases they name.
+fn major_release(release: &str, development: i32) -> Option<String> {
+    let caps = MAJOR_RELEASE.captures(release.trim())?;
+    if let (Some(major), Some(minor)) = (caps.get(1), caps.get(2)) {
+        let last = match major.as_str() {
+            "6" => 6,
+            "7" | "8" => 5,
+            _ => 7,
+        };
+        let minor: u32 = minor.as_str().parse().ok()?;
+        return (minor <= last).then(|| format!("{}.{minor}", major.as_str()));
+    }
+    let major: i32 = caps.get(3)?.as_str().parse().ok()?;
+    (major <= development + 2).then(|| major.to_string())
+}
 
 struct Draft {
     thread_id: i64,
@@ -917,9 +964,10 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     let thread_version: i32 = lease_record
         .version_of(args.thread_id)
         .unwrap_or_else(|| current.get(0));
-    // How recent this thread's evidence is: a release it gives replaces one
-    // only from evidence at least as recent.
+    // How recent this thread's evidence is, which release_at records, and
+    // which releases it can name: up to two past the one in development.
     let evidence_at: Option<DateTime<Utc>> = current.get(1);
+    let development = development_version(evidence_at.unwrap_or_else(Utc::now).year());
 
     if let Some(reason) = &args.skip_reason {
         if !args.features.is_empty() || !args.decisions.is_empty() || !args.positions.is_empty() {
@@ -1233,6 +1281,30 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                           "next": "Fix every error and call submit_extracts again; nothing was saved." }));
     }
 
+    // Each feature's release, if it's one major version: the feature is
+    // saved without any other, and the result lists it.
+    let releases: Vec<Option<String>> = args
+        .features
+        .iter()
+        .map(|f| given(&f.release).and_then(|r| major_release(r, development)))
+        .collect();
+    let releases_not_saved: Vec<Value> = args
+        .features
+        .iter()
+        .zip(&releases)
+        .filter(|(_, release)| release.is_none())
+        .filter_map(|(feature, _)| {
+            let slug = match feature.action {
+                Action::New => feature.slug.clone(),
+                Action::Reuse => feature
+                    .existing_id
+                    .and_then(|id| existing_features.get(&id).cloned()),
+            };
+            Some(json!({ "slug": slug, "release": given(&feature.release)?,
+                         "why": format!("not one major version: 9.6 before 10, or 10 to {}", development + 2) }))
+        })
+        .collect();
+
     // Embeddings for what's new, before the transaction.
     let mut texts = Vec::new();
     for feature in args.features.iter().filter(|f| f.action == Action::New) {
@@ -1308,12 +1380,12 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             .collect()
     };
     let mut citation_rows = Vec::new();
-    for feature in &args.features {
+    for (feature, release) in args.features.iter().zip(&releases) {
         let id = match feature.action {
             Action::New => {
                 let slug = feature.slug.clone().expect("validated");
                 let embedding = vectors.next().flatten();
-                let release_at = feature.release.as_ref().and(evidence_at);
+                let release_at = release.as_ref().and(evidence_at);
                 // A release by the name it shipped as (migration 0021): 9.0, not 8.5.
                 let id: i64 = tx
                     .query_one(
@@ -1321,7 +1393,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                                                created_by, model)
                          VALUES ($1, $2, $3, $4, shipped_release($5), $6, $7, $8, $9) RETURNING id",
                         &[&slug, &feature.name.trim(), &feature.description.trim(), &feature.status.as_str(),
-                          &feature.release, &release_at, &embedding, &session, &model],
+                          release, &release_at, &embedding, &session, &model],
                     )
                     .await?
                     .get(0);
@@ -1347,22 +1419,22 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             Action::Reuse => {
                 let id = feature.existing_id.expect("validated");
                 // A status only moves forward: a follow-up thread doesn't undo a
-                // commit. A release is replaced only by one from evidence at least
-                // as recent, an undated thread's only fills a missing one: an
-                // older thread extracted later doesn't undo a newer one's. It's
-                // saved by the name it shipped as.
+                // commit. A release given replaces the feature's, whatever its
+                // evidence's date: the extractor judges it, and an older thread
+                // extracted later can correct a newer one's, as the backfill
+                // reads newest first. It's saved by the name it shipped as.
+                // release_at dates its latest evidence: a thread that states the
+                // same release again only moves it later.
                 tx.execute(
                     "UPDATE features SET
                          status = CASE WHEN pg_temp.status_rank($2) > pg_temp.status_rank(status) THEN $2 ELSE status END,
-                         release = CASE WHEN $3::text IS NOT NULL
-                                             AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
-                                        THEN shipped_release($3) ELSE release END,
-                         release_at = CASE WHEN $3::text IS NOT NULL
-                                                AND (release IS NULL OR $4 >= coalesce(release_at, '-infinity'))
-                                           THEN $4 ELSE release_at END,
+                         release = CASE WHEN $3::text IS NOT NULL THEN shipped_release($3) ELSE release END,
+                         release_at = CASE WHEN $3::text IS NULL THEN release_at
+                                           WHEN shipped_release($3) IS DISTINCT FROM release THEN $4
+                                           ELSE greatest(release_at, $4) END,
                          updated_at = now()
                      WHERE id = $1",
-                    &[&id, &feature.status.as_str(), &feature.release, &evidence_at],
+                    &[&id, &feature.status.as_str(), release, &evidence_at],
                 )
                 .await?;
                 reused["features"]
@@ -1561,7 +1633,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     release_if_done(&**client, token).await?;
     crate::jobs::wake(&**client, crate::jobs::kind::GRAPH_SYNC).await?;
     crate::jobs::wake(&**client, crate::jobs::kind::DUPLICATES).await?;
-    Ok(json!({
+    let mut result = json!({
         "accepted": true,
         "thread_id": args.thread_id,
         "created": created,
@@ -1569,7 +1641,11 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
         "updated": updated,
         "citations": citation_rows.len(),
         "judged_distinct": judged_distinct,
-    }))
+    });
+    if !releases_not_saved.is_empty() {
+        result["releases_not_saved"] = json!(releases_not_saved);
+    }
+    Ok(result)
 }
 
 /// The text, unless it's missing or blank.
@@ -2250,4 +2326,77 @@ pub async fn mark_distinct(indexer: &Indexer, args: MarkDistinctArgs) -> Result<
             "at": earlier.get::<_, DateTime<Utc>>(2),
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::major_release;
+
+    /// In 2026, with PostgreSQL 20 in development.
+    const DEVELOPMENT: i32 = 20;
+
+    #[test]
+    fn a_release_is_one_major_version() {
+        for (given, saved) in [
+            ("19", "19"),
+            ("9.6", "9.6"),
+            ("6.0", "6.0"),
+            (" 22 ", "22"),
+            ("8.5", "8.5"),
+            ("9.7", "9.7"),
+            ("17.0", "17"),
+            ("9.6.0", "9.6"),
+            ("18beta1", "18"),
+            ("9.0rc2", "9.0"),
+            ("20devel", "20"),
+            ("v17", "17"),
+            ("PG 9.6", "9.6"),
+            ("pg18", "18"),
+        ] {
+            assert_eq!(
+                major_release(given, DEVELOPMENT).as_deref(),
+                Some(saved),
+                "{given}"
+            );
+        }
+    }
+
+    #[test]
+    fn lists_ranges_minor_releases_and_bare_majors_are_not() {
+        for given in [
+            "11, 12, 13, 14",
+            "14,15",
+            "14 and 15",
+            "12-16",
+            "17.2",
+            "8.0.1",
+            "6.4.1",
+            "9.6.1",
+            "8",
+            "9",
+            "9.8",
+            "6.7",
+            "7.6",
+            "5.0",
+            "1.09",
+            "23",
+            "100",
+            "",
+            "PostgreSQL 17",
+            "17+",
+            "v17 and later",
+        ] {
+            assert_eq!(major_release(given, DEVELOPMENT), None, "{given}");
+        }
+    }
+
+    #[test]
+    fn releases_from_10_are_bounded_by_the_threads_date() {
+        // 2007: 8.3 in development, and 10 isn't a release for years.
+        assert_eq!(major_release("10", 1), None);
+        assert_eq!(major_release("8.3", 1).as_deref(), Some("8.3"));
+        // 2016: 10 in development, 12 at most.
+        assert_eq!(major_release("12", 10).as_deref(), Some("12"));
+        assert_eq!(major_release("13", 10), None);
+    }
 }

@@ -74,10 +74,24 @@ bug fix: include a fix only when the thread treats it as a design question.
   saying the feature's patches were committed or pushed makes it `committed`,
   even if follow-up fixes continue. When reusing a feature, give the status
   this thread shows; the indexer keeps the most advanced status it has seen.
-- `release`: the major version it targets or shipped in, only when the
-  thread says so ("for v19", "in PG 18"). When reusing a feature, give the
-  release this thread states; the indexer keeps the one from the most recent
-  thread.
+- `release`: the one major version the feature shipped in, or targets while
+  it isn't committed: two parts before 10 (`9.6`, `8.4`), one from 10 on
+  (`17`). A committed feature shipped in the release whose development it was
+  committed in ("committed for v17", "will be in PG 18"), even if it was
+  back-patched: never give the branches a fix was back-patched or
+  back-ported to, a list or a range of versions, or a minor release (`17.2`,
+  `8.0.1`), which aren't saved. Give it only when the thread settles it.
+  When reusing a feature, the release you give replaces its own, even one
+  that a newer thread gave. `existing_extracts` and the candidates show it,
+  with `release_evidence_at`, when the thread that gave it ended. Give one:
+  - when this thread shows the release the feature shipped in, which also
+    corrects a wrong one, such as a back-port branch;
+  - for a feature not committed yet, when this thread's target is the latest
+    word on it: the feature has no release, or this thread ends after
+    `release_evidence_at`.
+
+  A target never replaces where a committed feature shipped, and a
+  follow-up fix or a back-patch doesn't move a feature: leave release out.
 - `files`: paths the thread's patches change that implement it (only paths
   listed in the thread's patches or file anchors).
 

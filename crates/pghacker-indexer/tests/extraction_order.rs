@@ -5,6 +5,7 @@
 //! extraction records of a thread whose mail changes, on fresh databases,
 //! without the network or an embeddings endpoint.
 
+use chrono::Datelike;
 use pghacker_core::config::Env;
 use pghacker_core::testing::TestDb;
 use pghacker_indexer::settings::Settings;
@@ -566,14 +567,12 @@ async fn release(db: &TestDb, slug: &str) -> (Option<String>, Option<i64>) {
 }
 
 #[tokio::test]
-async fn a_release_comes_from_the_most_recent_evidence_whatever_the_order() {
+async fn each_release_given_replaces_the_features_whatever_its_evidence() {
     let db = corpus(&[
         (1, Some(2000), "pending", false),
         (2, Some(3000), "pending", false),
         (3, None, "pending", false),
         (4, Some(100), "pending", false),
-        (5, Some(1500), "pending", false),
-        (6, Some(1500), "pending", false),
     ])
     .await;
     let indexer = indexer(&db, &[]);
@@ -584,42 +583,215 @@ async fn a_release_comes_from_the_most_recent_evidence_whatever_the_order() {
     claim(&db, &indexer, 2, "plan-clause", Some("11")).await;
     assert_eq!(
         release(&db, "plan-clause").await,
-        at("12", 1),
-        "an older thread extracted later doesn't undo a newer one's release"
+        at("11", 2),
+        "an older thread extracted later corrects a newer one's release"
     );
     claim(&db, &indexer, 4, "plan-clause", None).await;
-    claim(&db, &indexer, 5, "plan-clause", Some("13")).await;
     assert_eq!(
         release(&db, "plan-clause").await,
-        at("13", 5),
-        "a newer claim wins, though a still newer thread linked without one"
+        at("11", 2),
+        "a thread that gives none leaves it"
     );
     claim(&db, &indexer, 3, "plan-clause", Some("14")).await;
     assert_eq!(
         release(&db, "plan-clause").await,
-        at("13", 5),
-        "an undated claim doesn't replace a release"
+        (Some("14".to_owned()), None),
+        "an undated thread's replaces it too, without a date"
     );
-    claim(&db, &indexer, 6, "plan-clause", Some("15")).await;
+    claim(&db, &indexer, 4, "plan-clause", Some("16")).await;
+    assert_eq!(release(&db, "plan-clause").await, at("16", 4));
+    claim(&db, &indexer, 1, "plan-clause", Some("16")).await;
     assert_eq!(
         release(&db, "plan-clause").await,
-        at("15", 5),
-        "evidence as recent: the later submission wins"
+        at("16", 4),
+        "an older thread that states it again leaves its latest evidence"
     );
 
-    claim(&db, &indexer, 1, "hash-join", None).await;
-    claim(&db, &indexer, 3, "hash-join", Some("16")).await;
+    // The extractor sees when the evidence for each release was written.
+    let evidence = last_at(&db, 4).await;
+    let batch = extraction::next_batch(&indexer, args(json!({ "thread_ids": [1] })))
+        .await
+        .unwrap();
+    let existing = &batch["threads"][0]["existing_extracts"]["features"][0];
     assert_eq!(
-        release(&db, "hash-join").await,
-        (Some("16".to_owned()), None),
-        "an undated claim fills a missing release"
+        (&existing["release"], &existing["release_evidence_at"]),
+        (&json!("16"), &evidence)
     );
-    claim(&db, &indexer, 2, "hash-join", Some("17")).await;
+    let matched = extraction::match_extracts(
+        &indexer,
+        args(json!({ "lease_token": batch["lease_token"], "drafts": [
+            { "thread_id": 1, "kind": "feature", "name": "plan-clause", "description": "A change to the planner." }
+        ] })),
+    )
+    .await
+    .unwrap();
+    let candidate = &matched["drafts"][0]["candidates"][0];
     assert_eq!(
-        release(&db, "hash-join").await,
-        at("17", 2),
-        "undated evidence is the oldest"
+        (&candidate["release"], &candidate["release_evidence_at"]),
+        (&json!("16"), &evidence)
     );
+}
+
+/// Submits new features (slug, release) from thread `id`: the reply.
+async fn submit_releases(indexer: &Indexer, id: i64, features: &[(&str, &str)]) -> Value {
+    let token = token_for(indexer, id).await;
+    let drafts: Vec<Value> = features
+        .iter()
+        .map(|(slug, _)| json!({ "thread_id": id, "kind": "feature", "name": slug, "description": slug }))
+        .collect();
+    let matched = extraction::match_extracts(
+        indexer,
+        args(json!({ "lease_token": token, "drafts": drafts })),
+    )
+    .await
+    .unwrap();
+    let new: Vec<Value> = features
+        .iter()
+        .enumerate()
+        .map(|(i, (slug, release))| {
+            json!({ "draft_id": matched["drafts"][i]["draft_id"], "action": "new", "slug": slug,
+                    "name": slug, "description": slug, "status": "committed", "release": release,
+                    "citations": cites(&format!("t{id}@example.org"), "proposes a change to the planner") })
+        })
+        .collect();
+    let saved = extraction::submit(
+        indexer,
+        args(json!({ "lease_token": token, "thread_id": id, "features": new })),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved["accepted"], true, "{saved:#}");
+    saved
+}
+
+#[tokio::test]
+async fn a_release_that_isnt_one_major_version_isnt_saved() {
+    let db = corpus(&[
+        (1, Some(100), "pending", false),
+        (2, Some(7000), "pending", false),
+    ])
+    .await;
+    let mut client = db.indexer().await.unwrap();
+    let indexer = indexer(&db, &[]);
+    // Thread 1 ended 100 days ago: it can name two past the version then in
+    // development.
+    let year = (chrono::Utc::now() - chrono::Duration::days(100)).year();
+    let latest = (pghacker_mail::anchors::development_version(year) + 2).to_string();
+    let beyond = (pghacker_mail::anchors::development_version(year) + 3).to_string();
+    let saved = submit_releases(
+        &indexer,
+        1,
+        &[
+            ("aggregate-pushdown", "17"),
+            ("brin-bloom", "17.0"),
+            ("copy-header", "PG 9.6"),
+            ("toast-zstd", &latest),
+            ("libxml-deprecation", "12-16"),
+            ("relkind-errors", "11, 12, 13, 14"),
+            ("pgbench-catchup", "14 and 15"),
+            ("perl-warning", "6.4.1"),
+            ("vacuum-options", "17.2"),
+            ("auto-explain", "8"),
+            ("upsert", "9"),
+            ("partition-pruning", &beyond),
+        ],
+    )
+    .await;
+    let releases: Vec<(String, Option<String>)> = client
+        .query("SELECT slug, release FROM features ORDER BY id", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    let release = |slug: &str, release: Option<&str>| (slug.to_owned(), release.map(str::to_owned));
+    assert_eq!(
+        releases,
+        [
+            release("aggregate-pushdown", Some("17")),
+            release("brin-bloom", Some("17")),
+            release("copy-header", Some("9.6")),
+            release("toast-zstd", Some(&latest)),
+            release("libxml-deprecation", None),
+            release("relkind-errors", None),
+            release("pgbench-catchup", None),
+            release("perl-warning", None),
+            release("vacuum-options", None),
+            release("auto-explain", None),
+            release("upsert", None),
+            release("partition-pruning", None),
+        ],
+        "each feature is saved, with its release only if it's one major version"
+    );
+    let not_saved: Vec<(&str, &str)> = saved["releases_not_saved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["slug"].as_str().unwrap(), r["release"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        not_saved,
+        [
+            ("libxml-deprecation", "12-16"),
+            ("relkind-errors", "11, 12, 13, 14"),
+            ("pgbench-catchup", "14 and 15"),
+            ("perl-warning", "6.4.1"),
+            ("vacuum-options", "17.2"),
+            ("auto-explain", "8"),
+            ("upsert", "9"),
+            ("partition-pruning", beyond.as_str()),
+        ]
+    );
+    assert!(
+        saved["releases_not_saved"][0]["why"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("or 10 to {latest}"))
+    );
+    assert_eq!(
+        release_dates(&db).await,
+        4,
+        "a release that isn't saved has no date"
+    );
+
+    // Thread 2 ended about 2007, before releases were numbered from 10.
+    let saved = submit_releases(
+        &indexer,
+        2,
+        &[("hash-indexes", "10"), ("hot-updates", "8.3")],
+    )
+    .await;
+    assert_eq!(saved["releases_not_saved"][0]["slug"], "hash-indexes");
+    assert_eq!(saved["releases_not_saved"].as_array().unwrap().len(), 1);
+
+    // A reused feature keeps its release when the one given isn't one.
+    claim(&db, &indexer, 1, "aggregate-pushdown", Some("17, 18")).await;
+    let kept: String = client
+        .query_one(
+            "SELECT release FROM features WHERE slug = 'aggregate-pushdown'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(kept, "17");
+
+    graph::sync(&mut client).await.unwrap();
+    assert_eq!(
+        cypher(&db, "MATCH (r:Release) RETURN r.version").await,
+        ["17", latest.as_str(), "8.3", "9.6"]
+    );
+}
+
+/// How many features have a release's date.
+async fn release_dates(db: &TestDb) -> i64 {
+    db.indexer()
+        .await
+        .unwrap()
+        .query_one("SELECT count(release_at) FROM features", &[])
+        .await
+        .unwrap()
+        .get(0)
 }
 
 #[tokio::test]

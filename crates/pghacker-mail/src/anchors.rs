@@ -150,8 +150,7 @@ pub fn extract_at(
     sent_at: Option<DateTime<Utc>>,
 ) -> Vec<AnchorRef> {
     let year = sent_at.unwrap_or_else(Utc::now).year();
-    // PostgreSQL N+1 is in development from mid N's year: PG20 in 2026.
-    let development = year - 2006;
+    let development = development_version(year);
     let patch_versions = patch_versions(subject, body_clean, patches);
     let mut seen = HashSet::new();
     let mut anchors = Vec::new();
@@ -186,6 +185,12 @@ pub fn extract_at(
         }
     }
     anchors
+}
+
+/// The major version in development in `year`, from 10 on: PostgreSQL N+1
+/// is in development from mid N's year, PG20 in 2026.
+pub fn development_version(year: i32) -> i32 {
+    year - 2006
 }
 
 /// Paths in the PostgreSQL tree.

@@ -111,8 +111,9 @@ pub static TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "submit_extracts",
         description: "Saves one leased thread's extracts, all or nothing: features (new with a slug, or reuse an \
-            existing id; status, release, files from the thread's patches; a feature's release comes from its \
-            thread with the latest message), decisions (outcome, alternatives, \
+            existing id; status; release, the one major version the feature shipped in or targets, never a \
+            branch it was back-ported to, which replaces the feature's, while any other value isn't saved and \
+            releases_not_saved lists it; files from the thread's patches), decisions (outcome, alternatives, \
             rationale, and the slug of the feature each decides), and positions (an author's stance on a \
             feature or decision, citing the author's own messages; a position restated in a thread replaces the \
             author's earlier one there on the same feature or decision, unless a merge moved it there). Every \

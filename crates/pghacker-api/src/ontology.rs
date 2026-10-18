@@ -28,8 +28,9 @@ const VERTEX_PROPERTIES: &[(&str, &str)] = &[
         "Feature",
         "key, id, slug, name, status (the most advanced any of its threads showed: proposed, \
          in_progress, committed, reverted, rejected, returned, withdrawn or unknown; returned is \
-         returned with feedback in a CommitFest), release (the major version it targets or shipped in, \
-         by the name it shipped as: 9.0, not its development name 8.5)",
+         returned with feedback in a CommitFest), release (the one major version it shipped in, or \
+         targets until it's committed, by the name it shipped as: 9.0, not its development name 8.5; \
+         never a branch it was back-ported to)",
     ),
     ("Decision", "key, id, title, outcome, decided_at, thread_id"),
     ("Position", "key, id, stance, summary, author_id, thread_id"),

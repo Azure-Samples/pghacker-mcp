@@ -24,8 +24,9 @@ pub mod descriptions {
         Message-ID, reply parent, text without quoted replies, patches (files changed) and mentions of files, \
         commits, CommitFest entries and releases. Pages with offset/limit.";
     pub const SEARCH_EXTRACTS: &str = "Searches the extracts: features (capabilities or changes to PostgreSQL \
-        that threads propose, review, commit, revert or reject, each with what it does, its status, the release it \
-        targets or shipped in, its threads and the files that implement it), decisions (resolutions a thread \
+        that threads propose, review, commit, revert or reject, each with what it does, its status, the one release \
+        it shipped in or targets (never a back-port branch), its threads and the files that implement it), \
+        decisions (resolutions a thread \
         reached: outcome, alternatives, rationale and the feature each decides) and positions (an author's stance \
         on a feature or decision), by full text, semantic search or both (mode hybrid, the default). A feature's \
         status is the most advanced any of its threads showed: proposed, in_progress, committed, reverted, \
