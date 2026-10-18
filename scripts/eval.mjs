@@ -8,8 +8,8 @@ import { portalEnvironment, readLocalConfig, serviceUrl } from "./lib/config.mjs
 import { callTool, mcpRequest } from "./lib/services.mjs";
 import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 import {
-  checkCommits, checkReview, citedCommits, lastJsonBlock, parseCsv, quoteIn, resultsTable, reviewPrompt, reviewTable,
-  verifySkill,
+  calledTool, checkCommits, checkReview, citedCommits, lastJsonBlock, parseCsv, quoteIn, resultsTable, REVIEW_SKILL_TOOL,
+  reviewPrompt, reviewTable, toolsCalled, verifySkill,
 } from "./lib/evalcheck.mjs";
 
 // The evaluation (npm start must be running):
@@ -32,7 +32,10 @@ import {
 // answers are the points that reviewer actually raised. With
 // --skill skills/review-as-author/SKILL.md (or the skill's skill:// URI,
 // read from the server and checked against its digests), the prompt carries
-// the skill; without it, the same prompt goes without, as a baseline. A review
+// the skill; without it, the same prompt goes without, and the agent, which
+// declares no skills extension, can load the skill on its own with
+// load_skill_review_as_author. Each result says which tools the session
+// called, and a review whether it loaded the skill so. A review
 // passes when it is judged to raise the reviewer's main point, its citations
 // are valid, at least two quote the reviewer's own words, and none was sent
 // on or after the patch's date or is the actual review.
@@ -152,6 +155,21 @@ async function judge(client, question, answer) {
 /** The most of a review the judge reads, in characters. */
 const REVIEW_CHARS = 12_000;
 
+/**
+ * The tools a session called, from its latest events, which a page of 1,000
+ * holds for one question; for a review, whether it loaded the review skill
+ * with its tool.
+ */
+async function called(session, review) {
+  let tools = [];
+  try {
+    tools = toolsCalled(await session.getMessages(1000));
+  } catch {
+    // Without its events, the result says no tools.
+  }
+  return review ? { tools, loaded_skill: calledTool(tools, REVIEW_SKILL_TOOL) } : { tools };
+}
+
 /** What the agent is asked: the question, or a review question's prompt with the patch. */
 async function prompt(question) {
   if (question.kind !== "review") return question.question;
@@ -174,11 +192,12 @@ async function evaluate(client, question) {
   try {
     reply = await session.sendAndWait(await prompt(question), timeout);
   } catch (error) {
-    return { id: question.id, kind: question.kind, question: question.question, ...asked, pass: false, error: error.message, session: session.sessionId };
+    return { id: question.id, kind: question.kind, question: question.question, ...asked, ...(await called(session, review)), pass: false, error: error.message, session: session.sessionId };
   }
+  const tools = await called(session, review);
   const parsed = lastJsonBlock(reply);
   if (!parsed) {
-    return { id: question.id, kind: question.kind, question: question.question, ...asked, pass: false, error: "no JSON answer block", reply, session: session.sessionId };
+    return { id: question.id, kind: question.kind, question: question.question, ...asked, ...tools, pass: false, error: "no JSON answer block", reply, session: session.sessionId };
   }
   const citations = Array.isArray(parsed.citations) ? parsed.citations : [];
   const goldIds = (question.gold_citations ?? []).map((c) => c.message_id);
@@ -221,6 +240,7 @@ async function evaluate(client, question) {
       citations_valid: citationsValid,
       own_citations: own,
       leaked,
+      ...tools,
       pass: Boolean(grade.correct) && citationsValid && own >= MIN_OWN_CITATIONS && leaked.length === 0,
       seconds: Math.round((Date.now() - started) / 1000),
       session: session.sessionId,
@@ -245,6 +265,7 @@ async function evaluate(client, question) {
     ...(commitsError ? { commits_error: commitsError } : {}),
     commits_valid: commitsValid,
     on_gold_commit: needsCommits ? commits.onGold : null,
+    ...tools,
     pass: Boolean(grade.correct) && (needsCitations ? citationsValid : true)
       && (needsCommits ? commitsValid && commits.onGold : true),
     seconds: Math.round((Date.now() - started) / 1000),
@@ -276,7 +297,7 @@ try {
       results.push(result);
       const checks = result.kind === "review"
         ? ` correct=${result.correct} score=${result.score} citations_valid=${result.citations_valid}` +
-          ` own=${result.own_citations} leaked=${result.leaked.length}`
+          ` own=${result.own_citations} leaked=${result.leaked.length} loaded_skill=${result.loaded_skill}`
         : ` correct=${result.correct} citations_valid=${result.citations_valid}` +
           `${result.on_gold_commit === null ? "" : ` commits_valid=${result.commits_valid} gold_commit=${result.on_gold_commit}`}`;
       console.log(`[eval] ${result.id}: ${result.pass ? "PASS" : "FAIL"}${result.error ? ` (${result.error})` : checks}`);
@@ -307,7 +328,7 @@ const lines = reviews
     "",
     `${passed} of ${results.length} reviews passed (judged to raise the reviewer's main point, with valid verbatim citations, at least ${MIN_OWN_CITATIONS} in the reviewer's own words, and none sent on or after the patch's date or from the actual review).`,
     `Mean score, the share of the reviewer's actual points raised: ${meanScore.toFixed(2)}.`,
-    `Skill: ${options.skill ? `\`${options.skill}\`` : "none (the baseline)"}.`,
+    `Skill: ${options.skill ? `\`${options.skill}\` in the prompt` : `none in the prompt; ${results.filter((r) => r.loaded_skill).length} of ${results.length} reviews loaded it on their own, with \`${REVIEW_SKILL_TOOL}\``}.`,
   ]
   : [
     "# pghacker-mcp evaluation",

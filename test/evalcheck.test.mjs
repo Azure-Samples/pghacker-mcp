@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
-  checkCommits, checkReview, citedCommits, lastJsonBlock, MAX_DIFF_CHARS, normalizeForQuote, parseCsv, quoteIn, resultsTable,
-  reviewPrompt, reviewTable, verifySkill,
+  calledTool, checkCommits, checkReview, citedCommits, lastJsonBlock, MAX_DIFF_CHARS, normalizeForQuote, parseCsv, quoteIn,
+  resultsTable, REVIEW_SKILL_TOOL, reviewPrompt, reviewTable, toolsCalled, verifySkill,
 } from "../scripts/lib/evalcheck.mjs";
 
 test("quotes match across wrapping and quote markers, like the indexer's check", () => {
@@ -106,12 +106,30 @@ test("a review's citations count the reviewer's own words and catch what came af
 
 test("the review table shows the reviewer, the score and the review checks", () => {
   const [header, , ...rows] = reviewTable([
-    { id: "r01", subject: "Show xmin | slots", reviewer: "Andres Freund", correct: true, score: 0.5, citations_valid: true, own_citations: 3, leaked: [], seconds: 120 },
+    { id: "r01", subject: "Show xmin | slots", reviewer: "Andres Freund", correct: true, score: 0.5, citations_valid: true, own_citations: 3, leaked: [], loaded_skill: true, seconds: 120 },
     { id: "r02", subject: "x", reviewer: "Tom Lane", pass: false, error: "no JSON answer block" },
   ]);
-  assert.match(header, /\| Reviewer's own \| No leak \| Seconds \|$/);
-  assert.equal(rows[0], "| r01: Show xmin \\| slots | Andres Freund | yes | 0.50 | yes | 3 | yes | 120 |");
-  assert.equal(rows[1], "| r02: x | Tom Lane | no |  | no | 0 | no |  |");
+  assert.match(header, /\| Reviewer's own \| No leak \| Loaded the skill \| Seconds \|$/);
+  assert.equal(rows[0], "| r01: Show xmin \\| slots | Andres Freund | yes | 0.50 | yes | 3 | yes | yes | 120 |");
+  assert.equal(rows[1], "| r02: x | Tom Lane | no |  | no | 0 | no | no |  |");
+});
+
+test("a session's tools come from its events, and the skill's tool is found under a client's prefix", () => {
+  const events = [
+    { eventType: "user.message", data: {} },
+    { eventType: "tool.execution_start", data: { toolName: "pghacker-mcp-load_skill_review_as_author" } },
+    { eventType: "tool.execution_complete", data: { toolName: "pghacker-mcp-load_skill_review_as_author" } },
+    { eventType: "tool.execution_start", data: { name: "author_perspective" } },
+    { eventType: "tool.execution_start", data: {} },
+  ];
+  const tools = toolsCalled(events);
+  assert.deepEqual(tools, ["pghacker-mcp-load_skill_review_as_author", "author_perspective"]);
+  assert.equal(REVIEW_SKILL_TOOL, "load_skill_review_as_author");
+  assert.equal(calledTool(tools, REVIEW_SKILL_TOOL), true);
+  assert.equal(calledTool([REVIEW_SKILL_TOOL], REVIEW_SKILL_TOOL), true);
+  assert.equal(calledTool(["mcp__pghacker__load_skill_review_as_author"], REVIEW_SKILL_TOOL), true);
+  assert.equal(calledTool(["xload_skill_review_as_author", "author_perspective"], REVIEW_SKILL_TOOL), false);
+  assert.deepEqual(toolsCalled(undefined), []);
 });
 
 test("a skill read from a server must match its entry's digests and sizes", () => {

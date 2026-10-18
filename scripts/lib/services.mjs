@@ -6,7 +6,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, wri
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { LOCAL_HOST, platformEnvironment, serviceEnvironments, serviceUrl } from "./config.mjs";
-import { verifySkill } from "./evalcheck.mjs";
+import { skillToolName, verifySkill } from "./evalcheck.mjs";
 
 export const SERVICES = {
   indexer: { binary: "pghacker-indexer", args: ["serve"], portKey: "indexerPort" },
@@ -16,7 +16,7 @@ export const SERVICES = {
 /** The tools each MCP server must list. */
 export const EXPECTED_TOOLS = {
   indexer: ["add_source", "ingest_status", "next_extraction_batch", "match_extracts", "submit_extracts", "merge_extracts"],
-  mcp: ["search_threads", "get_thread", "search_extracts", "author_perspective", "get_ontology", "query", "search", "grep", "read_file", "list_files"],
+  mcp: ["search_threads", "get_thread", "search_extracts", "author_perspective", "get_ontology", "query", "search", "grep", "read_file", "list_files", "load_skill_review_as_author"],
 };
 
 export function binaryPath(config, name) {
@@ -239,11 +239,16 @@ export async function mcpRequest(url, method, params = {}, { timeout = 120_000, 
 
 /**
  * The names of the skills an MCP server lists, after reading each of their
- * files as a host would and checking it against the listing's digest.
+ * files as a host would and checking it against the listing's digest, and
+ * checking that the tool that loads a skill, if the server lists it to this
+ * client (which declares no skills extension), returns the same SKILL.md.
  */
 export async function checkSkills(url, { timeout = 30_000, fetchImpl = fetch } = {}) {
   const { skills = [] } = await mcpRequest(url, "skills/list", {}, { timeout, fetchImpl });
+  const tools = skills.length ? await listTools(url, { timeout, fetchImpl }) : [];
+  const checked = [];
   for (const skill of skills) {
+    const name = skill.frontmatter?.name ?? skill.uri;
     const texts = new Map();
     for (const { uri } of Array.isArray(skill.resources) ? skill.resources : []) {
       const { contents } = await mcpRequest(url, "resources/read", { uri }, { timeout, fetchImpl });
@@ -251,6 +256,14 @@ export async function checkSkills(url, { timeout = 30_000, fetchImpl = fetch } =
     }
     const problems = verifySkill(skill, texts);
     if (problems.length) throw new Error(`${skill.uri} doesn't match its listing: ${problems.join("; ")}`);
+    const tool = skillToolName(skill.frontmatter?.name);
+    if (tools.includes(tool)) {
+      const loaded = await callTool(url, tool, {}, { timeout, fetchImpl });
+      if (loaded !== texts.get(skill.uri)) throw new Error(`${tool} doesn't return ${skill.uri} as resources/read does.`);
+      checked.push(`${name} (${tool} returns it too)`);
+    } else {
+      checked.push(name);
+    }
   }
-  return skills.map((skill) => skill.frontmatter?.name ?? skill.uri);
+  return checked;
 }

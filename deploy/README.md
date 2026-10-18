@@ -495,6 +495,8 @@ npm run eval -- --mcp-url "$(terraform -chdir=deploy/terraform output -raw mcp_u
     --questions eval/reviews.json --skill skill://review-as-author/SKILL.md --results eval/RESULTS-reviews.md
 ```
 
+Without `--skill`, the agents, which don't declare the skills extension, must find `load_skill_review_as_author` on their own; write those results to `eval/RESULTS-reviews-tool.md`.
+
 ## Operations
 
 - **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[home]`, `[oauth2-proxy]`.

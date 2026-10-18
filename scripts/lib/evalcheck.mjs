@@ -163,12 +163,33 @@ export function checkReview(citations, found, { reviewer, asOf, goldIds = [] }) 
   return { own: own.size, leaked: [...leaked] };
 }
 
+/** The tool that loads a skill, for clients without the skills extension (pghacker_core::skills::Skill::tool). */
+export function skillToolName(name) {
+  return `load_skill_${String(name).replaceAll("-", "_")}`;
+}
+
+/** The tool that loads the review skill. */
+export const REVIEW_SKILL_TOOL = skillToolName("review-as-author");
+
+/** The tools a session called, in order, from its events (`tool.execution_start`). */
+export function toolsCalled(events) {
+  return (Array.isArray(events) ? events : [])
+    .filter((event) => event?.eventType === "tool.execution_start")
+    .map((event) => event.data?.toolName ?? event.data?.name)
+    .filter((name) => typeof name === "string");
+}
+
+/** Whether `tools` include `tool`, by its name or with the prefix a client gives a server's tools. */
+export function calledTool(tools, tool) {
+  return tools.some((name) => name === tool || (name.endsWith(tool) && /[^A-Za-z0-9]$/.test(name.slice(0, -tool.length))));
+}
+
 /** The review results table, one row per review question. */
 export function reviewTable(results) {
   const yesNo = (value) => (value ? "yes" : "no");
   return [
-    "| Review | Reviewer | Correct | Score | Citations valid | Reviewer's own | No leak | Seconds |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Review | Reviewer | Correct | Score | Citations valid | Reviewer's own | No leak | Loaded the skill | Seconds |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ...results.map((r) => [
       `${r.id}: ${String(r.subject ?? r.question ?? "").replaceAll("|", "\\|")}`,
       r.reviewer ?? "",
@@ -177,6 +198,7 @@ export function reviewTable(results) {
       yesNo(r.citations_valid),
       r.own_citations ?? 0,
       yesNo(r.error === undefined && (r.leaked ?? []).length === 0),
+      yesNo(r.loaded_skill),
       r.seconds ?? "",
     ].join(" | ")).map((row) => `| ${row} |`),
   ];
