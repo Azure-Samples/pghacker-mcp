@@ -150,13 +150,18 @@ pghacker-mcp serves [Agent Skills](https://agentskills.io/specification) as MCP'
 
 `author_perspective` serves the skill with two arguments: `paths`, a patch's files or folders, adds the author's positions on the features implemented there (`feature_files`); `until` keeps only positions whose cited messages, and messages, came before a date.
 
-Few clients load skills from MCP servers yet; the extension's [client matrix](https://modelcontextprotocol.io/extensions/client-matrix) tracks them. Elsewhere:
+Few clients load skills from MCP servers yet; the extension's [client matrix](https://modelcontextprotocol.io/extensions/client-matrix) tracks them. So a client gets the skill one of two ways:
 
-- a client that reads MCP resources can attach `skill://review-as-author/SKILL.md` to a conversation;
-- any agent that reads skills from folders can use a copy of `skills/review-as-author`, such as in `.claude/skills/` for Claude Code or `.github/skills/` for GitHub Copilot;
-- the server's instructions name the skill and summarize its procedure, for agents that see only the tools.
+| | A client that declares the extension | Any other client |
+| --- | --- | --- |
+| The instructions | name the skill, `skill://review-as-author/SKILL.md` | say to call `load_skill_review_as_author` |
+| Tools | pghacker-mcp's | pghacker-mcp's and `load_skill_review_as_author`, which takes no arguments and returns the skill's `SKILL.md` |
 
-`npm run eval` checks the skill against what authors actually said: `eval/reviews.json` has 10 patches posted to pgsql-hackers, each with the points its reviewer actually raised. An agent reviews each patch as that reviewer would have when it was posted, with the skill (`--skill skills/review-as-author/SKILL.md`, or its `skill://` URI, read from the server and checked against its digests) or without it, as a baseline. A review passes when a judge finds the reviewer's main point in it, its citations are verbatim, at least two quote the reviewer's own words, and none came on or after the patch's date. The [README](../README.md#check-it) has the command.
+Every client can list and read the skill as a resource, and call `skills/list` and `skills/get`, and the capabilities are the same for all. A client declares the extension among the capabilities it sends with initialize or, from MCP 2026-07-28 on, in each request's `_meta`. The server keeps no session, so an earlier client's requests after initialize count as not declaring it, and get the tool. A tool is named `load_skill_` and its skill's name, with underscores for hyphens, and has the skill's description; usage telemetry records its calls as tool calls.
+
+A user can also attach `skill://review-as-author/SKILL.md` to a conversation, in a client that reads MCP resources, or install a copy of `skills/review-as-author` in an agent that reads skills from folders, such as in `.claude/skills/` for Claude Code or `.github/skills/` for GitHub Copilot.
+
+`npm run eval` checks the skill against what authors actually said: `eval/reviews.json` has 10 patches posted to pgsql-hackers, each with the points its reviewer actually raised. An agent reviews each patch as that reviewer would have when it was posted, with the skill in the prompt (`--skill skills/review-as-author/SKILL.md`, or its `skill://` URI, read from the server and checked against its digests) or without it, when the agent must load it on its own with `load_skill_review_as_author`. A review passes when a judge finds the reviewer's main point in it, its citations are verbatim, at least two quote the reviewer's own words, and none came on or after the patch's date. The [README](../README.md#check-it) has the command.
 
 ## Feedback
 

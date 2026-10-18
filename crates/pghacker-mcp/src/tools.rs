@@ -28,9 +28,15 @@ const READ: Effect = Effect::Read;
 /// The skill for reviewing as a given author would, which the instructions name.
 #[cfg(test)]
 pub const REVIEW_SKILL: &str = "skill://review-as-author/SKILL.md";
+/// The tool that loads it, for clients without the skills extension.
+#[cfg(test)]
+pub const REVIEW_TOOL: &str = "load_skill_review_as_author";
 
-/// The server's instructions.
-pub const INSTRUCTIONS: &str = "pghacker-mcp answers questions about PostgreSQL's design history and \
+/// The instructions both kinds of client get, before the review sentence.
+macro_rules! instructions {
+    ($review:literal) => {
+        concat!(
+            "pghacker-mcp answers questions about PostgreSQL's design history and \
 code with citations. Mail: pgsql-hackers threads, authors, and extracted features, decisions and positions \
 (search_threads, get_thread, search_extracts, author_perspective, search_authors, get_author), searched by full \
 text, semantic search or both; search_patches finds lines in the patches posted, by thread, and the commits that \
@@ -41,10 +47,21 @@ tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) 
 /branch/<name>/, /tag/<name>/ or /commit/<rev>/; blame, get_commit and search_commits answer as git blame, \
 git show and git log, with the threads that discussed each commit. Cite Message-IDs, commit SHAs and file \
 paths with line numbers in answers. To review a patch, commit or design as a given author would (Tom Lane, \
-say), follow the skill skill://review-as-author/SKILL.md (resources/read reads it). In short: their positions \
-with author_perspective (topic: what the change does; paths: its files), their commits in those files with \
-search_commits (author, paths) and blame, and each point attributed to them only with a quote of their own \
-message.";
+say), ",
+            $review
+        )
+    };
+}
+
+/// The server's instructions, for a client without the skills extension,
+/// which gets the tool that loads the review skill.
+pub const INSTRUCTIONS: &str =
+    instructions!("call load_skill_review_as_author and follow what it returns.");
+
+/// The instructions for a client that declares the skills extension, which
+/// gets the review skill that way only.
+pub const EXTENSION_INSTRUCTIONS: &str =
+    instructions!("use the skill review-as-author (skill://review-as-author/SKILL.md).");
 
 /// The server's instructions.
 pub fn instructions() -> &'static str {
@@ -380,9 +397,11 @@ mod tests {
         ] {
             assert!(code::HISTORY_NOTE.contains(needed), "{needed}");
             assert!(INSTRUCTIONS.contains(needed), "{needed}");
+            assert!(EXTENSION_INSTRUCTIONS.contains(needed), "{needed}");
         }
         for tool in TOOLS {
             assert!(INSTRUCTIONS.contains(tool.name), "{}", tool.name);
+            assert!(EXTENSION_INSTRUCTIONS.contains(tool.name), "{}", tool.name);
         }
         for table in ["code_commits", "code_commit_threads", "code_line_instances"] {
             assert!(sql::HISTORY_NOTE.contains(table), "{table}");
@@ -390,13 +409,26 @@ mod tests {
     }
 
     #[test]
-    fn the_skills_load_and_the_instructions_name_the_review_skill() {
+    fn each_kind_of_client_gets_the_review_skill_its_way() {
         let skills = skills().unwrap();
         let review = skills.get(REVIEW_SKILL).expect("the review skill");
         assert_eq!(review.name, "review-as-author");
-        assert!(INSTRUCTIONS.contains(REVIEW_SKILL));
-        // Hosts get the whole skill even when they only read SKILL.md.
+        // Hosts get the whole skill even when they only read SKILL.md, and
+        // so does its tool.
         assert_eq!(review.files.len(), 1);
+        // Without the extension: the tool, and nothing of the extension.
+        assert_eq!(review.tool_name(), REVIEW_TOOL);
+        assert!(!TOOLS.iter().any(|tool| tool.name == REVIEW_TOOL));
+        assert!(INSTRUCTIONS.contains(REVIEW_TOOL));
+        for absent in ["skill://", "resources/read", "SKILL.md"] {
+            assert!(!INSTRUCTIONS.contains(absent), "{absent}");
+        }
+        // With it: the skill, and no tool.
+        assert!(EXTENSION_INSTRUCTIONS.contains(REVIEW_SKILL));
+        assert!(!EXTENSION_INSTRUCTIONS.contains("load_skill"));
+        // The rest is the same.
+        let lead = |text: &'static str| text.split("(Tom Lane, say), ").next().unwrap();
+        assert_eq!(lead(INSTRUCTIONS), lead(EXTENSION_INSTRUCTIONS));
     }
 
     /// The tool calls the review skill writes as `name(argument: ...)`, with

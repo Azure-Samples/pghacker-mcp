@@ -13,11 +13,13 @@
 //! A request that the endpoint's usage middleware gave a [`Scope`]
 //! (`crate::usage`) is recorded: its initialize, discover, tools/list or
 //! tool call, with the call's arguments, outcome and result's shape, and its
-//! reads of the skills ([`McpServer::with_skills`]). A tool may record events
-//! of its own in its call's operation ([`Tools::call_with_usage`]). With
-//! feedback ([`McpServer::with_feedback`]), a call that starts a user's next
-//! question may first be answered with a form that asks whether the last
-//! answer helped; its retry carries the answer, and runs.
+//! reads of the skills ([`McpServer::with_skills`]), whose tools, for clients
+//! without the skills extension, are recorded as tool calls. A tool may
+//! record events of its own in its call's operation
+//! ([`Tools::call_with_usage`]). With feedback ([`McpServer::with_feedback`]),
+//! a call that starts a user's next question may first be answered with a
+//! form that asks whether the last answer helped; its retry carries the
+//! answer, and runs.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -153,8 +155,14 @@ pub trait Tools: Clone + Send + Sync + 'static {
 #[derive(Clone)]
 pub struct McpServer<T> {
     tools: T,
+    /// The tools listed: with skills, those that load them too.
     list: Arc<Vec<Tool>>,
+    /// The tools listed to a client that declares the skills extension.
+    extension_list: Arc<Vec<Tool>>,
     info: Arc<ServerConfig>,
+    /// The server's information for a client that declares the skills
+    /// extension: its own instructions.
+    extension_info: Arc<ServerConfig>,
     skills: Skills,
     feedback: Feedback,
     cancel_on_disconnect: bool,
@@ -162,14 +170,18 @@ pub struct McpServer<T> {
 
 impl<T: Tools> McpServer<T> {
     pub fn new(tools: T, name: &str, version: &str, instructions: &str) -> Self {
-        let list = tools.specs().iter().map(ToolSpec::tool).collect();
-        let info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(name, version))
-            .with_instructions(instructions);
+        let list = Arc::new(tools.specs().iter().map(ToolSpec::tool).collect());
+        let info = Arc::new(
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+                .with_server_info(Implementation::new(name, version))
+                .with_instructions(instructions),
+        );
         Self {
             tools,
-            list: Arc::new(list),
-            info: Arc::new(info),
+            extension_list: Arc::clone(&list),
+            list,
+            extension_info: Arc::clone(&info),
+            info,
             skills: Skills::default(),
             feedback: Feedback::off(),
             cancel_on_disconnect: false,
@@ -189,10 +201,25 @@ impl<T: Tools> McpServer<T> {
     /// Serves `skills` as the skills extension (SEP-2640) defines: the
     /// capabilities add resources and the extension, `skills/list` and
     /// `skills/get` describe the skills, and resources/list and
-    /// resources/read serve their files. Without skills, nothing changes.
-    pub fn with_skills(mut self, skills: Skills) -> Self {
+    /// resources/read serve their files.
+    ///
+    /// A client that declares the extension ([`skills::declared`]) gets the
+    /// skills that way only, and `extension_instructions` in place of the
+    /// server's instructions. Any other client gets the server's
+    /// instructions, which should name the tools that load the skills: a
+    /// tool per skill, without arguments, which returns its `SKILL.md`
+    /// ([`skills::Skill::tool`]). A request carries its client's
+    /// capabilities in initialize or, from 2026-07-28 clients, in its
+    /// `_meta`; one without them, such as an earlier client's tools/list,
+    /// gets the tools. Without skills, nothing changes. Refuses a skill's
+    /// tool whose name another tool has.
+    pub fn with_skills(
+        mut self,
+        skills: Skills,
+        extension_instructions: &str,
+    ) -> anyhow::Result<Self> {
         if skills.is_empty() {
-            return self;
+            return Ok(self);
         }
         let mut info = (*self.info).clone();
         let mut capabilities = ServerCapabilities::builder()
@@ -205,9 +232,23 @@ impl<T: Tools> McpServer<T> {
                 .collect(),
         );
         info.capabilities = capabilities;
+        let mut list = (*self.list).clone();
+        for skill in skills.iter() {
+            let tool = skill.tool();
+            anyhow::ensure!(
+                !list.iter().any(|other| other.name == tool.name),
+                "the tool {} that loads the skill {} has another tool's name",
+                tool.name,
+                skill.name
+            );
+            list.push(tool);
+        }
+        self.extension_list = Arc::clone(&self.list);
+        self.list = Arc::new(list);
+        self.extension_info = Arc::new(info.clone().with_instructions(extension_instructions));
         self.info = Arc::new(info);
         self.skills = skills;
-        self
+        Ok(self)
     }
 
     /// Abandons a call when its client goes away, rather than running it on
@@ -231,9 +272,17 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, ErrorData> {
-        // rmcp's own initialize, and its event.
+        // rmcp's own initialize, with the instructions for the client, and
+        // its event.
         context.peer.set_peer_info(request.clone());
-        let result = self.negotiate_initialize(&request);
+        let mut result = self.negotiate_initialize(&request);
+        if let Ok(result) = &mut result
+            && skills::declared(Some(&request.capabilities))
+        {
+            result
+                .instructions
+                .clone_from(&self.extension_info.instructions);
+        }
         if let Some(scope) = usage_scope(&context) {
             let mut event = scope.event("McpInitialize", "initialize");
             usage::mcp::client(
@@ -254,15 +303,21 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         &self,
         context: RequestContext<RoleServer>,
     ) -> Result<DiscoverResult, ErrorData> {
-        // rmcp's own discover, and its event.
+        // rmcp's own discover, with the instructions for the client, and
+        // its event.
         if let Some(scope) = usage_scope(&context) {
             let mut event = scope.event("McpDiscover", "discover");
             request_client(&mut event, &context);
             scope.record(event);
         }
+        let info = if declares_skills(&context) {
+            &self.extension_info
+        } else {
+            &self.info
+        };
         Ok(DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
-            self.get_info(),
+            (**info).clone(),
         ))
     }
 
@@ -276,7 +331,9 @@ impl<T: Tools> ServerHandler for McpServer<T> {
             request_client(&mut event, &context);
             scope.record(event);
         }
-        Ok(ListToolsResult::with_all_items((*self.list).clone()))
+        Ok(ListToolsResult::with_all_items(
+            (**self.tools_seen(&context)).clone(),
+        ))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -294,7 +351,10 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         let name = request.name.to_string();
         let arguments = request.arguments.unwrap_or_default();
         let scope = usage_scope(&context);
-        let tool = self.list.iter().find(|tool| tool.name == name);
+        let tool = self
+            .tools_seen(&context)
+            .iter()
+            .find(|tool| tool.name == name);
         // The call's usage event, if the endpoint records usage.
         let usage = scope.clone().map(|scope| {
             // An unknown tool's name is the client's, cut without details.
@@ -347,9 +407,18 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         } else {
             None
         };
-        let call = self
-            .tools
-            .call_with_usage(&name, Value::Object(arguments), scope.clone());
+        // A skill's tool returns its SKILL.md; the others are the server's.
+        let skill = self.skills.by_tool(&name);
+        let call = async {
+            match skill {
+                Some(skill) => Ok(Output::Text(skill.instructions().to_owned())),
+                None => {
+                    self.tools
+                        .call_with_usage(&name, Value::Object(arguments), scope.clone())
+                        .await
+                }
+            }
+        };
         let started = Instant::now();
         let outcome = if self.cancel_on_disconnect {
             // rmcp cancels the request's token when the client disconnects
@@ -524,6 +593,16 @@ const URI_CHARS: usize = 1024;
 const UNKNOWN_TOOL_CHARS: usize = 128;
 
 impl<T> McpServer<T> {
+    /// The tools a request's client sees: without those that load the
+    /// skills if it declares the skills extension.
+    fn tools_seen(&self, context: &RequestContext<RoleServer>) -> &Arc<Vec<Tool>> {
+        if declares_skills(context) {
+            &self.extension_list
+        } else {
+            &self.list
+        }
+    }
+
     /// The answer to `skills/list` or `skills/get`. One page holds every
     /// skill, so a listing's cursor is one this server never gave.
     fn skills_request(&self, method: &str, params: &Value) -> Result<Value, ErrorData> {
@@ -554,6 +633,13 @@ fn usage_scope(context: &RequestContext<RoleServer>) -> Option<Scope> {
         .extensions
         .get::<Scope>()
         .cloned()
+}
+
+/// Whether the request's client declares the skills extension, in the
+/// capabilities a 2026-07-28 request carries in its `_meta`. An earlier
+/// client's requests after initialize carry none.
+fn declares_skills(context: &RequestContext<RoleServer>) -> bool {
+    skills::declared(context.meta.client_capabilities().as_ref())
 }
 
 /// Adds to a tool call's event what the tool added to its scope

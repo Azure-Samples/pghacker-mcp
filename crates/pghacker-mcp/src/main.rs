@@ -87,7 +87,11 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         instructions(),
     )
-    .with_skills(tools::skills().context("the embedded skills")?);
+    .with_skills(
+        tools::skills().context("the embedded skills")?,
+        tools::EXTENSION_INSTRUCTIONS,
+    )
+    .context("serving the skills")?;
     let front_door = env
         .get("PGHACKER_FRONT_DOOR_ID")
         .map(|id| FrontDoor(Arc::from(id.trim())));

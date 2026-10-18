@@ -108,6 +108,18 @@ async fn rpc_2026(
     method: &str,
     params: Value,
 ) -> Value {
+    rpc_2026_as(client, base, id, method, params, json!({})).await
+}
+
+/// [`rpc_2026`] from a client with these `capabilities`.
+async fn rpc_2026_as(
+    client: &reqwest::Client,
+    base: &str,
+    id: u64,
+    method: &str,
+    params: Value,
+    capabilities: Value,
+) -> Value {
     let name = match method {
         "tools/call" | "prompts/get" => params.get("name"),
         "resources/read" => params.get("uri"),
@@ -118,7 +130,7 @@ async fn rpc_2026(
     let mut params = params;
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientCapabilities": capabilities,
     });
     let mut request = client
         .post(format!("{base}/mcp"))
@@ -361,14 +373,24 @@ const SKILL: &str = "---\nname: demo\ndescription: Shows how; use when asked for
 const NOTES: &str = "Notes for the demo.\n";
 const SKILL_URI: &str = "skill://demo/SKILL.md";
 const NOTES_URI: &str = "skill://demo/references/notes.md";
+const SKILL_TOOL: &str = "load_skill_demo";
+/// The server's instructions, for clients without the skills extension.
+const TOOL_INSTRUCTIONS: &str = "Echo tools; for a demo, call load_skill_demo.";
+/// The instructions for clients that declare the skills extension.
+const EXTENSION_INSTRUCTIONS: &str = "Echo tools; for a demo, use the skill demo.";
 
-async fn serve_skills() -> String {
-    let skills = Skills::from_files([
+fn demo_skills() -> Skills {
+    Skills::from_files([
         ("demo/SKILL.md", SKILL.as_bytes().to_vec()),
         ("demo/references/notes.md", NOTES.as_bytes().to_vec()),
     ])
-    .unwrap();
-    let server = McpServer::new(Echo, "echo", "1", "Echo tools.").with_skills(skills);
+    .unwrap()
+}
+
+async fn serve_skills() -> String {
+    let server = McpServer::new(Echo, "echo", "1", TOOL_INSTRUCTIONS)
+        .with_skills(demo_skills(), EXTENSION_INSTRUCTIONS)
+        .unwrap();
     serve_server(server, None).await
 }
 
@@ -566,4 +588,233 @@ async fn a_server_without_skills_declares_none_and_knows_no_skills_methods() {
     )
     .await;
     assert_eq!(legacy["error"]["code"], -32601, "{legacy}");
+    let tools = rpc_2026(&client, &base, 4, "tools/list", json!({})).await;
+    assert_eq!(tools_named(&tools), ["echo", "fail"], "{tools}");
+}
+
+/// The names of the tools a tools/list answer lists.
+fn tools_named(listed: &Value) -> Vec<&str> {
+    listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect()
+}
+
+/// A client's capabilities, with the skills extension or without.
+fn capabilities(skills: bool) -> Value {
+    if skills {
+        json!({ "extensions": { EXTENSION: {} } })
+    } else {
+        json!({ "extensions": { "io.modelcontextprotocol/ui": {} } })
+    }
+}
+
+#[tokio::test]
+async fn a_client_without_the_extension_gets_a_tool_that_loads_the_skill() {
+    let base = serve_skills().await;
+    let client = reqwest::Client::new();
+
+    // A 2026-07-28 client: the instructions name the tool, which tools/list
+    // has, without arguments and with the skill's description.
+    let discovered = rpc_2026_as(
+        &client,
+        &base,
+        1,
+        "server/discover",
+        json!({}),
+        capabilities(false),
+    )
+    .await;
+    assert_eq!(
+        discovered["result"]["instructions"], TOOL_INSTRUCTIONS,
+        "{discovered}"
+    );
+    let listed = rpc_2026_as(
+        &client,
+        &base,
+        2,
+        "tools/list",
+        json!({}),
+        capabilities(false),
+    )
+    .await;
+    assert_eq!(
+        tools_named(&listed),
+        ["echo", "fail", SKILL_TOOL],
+        "{listed}"
+    );
+    let tool = &listed["result"]["tools"][2];
+    assert_eq!(
+        tool["inputSchema"],
+        json!({ "type": "object", "properties": {} })
+    );
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    let description = tool["description"].as_str().unwrap();
+    assert!(
+        description.contains("Shows how; use when asked for a demo."),
+        "{description}"
+    );
+    assert!(!description.contains("skill://"), "{description}");
+
+    // The tool returns SKILL.md: what resources/read gives, the listing's
+    // digest.
+    let called = rpc_2026_as(
+        &client,
+        &base,
+        3,
+        "tools/call",
+        json!({ "name": SKILL_TOOL, "arguments": {} }),
+        capabilities(false),
+    )
+    .await;
+    assert_eq!(called["result"]["isError"], false, "{called}");
+    let text = called["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, SKILL);
+    assert_eq!(digest(text), demo_entry()["resources"][0]["digest"]);
+    let read = rpc_2026_as(
+        &client,
+        &base,
+        4,
+        "resources/read",
+        json!({ "uri": SKILL_URI }),
+        capabilities(false),
+    )
+    .await;
+    assert_eq!(read["result"]["contents"][0]["text"], text);
+
+    // An earlier client: initialize's instructions name the tool, and its
+    // requests after, which carry no capabilities, get it.
+    let (_, init) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 5, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": capabilities(false),
+            "clientInfo": { "name": "t", "version": "1" } } }),
+    )
+    .await;
+    assert_eq!(init["result"]["instructions"], TOOL_INSTRUCTIONS, "{init}");
+    let (_, listed) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {} }),
+    )
+    .await;
+    assert_eq!(
+        tools_named(&listed),
+        ["echo", "fail", SKILL_TOOL],
+        "{listed}"
+    );
+    let (_, called) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": SKILL_TOOL } }),
+    )
+    .await;
+    assert_eq!(called["result"]["content"][0]["text"], SKILL, "{called}");
+}
+
+#[tokio::test]
+async fn a_client_with_the_extension_gets_the_skill_only_through_it() {
+    let base = serve_skills().await;
+    let client = reqwest::Client::new();
+    let discovered = rpc_2026_as(
+        &client,
+        &base,
+        1,
+        "server/discover",
+        json!({}),
+        capabilities(true),
+    )
+    .await;
+    assert_eq!(
+        discovered["result"]["instructions"], EXTENSION_INSTRUCTIONS,
+        "{discovered}"
+    );
+    let listed = rpc_2026_as(
+        &client,
+        &base,
+        2,
+        "tools/list",
+        json!({}),
+        capabilities(true),
+    )
+    .await;
+    assert_eq!(tools_named(&listed), ["echo", "fail"], "{listed}");
+    let called = rpc_2026_as(
+        &client,
+        &base,
+        3,
+        "tools/call",
+        json!({ "name": SKILL_TOOL, "arguments": {} }),
+        capabilities(true),
+    )
+    .await;
+    assert_eq!(called["error"]["code"], -32602, "{called}");
+    // The extension, and the resource, serve the skill.
+    let got = rpc_2026_as(
+        &client,
+        &base,
+        4,
+        "skills/get",
+        json!({ "uri": SKILL_URI }),
+        capabilities(true),
+    )
+    .await;
+    assert_eq!(got["result"]["skill"], demo_entry(), "{got}");
+    let read = rpc_2026_as(
+        &client,
+        &base,
+        5,
+        "resources/read",
+        json!({ "uri": SKILL_URI }),
+        capabilities(true),
+    )
+    .await;
+    assert_eq!(read["result"]["contents"][0]["text"], SKILL, "{read}");
+
+    // An earlier client that declares it at initialize gets these
+    // instructions; its later requests carry no capabilities.
+    let (_, init) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": capabilities(true),
+            "clientInfo": { "name": "t", "version": "1" } } }),
+    )
+    .await;
+    assert_eq!(
+        init["result"]["instructions"], EXTENSION_INSTRUCTIONS,
+        "{init}"
+    );
+}
+
+#[derive(Clone)]
+struct Clash;
+
+static CLASH: &[ToolSpec] = &[ToolSpec {
+    name: SKILL_TOOL,
+    description: "Has the demo skill's tool's name.",
+    effect: Effect::Read,
+    schema: schema::<NoArgs>,
+}];
+
+impl Tools for Clash {
+    fn specs(&self) -> &'static [ToolSpec] {
+        CLASH
+    }
+
+    async fn call(&self, _name: &str, _arguments: Value) -> Result<Output, ErrorData> {
+        Ok(Output::Text(String::new()))
+    }
+}
+
+#[test]
+fn a_skill_whose_tool_another_tool_names_is_refused() {
+    let refused = McpServer::new(Clash, "clash", "1", "Clashes.")
+        .with_skills(demo_skills(), "Clashes.")
+        .err()
+        .unwrap();
+    assert!(refused.to_string().contains(SKILL_TOOL), "{refused}");
 }

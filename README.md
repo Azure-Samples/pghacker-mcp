@@ -64,7 +64,7 @@ Connect any MCP client to `http://127.0.0.1:3102/mcp`, or ask a **pghacker Evalu
 | Code | `search`, `grep`, `read_file`, `list_files` and `blame`, at any commit; `get_commit` and `search_commits`, like `git show` and `git log`; `search_patches`, in the patches posted to the list |
 | SQL and graph | `get_ontology` describes the data; `query` runs one read-only SQL statement, Cypher included |
 
-It also serves a skill, [`review-as-author`](skills/review-as-author/SKILL.md): a review of a patch, commit or design as a given pgsql-hackers author would give it (Tom Lane, say), each point quoting that author's own messages. Clients that support MCP's skills extension find it at `skill://review-as-author/SKILL.md`. Elsewhere, attach that resource, or install the folder as a skill in your agent; the [reference](docs/reference.md#skills) explains.
+It also serves a skill, [`review-as-author`](skills/review-as-author/SKILL.md): a review of a patch, commit or design as a given pgsql-hackers author would give it (Tom Lane, say), each point quoting that author's own messages. Clients that support MCP's skills extension get it at `skill://review-as-author/SKILL.md`; the others get a tool, `load_skill_review_as_author`, which returns it, and instructions that say to call it. A user can also attach the skill as a resource, or install the folder as a skill in an agent; the [reference](docs/reference.md#skills) explains.
 
 ## Check it
 
@@ -76,7 +76,7 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 npm run eval -- --questions eval/reviews.json --skill skills/review-as-author/SKILL.md --results eval/RESULTS-reviews.md
 ```
 
-The last reviews 10 patches as their actual reviewers would have, with the `review-as-author` skill; without `--skill`, it gives the baseline.
+The last reviews 10 patches as their actual reviewers would have, with the `review-as-author` skill in the prompt; without `--skill`, the agents must load it on their own, with `load_skill_review_as_author`.
 
 ## Deploy to Azure
 

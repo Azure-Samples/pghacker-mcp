@@ -8,6 +8,10 @@
 //! `skills/get` give a skill's frontmatter, verbatim, and the digest and size
 //! of each of its files, so that hosts can check what they read.
 //!
+//! Few clients load skills that way yet. For a client that doesn't declare
+//! the extension ([`declared`]), each skill is also a tool that takes no
+//! arguments and returns its `SKILL.md` ([`Skill::tool`]).
+//!
 //! The skills are text files embedded in the binary. Startup refuses a skill
 //! that breaks the Agent Skills rules or the extension's limits.
 
@@ -16,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use include_dir::{Dir, DirEntry};
-use rmcp::model::Resource;
+use rmcp::model::{ClientCapabilities, Resource, Tool, ToolAnnotations};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -24,10 +28,22 @@ use sha2::{Digest, Sha256};
 pub const EXTENSION: &str = "io.modelcontextprotocol/skills";
 /// Every skill's instructions.
 pub const SKILL_FILE: &str = "SKILL.md";
+/// What the name of a skill's tool starts with; the skill's name follows,
+/// with underscores for its hyphens.
+pub const TOOL_PREFIX: &str = "load_skill_";
 const SCHEME: &str = "skill://";
 /// The extension's limits per skill, which every host accepts.
 const MAX_FILES: usize = 512;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Whether a client declares the skills extension in `capabilities`: those
+/// of its initialize, or of a 2026-07-28 request's `_meta`. A request with
+/// neither, such as an earlier client's after initialize, doesn't.
+pub fn declared(capabilities: Option<&ClientCapabilities>) -> bool {
+    capabilities
+        .and_then(|capabilities| capabilities.extensions.as_ref())
+        .is_some_and(|extensions| extensions.contains_key(EXTENSION))
+}
 
 /// A file of a skill.
 #[derive(Debug)]
@@ -64,6 +80,34 @@ impl Skill {
             .map(|file| json!({ "uri": file.uri, "digest": file.digest, "size": file.text.len() }))
             .collect();
         json!({ "uri": self.uri, "frontmatter": self.frontmatter, "resources": resources })
+    }
+
+    /// The skill's `SKILL.md`, as resources/read and its tool give it.
+    pub fn instructions(&self) -> &str {
+        // SKILL.md comes first.
+        &self.files[0].text
+    }
+
+    /// The name of the tool that loads the skill: load_skill_review_as_author
+    /// for review-as-author.
+    pub fn tool_name(&self) -> String {
+        format!("{TOOL_PREFIX}{}", self.name.replace('-', "_"))
+    }
+
+    /// The tool that loads the skill, for clients without the skills
+    /// extension: no arguments, and the skill's description, so that the
+    /// tool list says when to use it.
+    pub fn tool(&self) -> Tool {
+        let mut schema = Map::new();
+        schema.insert("type".into(), json!("object"));
+        schema.insert("properties".into(), json!({}));
+        let description = format!(
+            "Loads the {} skill: instructions to follow, with this server's other tools, for the \
+             task below. Call it before that task, then follow what it returns. The skill: {}",
+            self.name, self.description
+        );
+        Tool::new(self.tool_name(), description, Arc::new(schema))
+            .with_annotations(ToolAnnotations::new().read_only(true))
     }
 }
 
@@ -125,6 +169,14 @@ impl Skills {
     /// The skill whose `SKILL.md` is at `uri`.
     pub fn get(&self, uri: &str) -> Option<&Skill> {
         self.skills.iter().find(|skill| skill.uri == uri)
+    }
+
+    /// The skill that the tool named `name` loads ([`Skill::tool`]).
+    pub fn by_tool(&self, name: &str) -> Option<&Skill> {
+        if !name.starts_with(TOOL_PREFIX) {
+            return None;
+        }
+        self.skills.iter().find(|skill| skill.tool_name() == name)
     }
 
     /// The file at `uri`, of any skill.
@@ -360,6 +412,53 @@ mod tests {
         assert_eq!(resources.len(), 2);
         assert_eq!(resources[0].name, "demo");
         assert_eq!(resources[0].mime_type.as_deref(), Some("text/markdown"));
+    }
+
+    #[test]
+    fn a_skill_is_a_tool_without_arguments_for_clients_without_the_extension() {
+        let skills = Skills::from_files(files(&[
+            ("demo/SKILL.md", SKILL),
+            ("demo/references/notes.md", "notes"),
+        ]))
+        .unwrap();
+        let skill = skills.get("skill://demo/SKILL.md").unwrap();
+        assert_eq!(skill.instructions(), SKILL);
+        let tool = skill.tool();
+        assert_eq!(tool.name, "load_skill_demo");
+        assert_eq!(
+            Value::Object((*tool.input_schema).clone()),
+            json!({ "type": "object", "properties": {} })
+        );
+        let description = tool.description.as_deref().unwrap();
+        assert!(description.contains(&skill.description), "{description}");
+        assert!(!description.contains("skill://"), "{description}");
+        assert_eq!(tool.annotations.unwrap().read_only_hint, Some(true));
+        assert!(skills.by_tool("load_skill_demo").is_some());
+        assert!(skills.by_tool("load_skill_other").is_none());
+        assert!(skills.by_tool("demo").is_none());
+
+        let hyphenated = Skills::from_files(files(&[(
+            "review-as-author/SKILL.md",
+            "---\nname: review-as-author\ndescription: Reviews.\n---\n",
+        )]))
+        .unwrap();
+        let skill = hyphenated.iter().next().unwrap();
+        assert_eq!(skill.tool_name(), "load_skill_review_as_author");
+        assert!(hyphenated.by_tool("load_skill_review_as_author").is_some());
+    }
+
+    #[test]
+    fn a_client_declares_the_extension_among_its_capabilities() {
+        let capabilities =
+            |value: Value| serde_json::from_value::<ClientCapabilities>(value).unwrap();
+        assert!(declared(Some(&capabilities(
+            json!({ "extensions": { EXTENSION: {} } })
+        ))));
+        assert!(!declared(Some(&capabilities(
+            json!({ "extensions": { "io.modelcontextprotocol/ui": {} } })
+        ))));
+        assert!(!declared(Some(&capabilities(json!({})))));
+        assert!(!declared(None));
     }
 
     #[test]

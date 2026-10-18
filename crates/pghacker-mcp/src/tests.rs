@@ -237,16 +237,23 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
         details: true,
     })
     .unwrap();
-    let server =
-        McpServer::new(Echo, "echo", "1", "Echo.").with_skills(crate::tools::skills().unwrap());
+    let server = McpServer::new(Echo, "echo", "1", "Echo.")
+        .with_skills(
+            crate::tools::skills().unwrap(),
+            crate::tools::EXTENSION_INSTRUCTIONS,
+        )
+        .unwrap();
     let base = listen(internal(router(server, None), &usage)).await;
     let client = reqwest::Client::new();
     let uri = crate::tools::REVIEW_SKILL;
+    let tool = crate::tools::REVIEW_TOOL;
     let requests = [
         json!({ "jsonrpc": "2.0", "id": 1, "method": "skills/list", "params": {} }),
         json!({ "jsonrpc": "2.0", "id": 2, "method": "skills/get", "params": { "uri": uri } }),
         json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": uri } }),
         json!({ "jsonrpc": "2.0", "id": 4, "method": "skills/get", "params": { "uri": "skill://nope/SKILL.md" } }),
+        // A client without the skills extension loads it with its tool.
+        json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": tool, "arguments": {} } }),
     ];
     for request in requests {
         assert_eq!(post(&client, &base, &[], request).await, 200);
@@ -260,7 +267,9 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
             let properties = properties(event);
             (
                 properties["action"].as_str().unwrap(),
-                properties["uri"].as_str(),
+                properties["uri"]
+                    .as_str()
+                    .or(properties["toolName"].as_str()),
                 properties["activityStatus"].as_str().unwrap(),
             )
         })
@@ -272,6 +281,7 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
             ("McpSkillsGet", Some(uri), "Succeeded"),
             ("McpResourceRead", Some(uri), "Succeeded"),
             ("McpSkillsGet", Some("skill://nope/SKILL.md"), "Failed"),
+            ("McpToolCall", Some(tool), "Succeeded"),
         ],
         "{events:#?}"
     );
