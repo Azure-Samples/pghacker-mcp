@@ -2,6 +2,26 @@
 
 Settings, tools and internals, for looking things up. The [README](../README.md) gets you started.
 
+## Repository
+
+| Path | Contents |
+| --- | --- |
+| `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing, usage telemetry |
+| `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
+| `crates/pghacker-code` | The commit history's builder and sync |
+| `crates/pghacker-codesearch` | The code tools: search, grep, files, blame, commits and patches |
+| `crates/pghacker-sqlquery` | The read-only `query` tool |
+| `crates/pghacker-api` | Mail and graph tools |
+| `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
+| `crates/pghacker-replay` | The search replays and the history's parity check |
+| `migrations/`, `db/` | The schema, and the PostgreSQL image |
+| `plugin/` | Branding, agents and the MCP catalog |
+| `skills/` | The skills pghacker-mcp serves |
+| `home/` | The public home page: React, Vite and TypeScript |
+| `scripts/` | The launcher, the site's routes and its edge, crawl and evaluation drivers; the container's supervisor, the home page's server, probe and corpus restore |
+| `Dockerfile`, `deploy/` | The image, and the Azure deployment |
+| `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18, which adds `bind_text` |
+
 ## Configuration
 
 `npm run setup` creates `.env`, readable only by you, with random passwords; it keeps an existing `.env` and adds any missing password. Settings marked * may also come from the shell.
@@ -224,23 +244,3 @@ Two profilers run as Cargo examples: `profile_search`, on a synthetic history, a
 cargo run --locked -p pghacker-codesearch --example profile_search
 cargo run --locked -p pghacker-replay --example profile_full
 ```
-
-## Repository
-
-| Path | Contents |
-| --- | --- |
-| `crates/pghacker-core` | Config, pools, bootstrap and migrations, embeddings, search modes, MCP plumbing, usage telemetry |
-| `crates/pghacker-mail` | Archive client, mbox and MIME parsing, threading, authors, patches, anchors, chunks |
-| `crates/pghacker-code` | The commit history's builder and sync |
-| `crates/pghacker-codesearch` | The code tools: search, grep, files, blame, commits and patches |
-| `crates/pghacker-sqlquery` | The read-only `query` tool |
-| `crates/pghacker-api` | Mail and graph tools |
-| `crates/pghacker-indexer`, `crates/pghacker-mcp` | The two services |
-| `crates/pghacker-replay` | The search replays and the history's parity check |
-| `migrations/`, `db/` | The schema, and the PostgreSQL image |
-| `plugin/` | Branding, agents and the MCP catalog |
-| `skills/` | The skills pghacker-mcp serves |
-| `home/` | The public home page: React, Vite and TypeScript |
-| `scripts/` | The launcher, the site's routes and its edge, crawl and evaluation drivers; the container's supervisor, the home page's server, probe and corpus restore |
-| `Dockerfile`, `deploy/` | The image, and the Azure deployment |
-| `vendor/tokio-postgres` | A fork of tokio-postgres 0.7.18, which adds `bind_text` |
