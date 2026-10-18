@@ -26,8 +26,8 @@ export function App({ url }: { url: string }) {
             PostgreSQL's design history and code, <span className="accent">with citations</span>, for your AI agent
           </h1>
           <p className="lede">{PRODUCT.summary}</p>
-          <PoweredBy />
           <ConnectPanel url={url} />
+          <PoweredBy />
         </section>
         <Capabilities />
         <div className="section section-examples">

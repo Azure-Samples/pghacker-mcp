@@ -3,7 +3,7 @@
 
 import { POWERED_BY } from "../content.ts";
 
-/** The credit to the database under the service, on a horizon above the connect panel. */
+/** The credit to the database under the service, on a horizon below the connect panel. */
 export function PoweredBy() {
   return (
     <p className="powered-by">

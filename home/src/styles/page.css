@@ -41,8 +41,8 @@
 /* --- Powered by ----------------------------------------------------------- */
 
 /*
- * HorizonDB's logo and name, centered between the lede and the connect panel
- * on a horizon: hairlines in the logo's blue and cyan, fading out to each side.
+ * HorizonDB's logo and name, centered below the connect panel on a horizon:
+ * hairlines in the logo's blue and cyan, fading out to each side.
  */
 .powered-by {
   display: flex;
@@ -51,7 +51,7 @@
   gap: 16px;
   width: 100%;
   max-width: 820px;
-  margin-top: 30px;
+  margin-top: 36px;
 }
 
 .powered-by-rule {
@@ -88,10 +88,6 @@
 .powered-by-name {
   color: var(--hdb-text);
   font-weight: 650;
-}
-
-.powered-by + .connect {
-  margin-top: 24px;
 }
 
 /* --- The connect panel --------------------------------------------------- */

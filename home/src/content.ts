@@ -17,7 +17,7 @@ export const PRODUCT = {
 } as const;
 
 /**
- * What the service runs on, said beside HorizonDB's logo above the connect
+ * What the service runs on, said beside HorizonDB's logo below the connect
  * panel. The logo is Azure HorizonDB's product icon, loaded from Microsoft's
  * CDN, where azure.microsoft.com/products/horizondb gets it; the page's CSP
  * allows that host (scripts/lib/edge.mjs).
