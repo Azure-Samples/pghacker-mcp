@@ -202,7 +202,7 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
   }
   // Usage telemetry, when the app has Application Insights: its resource,
   // the key of the users' keyed hashes, and whether pghacker-mcp records
-  // what users type into tools (PRIVACY.md).
+  // what users type into tools.
   const connectionString = value(env, "APPLICATIONINSIGHTS_CONNECTION_STRING");
   let usage;
   if (serve && connectionString !== undefined) {

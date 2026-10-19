@@ -739,7 +739,7 @@ variable "usage_total_retention_days" {
 }
 
 variable "usage_details_enabled" {
-  description = "Whether usage telemetry records what users type into tools: their arguments' values, error messages, and sqlparser's errors for the statements query lets through by their tokens (PGHACKER_USAGE_DETAILS; PRIVACY.md). Off by default: a call then keeps which tool, its arguments' names and size, the values of its fixed-choice arguments (enums and booleans), its outcome and, for query, PostgreSQL's SQLSTATE. Feedback comments don't depend on it: feedback_comments_enabled alone decides."
+  description = "Whether usage telemetry records what users type into tools: their arguments' values, error messages, and sqlparser's errors for the statements query lets through by their tokens (PGHACKER_USAGE_DETAILS). Off by default: a call then keeps which tool, its arguments' names and size, the values of its fixed-choice arguments (enums and booleans), its outcome and, for query, PostgreSQL's SQLSTATE. Feedback comments don't depend on it: feedback_comments_enabled alone decides."
   type        = bool
   default     = false
   nullable    = false
