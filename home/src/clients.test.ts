@@ -15,7 +15,7 @@ const byId = (id: string) => {
 test("each agent has its own tab, the standalone agents before the editors, and Other has nothing to paste", () => {
   assert.deepEqual(
     CLIENTS.map((client) => client.id),
-    ["claude-code", "codex", "copilot-cli", "copilot-app", "vscode", "cursor", "other"],
+    ["claude-code", "codex", "copilot-cli", "copilot-app", "opencode", "vscode", "cursor", "other"],
   );
   assert.equal(new Set(CLIENTS.map((client) => client.label)).size, CLIENTS.length);
   for (const client of CLIENTS) assert.ok(client.action.length > 0, client.id);
@@ -31,6 +31,7 @@ test("the JSON configurations are each client's shape, for the page's URL", () =
   assert.deepEqual(parse("copilot-app"), parse("copilot-cli"));
   assert.deepEqual(parse("claude-code"), { mcpServers: { [SERVER_NAME]: { type: "http", url: URL } } });
   assert.deepEqual(parse("cursor"), { mcpServers: { [SERVER_NAME]: { url: URL } } });
+  assert.deepEqual(parse("opencode"), { mcp: { [SERVER_NAME]: { type: "remote", url: URL } } });
 });
 
 test("Codex's configuration is a TOML table with the URL", () => {
@@ -41,6 +42,7 @@ test("the commands add the server by name with the URL", () => {
   assert.equal(byId("copilot-cli").command?.(URL), `copilot mcp add --transport http ${SERVER_NAME} ${URL}`);
   assert.equal(byId("claude-code").command?.(URL), `claude mcp add --transport http ${SERVER_NAME} ${URL}`);
   assert.equal(byId("codex").command?.(URL), `codex mcp add ${SERVER_NAME} --url ${URL}`);
+  assert.equal(byId("opencode").command?.(URL), `opencode mcp add ${SERVER_NAME} --url ${URL}`);
 });
 
 test("every configuration file sits behind a disclosure that names it", () => {
@@ -66,4 +68,8 @@ test("where a form picks the transport, the steps say HTTP; the commands pass it
   }
   assert.match(byId("claude-code").command?.(URL) ?? "", /--transport http /);
   assert.match(byId("copilot-cli").command?.(URL) ?? "", /--transport http /);
+});
+
+test("OpenCode's server goes where `opencode mcp add --url` writes it: its global opencode.json", () => {
+  assert.equal(byId("opencode").config?.file, "~/.config/opencode/opencode.json");
 });

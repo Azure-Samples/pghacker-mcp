@@ -311,9 +311,10 @@
   gap: 8px;
 }
 
+/* The label is one span, so that a long file name wraps after the words, not between them. */
 .disclosure {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   justify-self: start;
   gap: 4px;
   padding: 2px 4px 2px 0;
@@ -323,6 +324,7 @@
   font: inherit;
   font-size: 13px;
   font-weight: 500;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -333,11 +335,15 @@
 
 .disclosure code {
   font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
+/* Centered on the label's first line: 13px text, a 19.5px line. */
 .disclosure-chevron {
+  flex-shrink: 0;
   width: 15px;
   height: 15px;
+  margin-top: 2px;
 }
 
 .try {

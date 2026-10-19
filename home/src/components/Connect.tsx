@@ -149,7 +149,9 @@ function ClientSteps({ url }: { url: string }) {
               onClick={() => setOpen(!open)}
             >
               <ChevronRight className="disclosure-chevron" aria-hidden="true" />
-              {configPrefix(config)} <code>{config.file}</code>
+              <span>
+                {configPrefix(config)} <code>{config.file}</code>
+              </span>
             </button>
             <div className="snippet" id={`${id}-config`} hidden={!open}>
               <pre>

@@ -7,12 +7,16 @@
  * collapsed. Each follows the client's documentation: `claude mcp add` and
  * .mcp.json, `codex mcp add --url` and ~/.codex/config.toml, Copilot CLI's
  * `copilot mcp add` and ~/.copilot/mcp-config.json, the GitHub Copilot app's
- * Customize > MCP, which also loads Copilot CLI's servers, VS Code's MCP: Add
- * Server and .vscode/mcp.json, and Cursor's mcp.json.
+ * Customize > MCP, which also loads Copilot CLI's servers, OpenCode's
+ * `opencode mcp add --url` and the "remote" server it writes to
+ * ~/.config/opencode/opencode.json (OpenCode starts OAuth only on a 401, and
+ * /mcp needs no sign-in), VS Code's MCP: Add Server and .vscode/mcp.json,
+ * and Cursor's mcp.json.
  *
  * The agents that run on their own come first: Claude Code and OpenAI Codex,
  * in order of use by the Stack Overflow Developer Survey 2026 (66% and 30%),
- * then GitHub Copilot's CLI and app. The editors follow, VS Code and Cursor.
+ * then GitHub Copilot's CLI and app, and OpenCode (14%). The editors follow,
+ * VS Code and Cursor.
  */
 
 /** The name each agent knows the server by. */
@@ -83,6 +87,17 @@ export const CLIENTS: readonly Client[] = [
     label: "Copilot app",
     action: "In the GitHub Copilot app, click Customize in the sidebar, then MCP, and add a custom server with this URL. Use HTTP transport.",
     config: copilotConfig,
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    action: "Run in a terminal:",
+    command: (url) => `opencode mcp add ${SERVER_NAME} --url ${url}`,
+    config: {
+      file: "~/.config/opencode/opencode.json",
+      language: "json",
+      text: (url) => json({ mcp: { [SERVER_NAME]: { type: "remote", url } } }),
+    },
   },
   {
     id: "vscode",
