@@ -255,7 +255,8 @@ export const EXAMPLES: readonly Example[] = [
         kind: "mail",
         author: "Robert Haas",
         date: "2025-10-30",
-        quote: "any form of user control over the planner tends to be a lightning rod for criticism around here.",
+        quote:
+          "we can want to improve the planner over the long term and *also* want to have tools available to work around problems with it in the short term.",
         messageId: "CA+TgmoZ-Jh1T6QyWoCODMVQdhTUPYkaZjWztzP1En4=ZHoKPzw@mail.gmail.com",
       },
       {
