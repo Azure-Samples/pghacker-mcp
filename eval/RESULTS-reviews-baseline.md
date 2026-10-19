@@ -20,4 +20,4 @@ pghacker-mcp: the endpoint given as `--mcp-url`.
 | r09: Opportunistic pruning is lost under direct io, and nothing shows it | Melanie Plageman | no | 0.50 | yes | 4 | yes | 142 |
 | r10: [PATCH] Add ALTER SYSTEM RELOAD | Chao Li | yes | 1.00 | yes | 2 | yes | 163 |
 
-Notes: the baseline for [RESULTS-reviews.md](RESULTS-reviews.md), the same reviews without the skill. A second run passed 6 of 10, with the same mean score.
+Notes: the baseline for the first 10 reviews of [RESULTS-reviews.md](RESULTS-reviews.md), the same reviews without the skill. A second run passed 6 of 10, with the same mean score.
