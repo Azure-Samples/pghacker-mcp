@@ -1,5 +1,13 @@
 # pghacker-mcp
 
+[![Claude Code](https://img.shields.io/badge/Claude_Code-7c3aed.svg)](#use-it)
+[![Codex](https://img.shields.io/badge/Codex-4f46e5.svg)](#use-it)
+[![Copilot CLI](https://img.shields.io/badge/Copilot_CLI-2563eb.svg)](#use-it)
+[![Copilot app](https://img.shields.io/badge/Copilot_app-0284c7.svg)](#use-it)
+[![OpenCode](https://img.shields.io/badge/OpenCode-0891b2.svg)](#use-it)
+[![VS Code](https://img.shields.io/badge/VS_Code-0d9488.svg)](#use-it)
+[![Cursor](https://img.shields.io/badge/Cursor-059669.svg)](#use-it)
+
 pghacker-mcp answers questions about PostgreSQL's design history and source code, with citations. Ask why a feature works as it does, or what happened to SQL/PGQ, and an agent finds the pgsql-hackers threads, commits and code that answer it, and quotes them.
 
 The project is powered by PostgreSQL itself. The mail, the graph and PostgreSQL's full commit history, live in [Azure HorizonDB](https://azure.microsoft.com/products/horizondb) (PostgreSQL when run locally), and PostgreSQL indexes do the searching: trigram for code and text, vector for semantic search, BM25 for full-text search, and B-trees over the history's commit ranges, with Apache AGE for the graph. Typical searches across the whole commit history return in milliseconds.
