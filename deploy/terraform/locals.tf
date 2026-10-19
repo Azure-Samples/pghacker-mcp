@@ -141,6 +141,7 @@ locals {
       PGHACKER_FEEDBACK_SESSION_GAP   = tostring(var.feedback_session_gap_seconds)
       PGHACKER_FEEDBACK_MIN_QUESTIONS = tostring(var.feedback_min_questions)
       PGHACKER_FEEDBACK_CLIENTS       = join(",", var.feedback_clients)
+      PGHACKER_FEEDBACK_DEBUG         = tostring(var.feedback_debug_enabled)
     } : {},
     var.app_env,
   )

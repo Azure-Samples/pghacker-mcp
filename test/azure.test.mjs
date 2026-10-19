@@ -313,11 +313,12 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     PGHACKER_FEEDBACK_QUESTION_GAP: "180",
     PGHACKER_FEEDBACK_SESSION_GAP: "600",
     PGHACKER_FEEDBACK_MIN_QUESTIONS: "3",
+    PGHACKER_FEEDBACK_DEBUG: "false",
   };
   const withFeedback = { ...USAGE_ENV, PGHACKER_FEEDBACK_RATE: "0.1", PGHACKER_FEEDBACK_COMMENTS: "false" };
   assert.deepEqual(settings(withFeedback), [["mcp", { PGHACKER_FEEDBACK_RATE: "0.1", ...defaults }]]);
   assert.deepEqual(readAzureConfig(withFeedback).feedback, {
-    rate: 0.1, comments: false, questionGap: 180, sessionGap: 600, minQuestions: 3,
+    rate: 0.1, comments: false, questionGap: 180, sessionGap: 600, minQuestions: 3, debug: false,
   });
   // As Terraform sets them all.
   const all = {
@@ -326,6 +327,7 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     PGHACKER_FEEDBACK_SESSION_GAP: "900",
     PGHACKER_FEEDBACK_MIN_QUESTIONS: "0",
     PGHACKER_FEEDBACK_CLIENTS: "copilot-cli,Visual Studio Code",
+    PGHACKER_FEEDBACK_DEBUG: "true",
   };
   assert.deepEqual(settings(all), [["mcp", {
     PGHACKER_FEEDBACK_RATE: "0.1",
@@ -334,6 +336,7 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
     PGHACKER_FEEDBACK_SESSION_GAP: "900",
     PGHACKER_FEEDBACK_MIN_QUESTIONS: "0",
     PGHACKER_FEEDBACK_CLIENTS: "copilot-cli,Visual Studio Code",
+    PGHACKER_FEEDBACK_DEBUG: "true",
   }]]);
   // Unset, off; without usage telemetry, nothing at all.
   assert.deepEqual(settings(USAGE_ENV), [["mcp", { PGHACKER_FEEDBACK_RATE: "0", ...defaults }]]);
@@ -345,6 +348,10 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
   assert.throws(
     () => readAzureConfig({ ...USAGE_ENV, PGHACKER_FEEDBACK_COMMENTS: "yes" }),
     /PGHACKER_FEEDBACK_COMMENTS must be true or false/,
+  );
+  assert.throws(
+    () => readAzureConfig({ ...USAGE_ENV, PGHACKER_FEEDBACK_DEBUG: "always" }),
+    /PGHACKER_FEEDBACK_DEBUG must be true or false/,
   );
   for (const [name, bad, error] of [
     ["PGHACKER_FEEDBACK_QUESTION_GAP", "0", /PGHACKER_FEEDBACK_QUESTION_GAP must be an integer from 1 to 3600/],

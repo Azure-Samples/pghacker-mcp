@@ -98,6 +98,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `feedback_session_gap_seconds` | `600` | A pause shorter than this keeps a client's session active; the form comes only in an active session (`PGHACKER_FEEDBACK_SESSION_GAP`), more than `feedback_question_gap_seconds` |
 | `feedback_min_questions` | `3` | The questions a client asks before the form can come, 0 to 100 (`PGHACKER_FEEDBACK_MIN_QUESTIONS`) |
 | `feedback_clients` | `copilot`, `codex`, `Visual Studio Code`, `claude`, `cursor` | The interactive apps that can be asked: any whose `clientInfo.name` contains one of these, ignoring case (`PGHACKER_FEEDBACK_CLIENTS`); scripts and agents are never asked |
+| `feedback_debug_enabled` | `false` | Debug mode, for trying the form by hand (`PGHACKER_FEEDBACK_DEBUG`): those apps are asked at every question after their first, without the warm-up, the chance, the hour's one ask, the active-session limit or the pause after a decline. It asks every user of `/mcp` that often, so turn it off after testing; it needs `feedback_rate_per_hour` above 0 |
 | `deployer_object_ids` | `[]` | Everyone who applies, given Key Vault Secrets Officer; empty means whoever is applying |
 | `vnet_address_space` | `"10.66.0.0/22"` | VNet range |
 | `container_apps_subnet_prefix` | `"10.66.0.0/24"` | Container Apps subnet, /27 or larger; fixed once the environment exists |

@@ -592,6 +592,7 @@ variable "app_env" {
       "PGHACKER_DEPLOYMENT",
       "PGHACKER_FEEDBACK_CLIENTS",
       "PGHACKER_FEEDBACK_COMMENTS",
+      "PGHACKER_FEEDBACK_DEBUG",
       "PGHACKER_FEEDBACK_MIN_QUESTIONS",
       "PGHACKER_FEEDBACK_QUESTION_GAP",
       "PGHACKER_FEEDBACK_RATE",
@@ -809,4 +810,11 @@ variable "feedback_clients" {
     condition     = length(var.feedback_clients) > 0 && alltrue([for name in var.feedback_clients : trimspace(name) != "" && !strcontains(name, ",")])
     error_message = "feedback_clients must name at least one app, with no blank name and no comma in a name; to ask none, set feedback_rate_per_hour = 0."
   }
+}
+
+variable "feedback_debug_enabled" {
+  description = "Debug mode, for trying the feedback form by hand (PGHACKER_FEEDBACK_DEBUG): every app in feedback_clients that can show the form is asked at every question after its first, without the warm-up, feedback_rate_per_hour's chance, the hour's one ask, the active-session limit or the pause after a decline, and pghacker-mcp logs why each call it doesn't hold isn't asked. It asks every user of the public endpoint that often, so turn it off after testing. Feedback must be on: feedback_rate_per_hour above 0."
+  type        = bool
+  default     = false
+  nullable    = false
 }

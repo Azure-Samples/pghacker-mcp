@@ -105,8 +105,9 @@ function list(env, name) {
  * Feedback's settings: the chance that an address's hour of use brings a
  * request for it, whether the form takes a comment, the pauses (seconds) over
  * which a call starts a question and under which a session stays active, the
- * questions before the first ask, and the apps asked, pghacker-mcp's own list
- * when unset.
+ * questions before the first ask, the apps asked, pghacker-mcp's own list
+ * when unset, and debug mode, which asks at every question after a client's
+ * first.
  */
 function feedbackSettings(env) {
   const questionGap = integer(env, "PGHACKER_FEEDBACK_QUESTION_GAP", 180, { min: 1, max: 3600 });
@@ -122,6 +123,7 @@ function feedbackSettings(env) {
     sessionGap,
     minQuestions: integer(env, "PGHACKER_FEEDBACK_MIN_QUESTIONS", 3, { min: 0, max: 100 }),
     ...(clients.length > 0 ? { clients } : {}),
+    debug: flag(env, "PGHACKER_FEEDBACK_DEBUG", false),
   };
 }
 
@@ -484,6 +486,7 @@ export function processEnvironments(config) {
           PGHACKER_FEEDBACK_SESSION_GAP: String(config.feedback.sessionGap),
           PGHACKER_FEEDBACK_MIN_QUESTIONS: String(config.feedback.minQuestions),
           ...(config.feedback.clients ? { PGHACKER_FEEDBACK_CLIENTS: config.feedback.clients.join(",") } : {}),
+          PGHACKER_FEEDBACK_DEBUG: String(config.feedback.debug),
         }
         : {}),
     };

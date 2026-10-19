@@ -122,6 +122,7 @@ run "usage_is_recorded_by_default" {
         PGHACKER_FEEDBACK_SESSION_GAP   = "600"
         PGHACKER_FEEDBACK_MIN_QUESTIONS = "3"
         PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
+        PGHACKER_FEEDBACK_DEBUG         = "false"
       }
       && !anytrue(flatten([
         for job in azurerm_container_app_job.this : [
@@ -129,7 +130,7 @@ run "usage_is_recorded_by_default" {
         ]
       ]))
     )
-    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments."
+    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments or debug mode."
   }
 
   assert {
@@ -168,6 +169,7 @@ run "feedback_is_set_with_its_variables" {
     feedback_session_gap_seconds  = 900
     feedback_min_questions        = 0
     feedback_clients              = ["copilot-cli"]
+    feedback_debug_enabled        = true
   }
 
   assert {
@@ -180,9 +182,20 @@ run "feedback_is_set_with_its_variables" {
       PGHACKER_FEEDBACK_SESSION_GAP   = "900"
       PGHACKER_FEEDBACK_MIN_QUESTIONS = "0"
       PGHACKER_FEEDBACK_CLIENTS       = "copilot-cli"
+      PGHACKER_FEEDBACK_DEBUG         = "true"
     }
     error_message = "The app must get the feedback settings as configured; a rate of 0 turns feedback off."
   }
+}
+
+run "app_env_cannot_set_feedback_debug" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_FEEDBACK_DEBUG = "true" }
+  }
+
+  expect_failures = [var.app_env]
 }
 
 run "app_env_cannot_set_usage_details" {
