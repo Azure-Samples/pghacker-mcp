@@ -297,7 +297,7 @@ try {
       results.push(result);
       const checks = result.kind === "review"
         ? ` correct=${result.correct} score=${result.score} citations_valid=${result.citations_valid}` +
-          ` own=${result.own_citations} leaked=${result.leaked.length} loaded_skill=${result.loaded_skill}`
+          ` own=${result.own_citations} leaked=${result.leaked?.length ?? 0} loaded_skill=${result.loaded_skill}`
         : ` correct=${result.correct} citations_valid=${result.citations_valid}` +
           `${result.on_gold_commit === null ? "" : ` commits_valid=${result.commits_valid} gold_commit=${result.on_gold_commit}`}`;
       console.log(`[eval] ${result.id}: ${result.pass ? "PASS" : "FAIL"}${result.error ? ` (${result.error})` : checks}`);

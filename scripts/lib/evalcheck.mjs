@@ -112,8 +112,13 @@ export function checkCommits(list, known, gold = []) {
   };
 }
 
-/** The most of a patch a review question shows, in characters. */
-export const MAX_DIFF_CHARS = 60_000;
+/**
+ * The most of a patch a review question shows, in characters. PilotSwarm
+ * queues the prompt, the skill's text included, as one value of at most
+ * 64 KiB once JSON-encoded: 60,000 characters of diff with the skill came to
+ * 77 KB.
+ */
+export const MAX_DIFF_CHARS = 40_000;
 
 /**
  * A review question's prompt: the patch as it was posted, the reviewer and
