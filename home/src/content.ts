@@ -2,10 +2,11 @@
 // Licensed under the MIT license.
 
 /*
- * What the page says. The examples come from the requirements' use cases and
- * the evaluation (eval/questions.json), each checked against the deployed
- * tools: the quotes, authors, dates, file lines and counts are what they
- * return. Keep them that way when changing them.
+ * What the page says. The examples come from the requirements' use cases,
+ * the evaluation (eval/questions.json) and a run of the review-as-author
+ * skill, each checked against the deployed tools: the quotes, authors, dates,
+ * file lines and counts are what they return. Keep them that way when
+ * changing them.
  */
 
 export const PRODUCT = {
@@ -142,6 +143,38 @@ export const EXAMPLES: readonly Example[] = [
     tools: ["search_extracts", "get_thread"],
   },
   {
+    id: "ddl",
+    kind: "Review as an author",
+    prompt: 'Review the May 2022 "Support logical replication of DDLs" patch set as Tom Lane would have then.',
+    answer:
+      "He'd likely push back on adding it to core: reviewing an earlier version of this deparsing approach in 2014, he called it \"large and rickety\", and in 2012 he warned that decompiling parse trees would be \"a permanent drag on every type of SQL feature addition\". Posted on 10 May 2022, this review would have saved the community more than ten months: Tom Lane gave the same feedback only on 26 March 2023, 80 patch versions later, when the patch set had \"ballooned to over 2MB\" and he didn't \"quite believe the premise\". It was withdrawn in 2024.",
+    citations: [
+      {
+        kind: "mail",
+        author: "Tom Lane",
+        date: "2014-11-08",
+        quote: "It looks large and rickety (ie full of opportunities for bugs) and I would never trust data I cared about to it.",
+        messageId: "21908.1415466461@sss.pgh.pa.us",
+      },
+      {
+        kind: "mail",
+        author: "Tom Lane",
+        date: "2012-10-05",
+        quote:
+          "Adding a requirement to be able to decompile raw parse trees will be a permanent drag on every type of SQL feature addition.",
+        messageId: "10767.1349453701@sss.pgh.pa.us",
+      },
+      {
+        kind: "mail",
+        author: "Tom Lane",
+        date: "2023-03-26",
+        quote: "I don't think that I quite believe the premise in the first place.",
+        messageId: "3032112.1679865718@sss.pgh.pa.us",
+      },
+    ],
+    tools: ["author_perspective", "search_threads", "get_thread"],
+  },
+  {
     id: "jit",
     kind: "History across releases",
     prompt: "Was JIT compilation enabled by default in PostgreSQL 11? How did that differ in PostgreSQL 12, and why?",
@@ -172,31 +205,6 @@ export const EXAMPLES: readonly Example[] = [
       },
     ],
     tools: ["search_commits", "get_commit", "get_thread"],
-  },
-  {
-    id: "python",
-    kind: "A committer's view",
-    prompt:
-      "What is Tom Lane's position on requiring a newer Python than distributions package, for the pytest-based tests?",
-    answer:
-      "He's against it: buildfarm owners won't install a Python their platform doesn't package. He'd rather the pytest framework give up quietly when Python is too old, and sees the minimum version as a tradeoff between ease of coding and how many platforms can run the tests.",
-    citations: [
-      {
-        kind: "mail",
-        author: "Tom Lane",
-        date: "2026-06-21",
-        quote: "they will simply not enable pytest testing",
-        messageId: "95014.1782050569@sss.pgh.pa.us",
-      },
-      {
-        kind: "mail",
-        author: "Tom Lane",
-        date: "2026-06-18",
-        quote: "our pytest framework should silently give up if Python is too old",
-        messageId: "1408166.1781825714@sss.pgh.pa.us",
-      },
-    ],
-    tools: ["author_perspective"],
   },
   {
     id: "plan",
