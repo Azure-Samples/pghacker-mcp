@@ -238,20 +238,36 @@ export const EXAMPLES: readonly Example[] = [
     tools: ["search", "read_file", "search_threads"],
   },
   {
-    id: "sql",
-    kind: "SQL",
-    prompt: "Who were the three most active posters on pgsql-hackers in June and July 2026?",
-    answer: "Michael Paquier (258 messages), Tom Lane (223) and Chao Li (186).",
-    sql: [
-      "SELECT a.display_name, count(*) AS messages",
-      "FROM pghacker.messages m",
-      "JOIN pghacker.authors a ON a.id = m.author_id",
-      "WHERE m.list = 'pgsql-hackers'",
-      "  AND m.sent_at >= '2026-06-01' AND m.sent_at < '2026-08-01'",
-      "GROUP BY 1 ORDER BY 2 DESC LIMIT 3;",
-    ].join("\n"),
-    citations: [],
-    tools: ["query"],
+    id: "advice",
+    kind: "Long-running debate",
+    prompt: 'Why does PostgreSQL 19 ship plan "advice" after two decades of resisting hints?',
+    answer:
+      "Because Robert Haas reframed the debate. Tom Lane had resisted hints, calling them \"accidents waiting to happen\" in 2005. In October 2025 Haas argued that tools to work around the planner's problems in the short term needn't conflict with improving it in the long term. After 125 messages from 20 people, he committed pg_plan_advice in March 2026: a contrib module of nearly 13,000 lines, whose commit warns users to \"think twice and perhaps three times\". It's in PostgreSQL 19, at RC1 since 12 October.",
+    citations: [
+      {
+        kind: "mail",
+        author: "Tom Lane",
+        date: "2005-12-01",
+        quote: "I've resisted that suggestion in the past and will continue to do so, because hints are accidents waiting to happen.",
+        messageId: "15364.1133461224@sss.pgh.pa.us",
+      },
+      {
+        kind: "mail",
+        author: "Robert Haas",
+        date: "2025-10-30",
+        quote: "any form of user control over the planner tends to be a lightning rod for criticism around here.",
+        messageId: "CA+TgmoZ-Jh1T6QyWoCODMVQdhTUPYkaZjWztzP1En4=ZHoKPzw@mail.gmail.com",
+      },
+      {
+        kind: "commit",
+        sha: "5883ff30b02ceed3c5eabba4d9c09a7766f9a8fc",
+        branch: "master",
+        date: "2026-03-12",
+        author: "Robert Haas",
+        subject: "Add pg_plan_advice contrib module.",
+      },
+    ],
+    tools: ["search_threads", "get_thread", "search_commits"],
   },
 ];
 
