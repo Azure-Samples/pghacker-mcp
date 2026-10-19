@@ -3,10 +3,10 @@
 
 /*
  * What the page says. The examples come from the requirements' use cases,
- * the evaluation (eval/questions.json) and a run of the review-as-author
- * skill, each checked against the deployed tools: the quotes, authors, dates,
- * file lines and counts are what they return. Keep them that way when
- * changing them.
+ * the evaluation (eval/questions.json), exploratory testing and a run of the
+ * review-as-author skill, each checked against the deployed tools: the
+ * quotes, authors, dates, file lines and counts are what they return. Keep
+ * them that way when changing them.
  */
 
 export const PRODUCT = {
@@ -175,36 +175,36 @@ export const EXAMPLES: readonly Example[] = [
     tools: ["author_perspective", "search_threads", "get_thread"],
   },
   {
-    id: "jit",
-    kind: "History across releases",
-    prompt: "Was JIT compilation enabled by default in PostgreSQL 11? How did that differ in PostgreSQL 12, and why?",
+    id: "fsync",
+    kind: "Design decision",
+    prompt: "Can retrying a failed disk flush actually cause data loss?",
     answer:
-      "No. PostgreSQL 11 shipped with jit = off: Tom Lane disabled it on the v11 branch only, on 15 September 2018 (first in 11beta4), because JIT wasn't quite mature enough to ship enabled by default. Master kept it on, so PostgreSQL 12 was the first release with JIT on by default.",
+      "Yes. In March 2018 Craig Ringer showed that on Linux a failed fsync() can clear its own error, so a retried checkpoint \"succeeded\" though the writes never reached disk, leaving WAL as the only copy. After more than 250 messages in two threads, PostgreSQL chose in November 2018 to stop rather than retry, back to 9.4: a data-file fsync() failure now PANICs, and crash recovery replays the WAL. The data_sync_retry setting, off by default, allows retrying on systems that keep the unwritten data.",
     citations: [
       {
-        kind: "commit",
-        sha: "0fdadfb0192935e0f8bec7fa5ec9dbb470d6d587",
-        branch: "REL_11_STABLE",
-        date: "2018-09-15",
-        author: "Tom Lane",
-        subject: "In v11, disable JIT by default (it's still enabled by default in HEAD).",
+        kind: "mail",
+        author: "Craig Ringer",
+        date: "2018-03-28",
+        quote: "Retrying fsync() is not OK at least on Linux.",
+        messageId: "CAMsr+YHh+5Oq4xziwwoEfhoTZgr07vdGG+hu=1adXx59aTeaoQ@mail.gmail.com",
       },
       {
         kind: "mail",
         author: "Andres Freund",
-        date: "2018-09-14",
-        quote: "Disable it by default in v11, leave it enabled in master.",
-        messageId: "20180914222657.mw25esrzbcnu6qlu@alap3.anarazel.de",
+        date: "2018-04-09",
+        quote: "We should just deal with this by crash-recovery.",
+        messageId: "20180409200420.2shb4xygozkl3zr2@alap3.anarazel.de",
       },
       {
-        kind: "mail",
-        author: "Tom Lane",
-        date: "2018-09-14",
-        quote: "I'd go with #2, personally.",
-        messageId: "3949.1536964323@sss.pgh.pa.us",
+        kind: "commit",
+        sha: "9ccdd7f66e3324d2b6d3dec282cfa9ff084083f1",
+        branch: "master",
+        date: "2018-11-19",
+        author: "Thomas Munro",
+        subject: "PANIC on fsync() failure.",
       },
     ],
-    tools: ["search_commits", "get_commit", "get_thread"],
+    tools: ["search_threads", "get_thread", "get_commit"],
   },
   {
     id: "plan",
