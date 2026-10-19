@@ -76,7 +76,7 @@ npm run eval         # with the data loaded: 30 questions (eval/questions.json),
 npm run eval -- --questions eval/reviews.json --skill skills/review-as-author/SKILL.md --results eval/RESULTS-reviews.md
 ```
 
-The last reviews 10 patches as their actual reviewers would have, with the `review-as-author` skill in the prompt; without `--skill`, the agents must load it on their own, with `load_skill_review_as_author`.
+The last reviews 14 patches as their actual reviewers would have (10 they objected to, 4 they welcomed), with the `review-as-author` skill in the prompt; without `--skill`, the agents must load it on their own, with `load_skill_review_as_author`.
 
 ## Deploy to Azure
 

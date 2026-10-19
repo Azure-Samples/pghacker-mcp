@@ -131,5 +131,58 @@
   "gold_citations": [
    { "message_id": "B254502B-2BF5-4A17-BA04-1E4AA6D878B3@gmail.com", "quote": "Is there a reason ALTER SYSTEM RELOAD needs stronger privileges than pg_reload_conf()?" }
   ]
+ },
+ {
+  "id": "r11",
+  "kind": "review",
+  "reviewer": "Tom Lane",
+  "as_of": "2026-10-11",
+  "subject": "Re: Wrong results from an antijoin",
+  "patch_message_id": "CAMbWs4-nAQAyGeEKtcePaC8PPE3-Jfwr5T-9HmDEQseUfrsKSQ@mail.gmail.com",
+  "question": "Review \"Re: Wrong results from an antijoin\" as Tom Lane would have on 2026-10-11.",
+  "gold_answer": "Tom Lane supported the patch: he was on board with giving antijoins made from sublinks a relid, and his only real quibble was that add_antijoin_rte() calls addRangeTableEntryForJoin, which he called a substantial abuse of the parser that is lucky to work at all. Supporting detail: convert_ANY_sublink_to_join does something comparable, though addRangeTableEntryForSubquery depends less on the state of the parse data structures; in the long run, both places might better build a RangeTblEntry for themselves, perhaps with a shared function.",
+  "gold_citations": [
+   { "message_id": "225892.1791734192@sss.pgh.pa.us", "quote": "I'm on board with this solution" },
+   { "message_id": "225892.1791734192@sss.pgh.pa.us", "quote": "I think that's a substantial abuse of the parser" }
+  ]
+ },
+ {
+  "id": "r12",
+  "kind": "review",
+  "reviewer": "Michael Paquier",
+  "as_of": "2026-10-08",
+  "subject": "Memory leak in statext_ndistinct_build() during ANALYZE",
+  "patch_message_id": "20d6689e-f490-4ca7-a92f-e92f691ba07e@tantorlabs.com",
+  "question": "Review \"Memory leak in statext_ndistinct_build() during ANALYZE\" as Michael Paquier would have on 2026-10-08.",
+  "gold_answer": "Michael Paquier supported the patch: the leak is worth fixing, the fix looks OK, and it should be backpatched down to v14, as the earlier fixes for ndistinct's memory use, 83772cc78e03 and ad8a166ca868, were. Supporting detail: with default_statistics_target at 10000 and ANALYZE run in a loop, the patch kept the memory used in check; he planned to commit it after v19 RC1 was tagged, unless someone objected.",
+  "gold_citations": [
+   { "message_id": "asiNfm_QQ6P9tEsU@paquier.xyz", "quote": "It sounds to me that we should do the same here, down to v14." }
+  ]
+ },
+ {
+  "id": "r13",
+  "kind": "review",
+  "reviewer": "Chao Li",
+  "as_of": "2026-09-24",
+  "subject": "Reset waitStart when a lock wait fails",
+  "patch_message_id": "CAGRkXqQLxZBr-ouVrtaX2utMggi4+TiVMbgH04b_0JLgKryxbA@mail.gmail.com",
+  "question": "Review \"Reset waitStart when a lock wait fails\" as Chao Li would have on 2026-09-24.",
+  "gold_answer": "Chao Li supported the patch: once proc->waitLock is cleared, proc->waitStart no longer describes an active wait, so clearing it at the same time is right. Supporting detail: he raised no other point.",
+  "gold_citations": [
+   { "message_id": "8BC31B6F-5A20-45DC-9D7C-F65293488E08@gmail.com", "quote": "Once proc->waitLock is cleared, proc->waitStart no longer describes an active wait" }
+  ]
+ },
+ {
+  "id": "r14",
+  "kind": "review",
+  "reviewer": "Andres Freund",
+  "as_of": "2026-06-05",
+  "subject": "[PATCH] CI: Add a CPAN cache on Windows",
+  "patch_message_id": "CAOYmi+mC8_ZW3A1vGZHMDiW+vCMHQNga4jb9jawHn=LauwL6xQ@mail.gmail.com",
+  "question": "Review \"[PATCH] CI: Add a CPAN cache on Windows\" as Andres Freund would have on 2026-06-05.",
+  "gold_answer": "Andres Freund welcomed the patch: caching makes sense, as installing the Perl modules sometimes takes much longer, retrying downloads for minutes; he asked why it doesn't keep the cache in a directory under the project's control with PERL5LIB, as his own caching for macOS did in 93d97349461347d952e8cebdf62f5aa84b4bd20a. Supporting detail: he would rather not repeat the cache steps in both CI tasks, perhaps by using what their shells have in common, or bash in both.",
+  "gold_citations": [
+   { "message_id": "mfsypugrm2k2zj4cyskqr5skhro74ugmmmpmntqvjkibndrcpc@bbrmb54q3647", "quote": "I kinda had implemented such caching for macos" }
+  ]
  }
 ]
