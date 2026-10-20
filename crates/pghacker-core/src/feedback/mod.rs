@@ -212,8 +212,20 @@ impl Call {
 
 impl Drop for Call {
     fn drop(&mut self) {
-        self.finish(false, SystemTime::now());
+        self.finish(false, dropped_at());
     }
+}
+
+/// When a dropped call ends: now, or in tests, on their clock, the time
+/// the test sets.
+fn dropped_at() -> SystemTime {
+    #[cfg(test)]
+    {
+        if let Some(at) = tests::DROPPED_AT.get() {
+            return at;
+        }
+    }
+    SystemTime::now()
 }
 
 /// A retry, which carries the user's answer: the call to run, and the
@@ -907,10 +919,18 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use serde_json::{Value, json};
 
     use super::*;
     use crate::usage::Settings as UsageSettings;
+
+    thread_local! {
+        /// When a call dropped on this thread ends, on the tests' clock
+        /// ([`at`]), rather than the real time: the tests' times are fixed.
+        pub(super) static DROPPED_AT: Cell<Option<SystemTime>> = const { Cell::new(None) };
+    }
 
     const ID_KEY: &[u8] = b"test-usage-id-key-0123456789abcdef";
     const USER: &str = "57d404ffeaedb6e25cfdb7e423e6582d";
@@ -1212,7 +1232,9 @@ mod tests {
         let Arrival::Run(call) = feedback.arrive(&me, "search", at(t + 10)) else {
             panic!("not asked within a question");
         };
+        DROPPED_AT.set(Some(at(t + 11)));
         drop(call);
+        DROPPED_AT.set(None);
         // Question 4 would rate it: it isn't asked. Question 5 is, about 4.
         run(&feedback, &me, t + STEP, true);
         assert_eq!(ask(&feedback, &me, "search", t + 2 * STEP).rated.number, 4);
