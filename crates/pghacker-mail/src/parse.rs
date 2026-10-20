@@ -231,7 +231,7 @@ pub fn extract_ids(value: &str) -> Vec<String> {
     ids
 }
 
-/// The sender's display name, addresses kept, and lowercased address.
+/// The sender's display name, without addresses, and lowercased address.
 fn sender(message: &Message<'_>) -> (String, Option<String>) {
     let addr = message.from().and_then(first_address);
     let (name, email) = match addr {

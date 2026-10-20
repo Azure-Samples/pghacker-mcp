@@ -34,7 +34,7 @@ pub const DESCRIPTION: &str = "Runs one read-only SQL statement on pghacker's Po
     a banner above when rows are cut. Tables, in schema pghacker: threads, messages, authors, \
     author_names, patches, patch_texts, anchors, message_chunks, features, decisions, positions, \
     citations, feature_threads, feature_files, sources (the mailing lists retrieved), and the \
-    commit history's below. Text keeps the email addresses written in it. \
+    commit history's below. Email addresses in text read as [email]. \
     Query the AGE graph pghacker_graph with SELECT * \
     FROM cypher('pghacker_graph', $$ MATCH \
     (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m) $$) AS (name agtype, n agtype). \
@@ -98,7 +98,7 @@ mod tests {
             "10-second",
             "Rejects writes.",
             "banner",
-            "Text keeps the email addresses written in it",
+            "Email addresses in text read as [email]",
             "NULL reads as None",
             "sources (the mailing lists retrieved)",
         ] {
