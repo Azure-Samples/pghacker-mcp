@@ -211,7 +211,7 @@ mod tests {
             \n\
             Author: Peter Geoghegan <pg@bowt.ie>\n\
             Author: Amit Kapila <amit.kapila16@gmail.com>\n\
-            Reviewed-By: Vignesh C <vignesh21@gmail.com>, Tom Lane <tgl@sss.pgh.pa.us>,\n\
+            Reviewed-By: Vignesh C <vignesh@example.org>, Tom Lane <tom@example.org>,\n\
             \tRobert Haas\n\
             Reported-by: Kacper Kuras\n\
             \n\

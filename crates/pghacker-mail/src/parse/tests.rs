@@ -83,8 +83,8 @@ fn falls_back_to_html_text() {
     assert!(msg.body.contains("It’s “quoted”."), "{:?}", msg.body);
     assert!(msg.body.contains("Second"));
     assert!(!msg.body.contains("<p>"));
-    // No display name: the address.
-    assert_eq!(msg.from_name, "bob@example.org");
+    // No display name: the address's local part.
+    assert_eq!(msg.from_name, "bob");
     assert_eq!(msg.from_email.as_deref(), Some("bob@example.org"));
 }
 
@@ -137,7 +137,7 @@ fn in_reply_to_takes_the_message_id_after_an_address() {
     };
     // exmh and MH-E write the sender replied to before the Message-ID.
     let (parent, _) = parse_headers(
-        "In-Reply-To: Message from Tom Lane <tgl@sss.pgh.pa.us> \n\tof \"Tue, 24 Nov 1998 11:17:58 EST.\" <26279.911924278@sss.pgh.pa.us> ",
+        "In-Reply-To: Message from Tom Lane <tom@example.org> \n\tof \"Tue, 24 Nov 1998 11:17:58 EST.\" <26279.911924278@sss.pgh.pa.us> ",
     );
     assert_eq!(parent.as_deref(), Some("26279.911924278@sss.pgh.pa.us"));
     // nmh's form without one keeps the address: the store knows senders.
@@ -170,7 +170,7 @@ fn in_reply_to_takes_the_message_id_after_an_address() {
 }
 
 #[test]
-fn names_keep_their_addresses() {
+fn names_lose_their_addresses() {
     let parse_from = |from: &str| {
         let raw = format!("From: {from}\nMessage-ID: <n@example.org>\n\nbody\n");
         let msg = parse(raw.as_bytes()).unwrap();
@@ -178,16 +178,14 @@ fn names_keep_their_addresses() {
     };
     assert_eq!(
         parse_from("\"dave@example.org\" <dave@example.org>"),
-        (
-            "dave@example.org".to_owned(),
-            Some("dave@example.org".to_owned())
-        )
+        ("dave".to_owned(), Some("dave@example.org".to_owned()))
     );
     assert_eq!(
         parse_from("Dave Example (dave@example.org) <dave@example.org>").0,
-        "Dave Example (dave@example.org)"
+        "Dave Example"
     );
-    assert_eq!(parse_from("<dave@example.org>").0, "dave@example.org");
+    assert_eq!(parse_from("<dave@example.org>").0, "dave");
+    assert_eq!(display_name("dave@example.org", None), "dave");
     assert_eq!(
         parse_from("'Eve Example' <EVE@Example.ORG>").1.as_deref(),
         Some("eve@example.org")

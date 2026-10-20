@@ -202,6 +202,7 @@ Startup applies the migrations a database lacks, in name order and each in its o
 | `0020_retire_version_sources` | Deletes the PostgreSQL versions the snapshot loader left in `sources`, and its jobs ([Commit history](#commit-history)) |
 | `0021_shipped_releases` | Features' releases by the names they shipped as ([Shipped release names](#shipped-release-names)) |
 | `0022_rethread_mail` | `rethread_mail()` ([Threads](#threads)) |
+| `0026_redact_addresses` | Redacts stored mail's email addresses ([Email addresses](#email-addresses)) |
 
 Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)).
 
@@ -265,6 +266,23 @@ A job that's queued or running is left as it is. To roll back to an image before
 
 ```sql
 UPDATE pghacker.jobs SET state = 'cancelled' WHERE kind = 'rethread_mail' AND state IN ('queued', 'running');
+```
+
+### Email addresses
+
+An image with migration `0026_redact_addresses` stores mail with its email addresses redacted: each in subjects, bodies and patches becomes `[email]`, and senders' names lose theirs ([reference](../docs/reference.md#email-addresses)). Mail stored before it is redacted in place by the `redact_addresses` job (key `redact`), which the migration queues; `ingest_status` shows it, and its `result` counts what changed.
+
+- It redacts 500 messages a run: their text, their chunks, which the `embed` job embeds again, and their patches, which the `patch_lines` job indexes again. Senders' names move to their redacted forms, and the graph follows the renamed authors and retitled threads.
+- Then it redacts authors' names left over and the extracts' text and quotes. Changed extracts' embeddings are cleared, to be embedded again, and the extracted threads they come from get a new content version, for the backfill to extract again.
+- Last, once no patch waits to be indexed again, it deletes the `patch_texts` lines with addresses that no patch uses.
+
+Until it finishes, the tools show addresses in the mail it hasn't reached. Images before `0026` store new mail with addresses and don't know the job: to roll back to one, cancel it first, and queue it again after rolling forward (it skips what's redacted):
+
+```sql
+UPDATE pghacker.jobs SET state = 'cancelled' WHERE kind = 'redact_addresses' AND state IN ('queued', 'running');
+UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_after = now(),
+       last_error = NULL, result = NULL, finished_at = NULL
+WHERE kind = 'redact_addresses';
 ```
 
 ### Graph index preparation

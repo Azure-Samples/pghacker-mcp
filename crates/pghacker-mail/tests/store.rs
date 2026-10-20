@@ -1127,7 +1127,7 @@ fn addressed_message() -> ParsedMessage {
 }
 
 #[tokio::test]
-async fn stored_text_keeps_addresses() {
+async fn stored_text_redacts_addresses() {
     let db = TestDb::create().await.unwrap();
     let mut client = db.indexer().await.unwrap();
     store_each(&mut client, &[&addressed_message()]).await;
@@ -1140,12 +1140,15 @@ async fn stored_text_keeps_addresses() {
         .unwrap();
     let (body, clean, subject, from_name): (String, String, String, String) =
         (row.get(0), row.get(1), row.get(2), row.get(3));
-    assert!(body.contains("Ask carol@example.org, or see"), "{body}");
-    assert!(body.contains("On Mon, Dave <dave@example.org> wrote:"));
+    assert!(body.contains("Ask [email], or see"), "{body}");
+    assert!(body.contains("On Mon, Dave <[email]> wrote:"));
+    // Message-IDs in URLs aren't addresses.
     assert!(body.contains("https://www.postgresql.org/message-id/CAB+x=y@mail.example.org"));
-    assert!(clean.contains("carol@example.org"), "{clean}");
-    assert_eq!(subject, "Ping frank@example.org");
-    assert_eq!(from_name, "erin@example.org");
+    assert!(body.contains("https://postgr.es/m/abc@example.org"));
+    assert!(addresses(&body).is_empty(), "{body}");
+    assert!(addresses(&clean).is_empty(), "{clean}");
+    assert_eq!(subject, "Ping [email]");
+    assert_eq!(from_name, "erin");
     let chunks: Vec<String> = client
         .query("SELECT content FROM message_chunks", &[])
         .await
@@ -1153,7 +1156,8 @@ async fn stored_text_keeps_addresses() {
         .iter()
         .map(|r| r.get(0))
         .collect();
-    assert!(chunks.iter().any(|c| c.contains("frank@example.org")));
+    assert!(chunks.iter().any(|c| c.contains("Ping [email]")));
+    assert!(chunks.iter().all(|c| addresses(c).is_empty()), "{chunks:?}");
     let patches: Vec<String> = client
         .query("SELECT content FROM patches", &[])
         .await
@@ -1161,12 +1165,12 @@ async fn stored_text_keeps_addresses() {
         .iter()
         .map(|r| r.get(0))
         .collect();
+    assert!(!patches.is_empty());
     assert!(
-        patches
-            .iter()
-            .any(|p| addresses(p).contains(&"<alice@example.org>".to_owned())),
+        patches.iter().all(|p| addresses(p).is_empty()),
         "{patches:?}"
     );
+    // Senders still match their authors by address.
     let emails: Vec<String> = client
         .query("SELECT email FROM author_emails", &[])
         .await
@@ -1175,6 +1179,89 @@ async fn stored_text_keeps_addresses() {
         .map(|r| r.get(0))
         .collect();
     assert_eq!(emails, ["erin@example.org"]);
+}
+
+/// Mail stored with addresses, before ingest redacted them, is redacted in
+/// place: its text, chunks, patches and its sender's name.
+#[tokio::test]
+async fn stored_mail_is_redacted_in_place() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    store_each(&mut client, &[&addressed_message()]).await;
+    // As ingest stored it before it redacted.
+    client
+        .batch_execute(
+            "UPDATE messages SET subject = 'Ping frank@example.org', from_name = 'erin@example.org',
+                 body = body || E'\\nmail carol@example.org', body_clean = 'Ask carol@example.org';
+             UPDATE patches SET content = content || E'\\nFrom: Alice <alice@example.org>', text_ids = '{1}';
+             UPDATE message_chunks SET embedding = NULL;
+             UPDATE author_names SET name = 'erin@example.org';
+             UPDATE authors SET display_name = 'erin@example.org';",
+        )
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    let done = pghacker_mail::redact::redact_messages(&tx, 0, 10)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        (done.messages, done.patches, done.chunked, done.renamed),
+        (1, 2, 1, 1)
+    );
+    assert!(!done.more);
+    let row = client
+        .query_one(
+            "SELECT m.subject, m.from_name, m.body, m.body_clean, t.subject, a.display_name
+             FROM messages m JOIN threads t ON t.id = m.thread_id JOIN authors a ON a.id = m.author_id",
+            &[],
+        )
+        .await
+        .unwrap();
+    let texts: Vec<String> = (0..6).map(|i| row.get(i)).collect();
+    assert_eq!(texts[0], "Ping [email]");
+    assert_eq!(texts[1], "erin");
+    assert!(texts[2].ends_with("mail [email]"), "{}", texts[2]);
+    assert_eq!(texts[3], "Ask [email]");
+    assert_eq!(texts[4], "Ping [email]");
+    assert_eq!(texts[5], "erin");
+    for row in client
+        .query("SELECT content, text_ids FROM patches", &[])
+        .await
+        .unwrap()
+    {
+        let (content, text_ids): (String, Option<Vec<i32>>) = (row.get(0), row.get(1));
+        assert!(addresses(&content).is_empty(), "{content}");
+        assert_eq!(text_ids, None, "indexed again");
+    }
+    let chunks: Vec<(String, bool)> = client
+        .query("SELECT content, embedding IS NULL FROM message_chunks", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(chunks[0].0, "Ping [email]\n\nAsk [email]");
+    assert!(chunks.iter().all(|(_, unembedded)| *unembedded));
+    let names: Vec<(String, i32)> = client
+        .query("SELECT name, count FROM author_names", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    assert_eq!(names, [("erin".to_owned(), 1)]);
+
+    // Again, nothing changes.
+    let tx = client.transaction().await.unwrap();
+    let again = pghacker_mail::redact::redact_messages(&tx, 0, 10)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        (again.messages, again.patches, again.chunked, again.renamed),
+        (0, 0, 0, 0)
+    );
 }
 
 type ThreadStats = (i32, i32, String, String, i32, String, String);

@@ -169,11 +169,13 @@ Now and then, pghacker-mcp asks an interactive client's user whether the last an
 
 ## Email addresses
 
-Text keeps the email addresses written in it: subjects, bodies, patches and senders' names. `author_emails`, which matches senders' addresses to authors, isn't readable by pghacker-mcp, and the graph doesn't use it.
+The archive's web pages obfuscate senders' addresses, so pghacker-mcp doesn't serve them. Ingest replaces each email address in subjects, bodies and patches with `[email]`, and a sender's name loses its addresses (the address's local part stands in when it gives no name). Message-IDs in URLs (`postgr.es/m/<id>`, `/message-id/<id>`), which look like addresses, stay; a Message-ID written bare in a body (`<id>`) is redacted like an address. Extracts quote the redacted text. `author_emails`, which matches senders' addresses to authors, keeps them; it isn't readable by pghacker-mcp, and the graph doesn't use it. Commits keep authors' and committers' names only.
+
+Mail stored before redaction is redacted in place by the `redact_addresses` job that migration `0026` queues: its chunks are embedded again, its patches indexed again, and extracts with addresses redacted, embedded again and their threads extracted again ([upgrading](../deploy/README.md#email-addresses)).
 
 ## Threading
 
-A thread is the mail that In-Reply-To and References link. Ingest leaves out what old mailers wrote there that names no message: placeholders without an `@`, such as elm's `<no.id>`, and senders' addresses. exmh and MH-E wrote the sender replied to before the Message-ID (`Message from Tom Lane <tgl@sss.pgh.pa.us> of "…" <id>`), and other mailers copied the address into References, so replies to anything Tom wrote once shared a thread. `parent_message_id` and `references_ids` keep only the IDs that name messages.
+A thread is the mail that In-Reply-To and References link. Ingest leaves out what old mailers wrote there that names no message: placeholders without an `@`, such as elm's `<no.id>`, and senders' addresses. exmh and MH-E wrote the sender replied to before the Message-ID (`Message from Tom Lane <tom@example.org> of "…" <id>`), and other mailers copied the address into References, so replies to anything Tom wrote once shared a thread. `parent_message_id` and `references_ids` keep only the IDs that name messages.
 
 A reply that starts a topic gets a thread of its own: it was sent 30 days or more after its parent, under a subject that isn't a reply, has another key than its parent's, and gives no version (a series re-posted under a new name with its `v12` continues its thread). Its replies follow it whichever arrives first, unless extracts cite them.
 

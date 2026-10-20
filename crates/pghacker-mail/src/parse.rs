@@ -29,7 +29,7 @@ pub struct ParsedMessage {
     pub message_id: String,
     /// The last Message-ID of In-Reply-To: MH and exmh write the address of
     /// the sender replied to before it (`Message from Tom Lane
-    /// <tgl@sss.pgh.pa.us> of "…" <20593.1107191786@sss.pgh.pa.us>`).
+    /// <tom@example.org> of "…" <20593.1107191786@sss.pgh.pa.us>`).
     pub in_reply_to: Option<String>,
     /// References, oldest first, without duplicates or the message itself.
     pub references: Vec<String>,
@@ -256,16 +256,23 @@ fn first_address(address: &Address<'_>) -> Option<(String, Option<String>)> {
     ))
 }
 
-/// A display name as written, addresses kept, without quotes or stray
-/// whitespace; the address if nothing is left.
+/// A display name without email addresses, quotes or stray whitespace; the
+/// local part of `email`, or of an address in the name, if nothing else is
+/// left.
 pub fn display_name(name: &str, email: Option<&str>) -> String {
-    let name = trim_name(clean_header(&decode_encoded_words(name)));
-    if name.chars().any(char::is_alphanumeric) {
-        return name;
+    let name = decode_encoded_words(name);
+    let found = ADDRESS.find(&name).map(|m| m.as_str().to_owned());
+    let stripped = trim_name(clean_header(&ADDRESS.replace_all(&name, "")));
+    if stripped.chars().any(char::is_alphanumeric) {
+        return stripped;
     }
-    match email.filter(|e| !e.is_empty()) {
-        Some(email) => email.to_owned(),
-        None => "unknown".to_owned(),
+    match email
+        .filter(|e| !e.is_empty())
+        .or(found.as_deref())
+        .and_then(|e| e.split('@').next())
+    {
+        Some(local) if local.chars().any(char::is_alphanumeric) => local.to_owned(),
+        _ => "unknown".to_owned(),
     }
 }
 

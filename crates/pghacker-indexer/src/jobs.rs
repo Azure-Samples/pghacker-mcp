@@ -33,6 +33,10 @@ pub mod kind {
     /// Threads stored mail again: a dry run, or the apply of its plan
     /// ([`crate::rethread`]); queued by `rethread_mail()` (migration 0022).
     pub const RETHREAD_MAIL: &str = "rethread_mail";
+    /// Redacts the email addresses of mail stored before ingest redacted
+    /// them, in phases ([`crate::redact`]); queued once by migration 0026
+    /// (key `redact`).
+    pub const REDACT_ADDRESSES: &str = "redact_addresses";
 }
 
 /// The recurring jobs, with how long each waits after a run that found nothing to do.
@@ -449,6 +453,7 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
             })
         }
         kind::RETHREAD_MAIL => Ok(Outcome::Done(crate::rethread::run(indexer, job).await?)),
+        kind::REDACT_ADDRESSES => crate::redact::run(indexer, job).await,
         other => Err(anyhow!("unknown job kind {other}")),
     }
 }

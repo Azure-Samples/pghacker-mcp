@@ -32,8 +32,8 @@
 //! earlier root. A topic takes the replies below it that arrived before it,
 //! or before its parent, unless extracts cite them.
 //!
-//! Authors match by lowercased address in `author_emails`. Text is stored as
-//! written, email addresses included.
+//! Authors match by lowercased address in `author_emails`. Text is stored
+//! with email addresses redacted ([`crate::redact`]).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -46,6 +46,7 @@ use tokio_postgres::{GenericClient, Transaction};
 use crate::anchors::{self, AnchorRef};
 use crate::parse::{ParsedMessage, display_name, names_a_message, normalize_message_id, sanitize};
 use crate::patch::{self, PatchFile};
+use crate::redact::redact_emails;
 use crate::{chunk, clean, series, subject};
 
 /// Where messages come from.
@@ -90,7 +91,7 @@ impl ThreadingIds {
 /// The IDs of `msg`'s In-Reply-To and References that name messages: not its
 /// own, not a placeholder, and not a sender's address. exmh and MH-E write
 /// the address of the sender replied to into In-Reply-To (`Message from Tom
-/// Lane <tgl@sss.pgh.pa.us> of "…"`), and other mailers copied it into
+/// Lane <tom@example.org> of "…"`), and other mailers copied it into
 /// References, so that replies to anything Tom wrote shared an "ancestor".
 /// An ID that no stored message has is an address when a known sender
 /// (`author_emails`) or the message's own sender has it.
@@ -311,25 +312,29 @@ struct Derived {
 }
 
 impl Derived {
+    /// The message as stored: email addresses redacted
+    /// ([`crate::redact::redact_emails`]). Anchors are read from the text as
+    /// written.
     fn new(msg: &ParsedMessage) -> Self {
+        let redact = |text: &str| redact_emails(&sanitize(text)).into_owned();
         let clean = clean::clean_body(&msg.body);
         let patches = patch::extract(msg);
         let anchors = anchors::extract_at(&msg.subject, &clean, &patches, msg.sent_at);
-        let subject = sanitize(&msg.subject);
-        let body_clean = sanitize(&clean);
+        let subject = redact(&msg.subject);
+        let body_clean = redact(&clean);
         let chunks = chunk::chunk(&subject, &body_clean);
         let patches = patches
             .into_iter()
             .map(|patch| PatchFile {
-                filename: sanitize(&patch.filename),
-                content: sanitize(&patch.content),
+                filename: redact(&patch.filename),
+                content: redact(&patch.content),
                 ..patch
             })
             .collect();
         Self {
             subject,
-            from_name: sanitize(&display_name(&msg.from_name, msg.from_email.as_deref())),
-            body: sanitize(&msg.body),
+            from_name: redact(&display_name(&msg.from_name, msg.from_email.as_deref())),
+            body: redact(&msg.body),
             body_clean,
             patches,
             anchors,

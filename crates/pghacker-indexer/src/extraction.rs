@@ -7,6 +7,7 @@
 //! the record: citations must be verbatim quotes from the thread's messages,
 //! a near-duplicate needs a reason, and nothing is half-applied.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow};
@@ -21,6 +22,7 @@ use uuid::Uuid;
 
 use pghacker_core::text::{quote_in, truncate_chars};
 use pghacker_mail::anchors::development_version;
+use pghacker_mail::redact::redact_emails;
 
 use crate::Indexer;
 use crate::lanes::{self, Lane, NEEDS_EXTRACTION, Order};
@@ -1130,7 +1132,44 @@ pub(crate) async fn move_thread_status(
     add_thread_status(client, feature, to, evidence).await
 }
 
-pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
+/// The submission with email addresses replaced by `[email]`, as stored
+/// mail has them ([`pghacker_mail::redact`]): quotes then match the messages
+/// as stored, and no extract stores an address.
+fn redact_submission(args: &mut SubmitArgs) {
+    let redact = |text: &mut String| {
+        if let Cow::Owned(redacted) = redact_emails(text) {
+            *text = redacted;
+        }
+    };
+    let citations = |citations: &mut Vec<CitationIn>| {
+        for citation in citations {
+            redact(&mut citation.quote);
+        }
+    };
+    for f in &mut args.features {
+        redact(&mut f.name);
+        redact(&mut f.description);
+        citations(&mut f.citations);
+    }
+    for d in &mut args.decisions {
+        redact(&mut d.title);
+        redact(&mut d.outcome);
+        redact(&mut d.rationale);
+        if let Some(alternatives) = &mut d.alternatives {
+            redact(alternatives);
+        }
+        citations(&mut d.citations);
+    }
+    for p in &mut args.positions {
+        redact(&mut p.summary);
+        citations(&mut p.citations);
+    }
+}
+
+/// Validates and applies one thread's extracts, all or nothing. Errors list
+/// every problem so the caller can fix them and resubmit.
+pub async fn submit(indexer: &Indexer, mut args: SubmitArgs) -> Result<Value> {
+    redact_submission(&mut args);
     let mut client = indexer.tools.get().await?;
     let lease_record = lease(&**client, &args.lease_token).await?;
     let token = lease_token(&args.lease_token)?;
