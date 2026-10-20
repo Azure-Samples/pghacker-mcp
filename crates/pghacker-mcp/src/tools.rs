@@ -11,9 +11,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use pghacker_api::descriptions as api;
-use pghacker_api::{extracts, ontology, people, threads};
+use pghacker_api::{Searcher, extracts, ontology, people, threads};
 use pghacker_codesearch as code;
-use pghacker_core::db::Pool;
+use pghacker_core::calls::CallPool;
 use pghacker_core::embed::Embedder;
 use pghacker_core::mcp::{Effect, Output, ToolSpec, Tools, failed, parse, schema};
 use pghacker_core::skills::Skills;
@@ -207,13 +207,15 @@ fn with_history(tool: &ToolSpec) -> &'static str {
 /// The server's state. Cheap to clone.
 #[derive(Clone)]
 pub struct Server {
-    pool: Pool,
+    /// The tools' connections, but query's: a call waits a bounded time for
+    /// one, and an abandoned call's statements are cancelled.
+    pool: CallPool,
     embedder: Option<Embedder>,
     query: Arc<sql::QueryTool>,
 }
 
 impl Server {
-    pub fn new(pool: Pool, embedder: Option<Embedder>, query: sql::QueryTool) -> Self {
+    pub fn new(pool: CallPool, embedder: Option<Embedder>, query: sql::QueryTool) -> Self {
         Self {
             pool,
             embedder,
@@ -222,23 +224,46 @@ impl Server {
     }
 
     async fn run(&self, name: &str, arguments: Value) -> Result<anyhow::Result<Value>, ErrorData> {
-        let client = match self.pool.get().await {
-            Ok(client) => client,
-            Err(error) => return Ok(Err(anyhow::anyhow!("the database is unavailable: {error}"))),
-        };
-        let client = &**client;
         let embedder = self.embedder.as_ref();
-        Ok(match name {
+        // The mail searches embed their query before they take a connection,
+        // so that no connection waits on the embeddings service.
+        match name {
             "search_threads" => {
-                threads::search_threads(client, embedder, parse(name, arguments)?).await
+                let args: threads::SearchThreadsArgs = parse(name, arguments)?;
+                return Ok(async {
+                    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
+                    let client = self.pool.get().await?;
+                    threads::search_threads(&**client, &searcher, args).await
+                }
+                .await);
             }
-            "get_thread" => threads::get_thread(client, parse(name, arguments)?).await,
             "search_extracts" => {
-                extracts::search_extracts(client, embedder, parse(name, arguments)?).await
+                let args: extracts::SearchExtractsArgs = parse(name, arguments)?;
+                return Ok(async {
+                    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
+                    let client = self.pool.get().await?;
+                    extracts::search_extracts(&**client, &searcher, args).await
+                }
+                .await);
             }
             "author_perspective" => {
-                people::author_perspective(client, embedder, parse(name, arguments)?).await
+                let args: people::AuthorPerspectiveArgs = parse(name, arguments)?;
+                return Ok(async {
+                    let searcher = Searcher::new(args.mode, &args.topic, embedder).await?;
+                    let client = self.pool.get().await?;
+                    people::author_perspective(&**client, &searcher, args).await
+                }
+                .await);
             }
+            _ => {}
+        }
+        let client = match self.pool.get().await {
+            Ok(client) => client,
+            Err(error) => return Ok(Err(error)),
+        };
+        let client = &**client;
+        Ok(match name {
+            "get_thread" => threads::get_thread(client, parse(name, arguments)?).await,
             "search_authors" => people::search_authors(client, parse(name, arguments)?).await,
             "get_author" => people::get_author(client, parse(name, arguments)?).await,
             "get_ontology" => ontology::get_ontology(client).await,
@@ -318,11 +343,7 @@ impl Tools for Server {
                 let args: code::GrepArgs = parse(name, arguments)?;
                 let client = match self.pool.get().await {
                     Ok(client) => client,
-                    Err(error) => {
-                        return Ok(Output::Failed(format!(
-                            "the database is unavailable: {error}"
-                        )));
-                    }
+                    Err(error) => return Ok(failed(error)),
                 };
                 let result =
                     match code::resolve_revision(&**client, "postgres", args.version.as_deref())

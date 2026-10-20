@@ -49,7 +49,7 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 | Database | `PGHACKER_ADMIN_DATABASE_URL`, else `DATABASE_URL`; `PGHACKER_INDEXER_DATABASE_URL` and `PGHACKER_READER_DATABASE_URL`, else the administrator's with the role's password; `PGH_SWARM_PASSWORD`, for PilotSwarm's own role in Azure; `PGHACKER_DB_CA_FILE`, more CA certificates for TLS |
 | Listeners | `PGHACKER_INDEXER_ADDR` (`127.0.0.1:3101`); `PGHACKER_MCP_ADDR` (`127.0.0.1:3102`); `PGHACKER_MCP_INTERNAL_ADDR`, a listener without the rate limit, for agents; `PGHACKER_ALLOWED_HOSTS`, the Host headers accepted (loopback; `*` for any) |
 | Clients | Behind a proxy, `PGHACKER_CLIENT_IP_HEADER` names the header with the client's address (in Azure, Front Door's `x-azure-socketip`), or `PGHACKER_TRUST_FORWARDED` takes the first X-Forwarded-For address; `PGHACKER_FRONT_DOOR_ID` is the one Front Door profile to serve |
-| Connections | The indexer's `PGHACKER_WORKERS` (5 job workers), `PGHACKER_TOOL_CONNECTIONS` (8) and `PGHACKER_TOOL_TIMEOUT_SECONDS` (30); pghacker-mcp's `PGHACKER_MCP_POOL` (16) and `PGHACKER_QUERY_POOL` (8, for `query`) |
+| Connections | The indexer's `PGHACKER_WORKERS` (5 job workers), `PGHACKER_TOOL_CONNECTIONS` (8) and `PGHACKER_TOOL_TIMEOUT_SECONDS` (30); pghacker-mcp's `PGHACKER_MCP_POOL` (16), `PGHACKER_MCP_POOL_WAIT_SECONDS` (10), how long a tool call waits for one of them, `PGHACKER_MCP_CALL_TIMEOUT_SECONDS` (30), each tool call's deadline, kept above `query`'s 20 seconds, and `PGHACKER_QUERY_POOL` (8, for `query`). See [under load](#under-load) |
 | Indexer | `PGHACKER_SOURCES`: `test-slices`, or `open` to take any source, as in Azure; `PGHACKER_SLICES` (`config/test-slices.toml`); `PGHACKER_EXTRACTION`: `manual`, or `automatic` when a scheduler extracts; `PGHACKER_GRAPH_RECONCILE_HOURS` (168; 0 for none) |
 | Archive | `PGHACKER_ARCHIVE_BASE_URL` (`https://www.postgresql.org`), `PGHACKER_ARCHIVE_USER` and `PGHACKER_ARCHIVE_PASSWORD` (the published `archives` and `antispam`); `PGHACKER_HTTP_RATE` (2 requests a second), `PGHACKER_HTTP_USER_AGENT`; `PGHACKER_CACHE_DIR` (`.runtime/cache`), `PGHACKER_GIT_DIR` (`.runtime/git`), `PGHACKER_KEEP_DOWNLOADS` (true) |
 | Logs | `RUST_LOG`: the launchers set `info,tokio_postgres=warn,rmcp=warn`. At info, pghacker-mcp logs a tool call's tool, duration and outcome, and for a failed `query`, PostgreSQL's SQLSTATE and the first line of its error with anything in double quotes elided. What callers type, such as SQL and argument values, and tools' error messages are logged only at debug |
@@ -141,6 +141,14 @@ FROM (
 ) scoped
 WHERE scoped.line LIKE '%for (%';
 ```
+
+### Under load
+
+pghacker-mcp's tools but `query` share a pool of `pgh_reader` connections (`PGHACKER_MCP_POOL`). A call waits at most `PGHACKER_MCP_POOL_WAIT_SECONDS` (10) for one, then fails with a tool error saying that all the connections are busy and to try again shortly. The pool takes at most 10 seconds to open a connection, so a database that doesn't answer fails calls too.
+
+Every call has a deadline, `PGHACKER_MCP_CALL_TIMEOUT_SECONDS` (30): past it, the call fails with a tool error. It's above the code tools' 15-second budget and `query`'s 20-second deadline, so those report their own outcome first. A call past its deadline, or whose client goes away, is dropped: its statements are cancelled and its connections closed, and the pool opens new ones. A call that panics is answered with an internal error, and its connections are closed too. Each HTTP request has 10 seconds more than the call's deadline to start its response, else it's answered 503; a panic outside a call is answered 500. The deadline doesn't cut a response once it has started, and `/mcp`'s answers are single JSON bodies.
+
+`search_threads`, `search_extracts` and `author_perspective` embed their query before they take a connection, within 5 seconds and at most two tries. When the embeddings service fails or is slower, `semantic` and `hybrid` search full text instead: the result's `mode` is `fulltext`, and its `notes` say why. The indexer's `match_extracts` and `submit_extracts` embed on the same budget: `match_extracts` then fails, to be tried again, and `submit_extracts` saves its extracts for the backfill to embed. The indexer's jobs keep retrying the embeddings service for minutes.
 
 ## Skills
 

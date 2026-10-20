@@ -2727,6 +2727,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+ "tower-http",
  "tracing",
 ]
 
@@ -3890,6 +3891,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

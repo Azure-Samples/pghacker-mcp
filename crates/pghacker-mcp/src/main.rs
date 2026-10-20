@@ -10,17 +10,26 @@
 //! public one now and then asks an interactive client's user, as their next
 //! question starts, whether the last answer helped
 //! (`pghacker_core::feedback`).
+//!
+//! Under load, a tool call waits a bounded time for a connection
+//! (PGHACKER_MCP_POOL_WAIT_SECONDS) and runs to a deadline
+//! (PGHACKER_MCP_CALL_TIMEOUT_SECONDS); one whose client goes away is
+//! abandoned. Either way its statements are cancelled.
 
 mod ratelimit;
 mod tools;
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use axum::Router;
-use axum::http::HeaderName;
+use axum::http::{HeaderName, StatusCode};
 use axum::middleware;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::timeout::TimeoutLayer;
 
+use pghacker_core::calls::CallPool;
 use pghacker_core::config::Env;
 use pghacker_core::embed::Embedder;
 use pghacker_core::feedback::Feedback;
@@ -30,6 +39,19 @@ use pghacker_core::{db, telemetry};
 
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
 use crate::tools::{Server, instructions};
+
+/// How long a tool call waits for a connection, by default, before it fails
+/// as busy.
+const POOL_WAIT_SECONDS: u64 = 10;
+
+/// A tool call's deadline, by default: past code search's 15-second budget
+/// and query's own 20-second deadline, so that those report their own
+/// outcome.
+const CALL_TIMEOUT_SECONDS: u64 = 30;
+
+/// How much longer than a call's deadline a request may take before it's
+/// answered 503: the call's own error comes first.
+const REQUEST_MARGIN: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,7 +67,27 @@ async fn main() -> Result<()> {
     let reader_url = env.reader_database_url()?;
     let addr = env.get_or("PGHACKER_MCP_ADDR", "127.0.0.1:3102").to_owned();
     let pool_size = env.parse_or("PGHACKER_MCP_POOL", 16usize)?;
-    let pool = db::pool(&reader_url, pool_size, "pghacker-mcp")?;
+    let pool_wait = env.parse_or("PGHACKER_MCP_POOL_WAIT_SECONDS", POOL_WAIT_SECONDS)?;
+    let call_timeout = env.parse_or("PGHACKER_MCP_CALL_TIMEOUT_SECONDS", CALL_TIMEOUT_SECONDS)?;
+    ensure!(
+        pool_wait > 0,
+        "PGHACKER_MCP_POOL_WAIT_SECONDS must be at least 1"
+    );
+    ensure!(
+        call_timeout > 0,
+        "PGHACKER_MCP_CALL_TIMEOUT_SECONDS must be at least 1"
+    );
+    let call_timeout = Duration::from_secs(call_timeout);
+    if call_timeout <= pghacker_sqlquery::CALL_TIMEOUT {
+        tracing::warn!(
+            "PGHACKER_MCP_CALL_TIMEOUT_SECONDS is within query's own {}-second deadline, which then can't report its outcome",
+            pghacker_sqlquery::CALL_TIMEOUT.as_secs()
+        );
+    }
+    let pool = CallPool::new(
+        db::pool(&reader_url, pool_size, "pghacker-mcp")?,
+        Duration::from_secs(pool_wait),
+    );
     let embedder = Embedder::from_env(&env)?;
     if embedder.is_none() {
         tracing::warn!(
@@ -87,6 +129,8 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         instructions(),
     )
+    .cancel_on_disconnect()
+    .with_call_timeout(call_timeout)
     .with_skills(
         tools::skills().context("the embedded skills")?,
         tools::EXTENSION_INSTRUCTIONS,
@@ -97,23 +141,41 @@ async fn main() -> Result<()> {
         .map(|id| FrontDoor(Arc::from(id.trim())));
     // Feedback on the public listener only: no person reads the answers of
     // the internal one's agents.
-    let app = public(
-        router(server.clone().with_feedback(feedback), allowed_hosts),
-        limit,
-        &usage,
-        client_ip,
-        front_door,
+    let request_timeout = call_timeout + REQUEST_MARGIN;
+    let app = guarded(
+        public(
+            router(server.clone().with_feedback(feedback), allowed_hosts),
+            limit,
+            &usage,
+            client_ip,
+            front_door,
+        ),
+        request_timeout,
     );
     let served = match env.get("PGHACKER_MCP_INTERNAL_ADDR") {
         Some(internal_addr) => {
             let internal_addr = internal_addr.to_owned();
-            let internal_app = internal(router(server, None), &usage);
+            let internal_app = guarded(internal(router(server, None), &usage), request_timeout);
             tokio::try_join!(serve(app, &addr), serve(internal_app, &internal_addr)).map(|_| ())
         }
         None => serve(app, &addr).await,
     };
     usage.shutdown().await;
     served
+}
+
+/// `app` with a deadline for each response, a backstop past the calls' own
+/// for a request that stalls anywhere, such as one whose body is slow to
+/// come, answered 503; and a panic answered 500 rather than with a dropped
+/// connection. The deadline bounds the time to the response's head only, so
+/// it couldn't cut a stream short; and the stateless `/mcp` serves none: a
+/// call's answer is one JSON body, and GET is refused.
+fn guarded(app: Router, request_timeout: Duration) -> Router {
+    app.layer(TimeoutLayer::with_status_code(
+        StatusCode::SERVICE_UNAVAILABLE,
+        request_timeout,
+    ))
+    .layer(CatchPanicLayer::new())
 }
 
 /// The public listener: `router` behind the rate limit, then the usage

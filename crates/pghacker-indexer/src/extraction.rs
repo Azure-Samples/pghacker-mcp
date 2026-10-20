@@ -883,10 +883,13 @@ pub async fn match_extracts(indexer: &Indexer, args: MatchArgs) -> Result<Value>
         .iter()
         .map(|draft| format!("{}\n{}", draft.name.trim(), draft.description.trim()))
         .collect();
+    // On a tool call's short budget: a slow embeddings service fails the
+    // call soon, to be tried again, rather than hold its connection.
     let embeddings: Vec<Option<HalfVector>> = match &indexer.embedder {
         Some(embedder) => embedder
-            .embed(&texts)
-            .await?
+            .embed_interactive(&texts)
+            .await
+            .context("cannot compare the drafts now; try match_extracts again shortly")?
             .into_iter()
             .map(Some)
             .collect(),
@@ -1578,7 +1581,8 @@ pub async fn submit(indexer: &Indexer, mut args: SubmitArgs) -> Result<Value> {
         })
         .collect();
 
-    // Embeddings for what's new, before the transaction.
+    // Embeddings for what's new, before the transaction, on a tool call's
+    // short budget: the backfill embeds what this can't.
     let mut texts = Vec::new();
     for feature in args.features.iter().filter(|f| f.action == Action::New) {
         texts.push(format!(
@@ -1601,7 +1605,7 @@ pub async fn submit(indexer: &Indexer, mut args: SubmitArgs) -> Result<Value> {
     }
     let mut vectors: std::vec::IntoIter<Option<HalfVector>> = match &indexer.embedder {
         Some(embedder) if !texts.is_empty() => embedder
-            .embed(&texts)
+            .embed_interactive(&texts)
             .await
             .map(|v| v.into_iter().map(Some).collect::<Vec<_>>())
             .unwrap_or_else(|error| {

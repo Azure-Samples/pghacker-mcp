@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -150,7 +150,7 @@ impl FileTable {
 fn cached(key: &CacheKey) -> Option<Arc<FileTable>> {
     CACHE
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .iter()
         .find(|(k, _)| k == key)
         .map(|(_, t)| t.clone())
@@ -158,7 +158,7 @@ fn cached(key: &CacheKey) -> Option<Arc<FileTable>> {
 
 fn remember(key: CacheKey, table: FileTable) -> Arc<FileTable> {
     let table = Arc::new(table);
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|(k, _)| *k != key);
     cache.push((key, table.clone()));
     if cache.len() > 16 {
@@ -177,6 +177,8 @@ pub fn tree_cmp(a: &str, b: &str) -> Ordering {
 type CacheKey = (String, String);
 type Cache = Mutex<Vec<(CacheKey, Arc<FileTable>)>>;
 
+// The cache outlives a call that panics while holding it: its lock's
+// poisoning is ignored, since any entry it holds is whole.
 static CACHE: LazyLock<Cache> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl FileTable {

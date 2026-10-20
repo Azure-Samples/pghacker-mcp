@@ -12,7 +12,7 @@
 //! alive shares the list.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use anyhow::{Context, Result, bail};
 use tokio_postgres::GenericClient;
@@ -132,6 +132,8 @@ pub type LineageMap = Arc<HashMap<i32, i32>>;
 
 type LineageCache = Mutex<Vec<((String, i64), LineageMap)>>;
 
+// These caches outlive a call that panics while holding one: their lock's
+// poisoning is ignored, since any entry they hold is whole.
 static LINEAGES: LazyLock<LineageCache> = LazyLock::new(Default::default);
 
 /// Each lineage alive at the history's commit, with its version there:
@@ -140,7 +142,7 @@ pub async fn lineage_map(client: &impl GenericClient, h: &History) -> Result<Lin
     let key = (h.build.clone(), h.addr);
     if let Some(map) = LINEAGES
         .lock()
-        .unwrap()
+        .unwrap_or_else(PoisonError::into_inner)
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, m)| m.clone())
@@ -162,7 +164,7 @@ pub async fn lineage_map(client: &impl GenericClient, h: &History) -> Result<Lin
         .map(|r| (r.get(0), r.get(1)))
         .collect();
     let map = Arc::new(map);
-    let mut cache = LINEAGES.lock().unwrap();
+    let mut cache = LINEAGES.lock().unwrap_or_else(PoisonError::into_inner);
     cache.retain(|(k, _)| *k != key);
     cache.push((key, map.clone()));
     if cache.len() > 16 {
@@ -239,7 +241,7 @@ pub async fn keys(
     let mut out = HashMap::new();
     let mut missing = Vec::new();
     {
-        let mut cache = KEYS.lock().unwrap();
+        let mut cache = KEYS.lock().unwrap_or_else(PoisonError::into_inner);
         for &v in versions {
             match cache.get(&(h.build.clone(), v)) {
                 Some(keys) => {
@@ -267,7 +269,7 @@ pub async fn keys(
             &[&missing],
         )
         .await?;
-    let mut cache = KEYS.lock().unwrap();
+    let mut cache = KEYS.lock().unwrap_or_else(PoisonError::into_inner);
     for row in rows {
         let v: i32 = row.get(0);
         let keys: Keys = Arc::new(row.get(1));

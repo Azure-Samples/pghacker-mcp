@@ -5,6 +5,11 @@
 //! configures its embedder: `HORIZON_EMBED_URL`, `_MODEL`, `_DIM`,
 //! `_API_KEY`, `_API_KEY_HEADER` (default `api-key`, Azure's) and `_BEARER`
 //! (inferred for an `Authorization` header).
+//!
+//! Background work, such as the indexer's embedding jobs, retries a failed or
+//! throttled request for minutes ([`Embedder::embed`]). A tool call embeds
+//! its query on a short budget instead ([`Embedder::embed_one_interactive`]),
+//! so that a slow endpoint costs its caller seconds, not minutes.
 
 use std::time::Duration;
 
@@ -25,6 +30,29 @@ const BATCH: usize = 64;
 const MAX_INPUT_CHARS: usize = 24_000;
 
 const TRUE_VALUES: [&str; 4] = ["1", "true", "yes", "on"];
+
+/// How long a tool call's embedding may take in all, retries included.
+pub const INTERACTIVE_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many times a request is tried, and the longest wait between tries.
+#[derive(Clone, Copy, Debug)]
+struct Retries {
+    attempts: u32,
+    longest_wait: Duration,
+}
+
+/// Background work's retries: six tries, waiting up to a minute when the
+/// endpoint asks.
+const BULK: Retries = Retries {
+    attempts: 6,
+    longest_wait: Duration::from_secs(60),
+};
+
+/// A tool call's retries: two tries, within [`INTERACTIVE_BUDGET`].
+const INTERACTIVE: Retries = Retries {
+    attempts: 2,
+    longest_wait: Duration::from_secs(1),
+};
 
 #[derive(Clone)]
 pub struct EmbedConfig {
@@ -93,6 +121,7 @@ impl EmbedConfig {
 pub struct Embedder {
     config: EmbedConfig,
     http: reqwest::Client,
+    interactive_budget: Duration,
 }
 
 #[derive(Deserialize)]
@@ -113,7 +142,18 @@ impl Embedder {
             .user_agent(concat!("pghacker/", env!("CARGO_PKG_VERSION")))
             .build()
             .context("cannot build the embeddings client")?;
-        Ok(Self { config, http })
+        Ok(Self {
+            config,
+            http,
+            interactive_budget: INTERACTIVE_BUDGET,
+        })
+    }
+
+    /// This embedder with another budget for tool calls' embeddings than
+    /// [`INTERACTIVE_BUDGET`].
+    pub fn with_interactive_budget(mut self, budget: Duration) -> Self {
+        self.interactive_budget = budget;
+        self
     }
 
     /// The embedder from the environment, if it's configured.
@@ -133,17 +173,49 @@ impl Embedder {
             .ok_or_else(|| anyhow!("the embeddings endpoint returned nothing"))
     }
 
-    /// The inputs' embeddings, in order, in batches.
+    /// The inputs' embeddings, in order, in batches, for background work: a
+    /// request that fails or is throttled is tried up to six times, over
+    /// minutes if the endpoint asks.
     pub async fn embed(&self, inputs: &[String]) -> Result<Vec<HalfVector>> {
+        self.embed_with(inputs, BULK).await
+    }
+
+    /// One input's embedding for a tool call, as [`Embedder::embed_interactive`] gives it.
+    pub async fn embed_one_interactive(&self, input: &str) -> Result<HalfVector> {
+        let mut vectors = self.embed_interactive(&[input.to_owned()]).await?;
+        vectors
+            .pop()
+            .ok_or_else(|| anyhow!("the embeddings endpoint returned nothing"))
+    }
+
+    /// The inputs' embeddings for a tool call, whose caller waits: tried at
+    /// most twice, and an error once the interactive budget
+    /// ([`INTERACTIVE_BUDGET`]) has passed.
+    pub async fn embed_interactive(&self, inputs: &[String]) -> Result<Vec<HalfVector>> {
+        match tokio::time::timeout(
+            self.interactive_budget,
+            self.embed_with(inputs, INTERACTIVE),
+        )
+        .await
+        {
+            Ok(vectors) => vectors,
+            Err(_) => Err(anyhow!(
+                "the embeddings endpoint didn't answer within {} ms",
+                self.interactive_budget.as_millis()
+            )),
+        }
+    }
+
+    async fn embed_with(&self, inputs: &[String], retries: Retries) -> Result<Vec<HalfVector>> {
         let mut out = Vec::with_capacity(inputs.len());
         for batch in inputs.chunks(BATCH) {
-            let vectors = self.request(batch).await?;
+            let vectors = self.request(batch, retries).await?;
             out.extend(vectors.into_iter().map(|v| HalfVector::from_f32_slice(&v)));
         }
         Ok(out)
     }
 
-    async fn request(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn request(&self, inputs: &[String], retries: Retries) -> Result<Vec<Vec<f32>>> {
         let inputs: Vec<&str> = inputs
             .iter()
             .map(|input| {
@@ -156,7 +228,8 @@ impl Embedder {
             body["dimensions"] = json!(self.config.dim);
         }
         let mut delay = Duration::from_millis(500);
-        for attempt in 1..=6 {
+        let attempts = retries.attempts;
+        for attempt in 1..=attempts {
             let mut request = self.http.post(&self.config.url).json(&body);
             if let Some(key) = &self.config.api_key {
                 let value = if self.config.bearer {
@@ -168,9 +241,9 @@ impl Embedder {
             }
             let response = match request.send().await {
                 Ok(response) => response,
-                Err(error) if attempt < 6 => {
+                Err(error) if attempt < attempts => {
                     tracing::warn!(%error, attempt, "the embeddings request failed; retrying");
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(delay.min(retries.longest_wait)).await;
                     delay = (delay * 2).min(Duration::from_secs(30));
                     continue;
                 }
@@ -206,7 +279,7 @@ impl Embedder {
                     .collect());
             }
             let retryable = status.as_u16() == 429 || status.is_server_error();
-            if retryable && attempt < 6 {
+            if retryable && attempt < attempts {
                 let wait = response
                     .headers()
                     .get("retry-after")
@@ -214,7 +287,7 @@ impl Embedder {
                     .and_then(|value| value.trim().parse::<u64>().ok())
                     .map(Duration::from_secs)
                     .unwrap_or(delay)
-                    .min(Duration::from_secs(60));
+                    .min(retries.longest_wait);
                 tracing::warn!(%status, attempt, wait_ms = wait.as_millis() as u64, "embeddings throttled or failed; retrying");
                 tokio::time::sleep(wait).await;
                 delay = (delay * 2).min(Duration::from_secs(30));
@@ -259,5 +332,32 @@ mod tests {
             ("HORIZON_EMBED_DIM", "768"),
         ]);
         assert!(EmbedConfig::from_env(&env).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_tool_calls_embedding_gives_up_within_its_budget() {
+        // An endpoint that takes connections and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let embedder = Embedder::new(EmbedConfig {
+            url,
+            model: "test".into(),
+            dim: DIMENSIONS,
+            api_key: None,
+            api_key_header: "api-key".into(),
+            bearer: false,
+        })
+        .unwrap()
+        .with_interactive_budget(Duration::from_millis(300));
+        let started = std::time::Instant::now();
+        let error = embedder.embed_one_interactive("vacuum").await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(error.to_string().contains("didn't answer"), "{error:#}");
     }
 }

@@ -20,10 +20,17 @@
 //! a call that starts a user's next question may first be answered with a
 //! form that asks whether the last answer helped; its retry carries the
 //! answer, and runs.
+//!
+//! A tool call that panics is answered with an internal error, and the
+//! connections it held from a [`CallPool`](crate::calls::CallPool) are
+//! closed. A server may give each call a deadline
+//! ([`McpServer::with_call_timeout`]).
 
+use std::any::Any;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -33,6 +40,7 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use futures_util::FutureExt;
 use rmcp::handler::server::common::schema_for_type;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, CustomRequest,
@@ -198,6 +206,7 @@ pub struct McpServer<T> {
     skills: Skills,
     feedback: Feedback,
     cancel_on_disconnect: bool,
+    call_timeout: Option<Duration>,
 }
 
 impl<T: Tools> McpServer<T> {
@@ -217,6 +226,7 @@ impl<T: Tools> McpServer<T> {
             skills: Skills::default(),
             feedback: Feedback::off(),
             cancel_on_disconnect: false,
+            call_timeout: None,
         }
     }
 
@@ -290,6 +300,17 @@ impl<T: Tools> McpServer<T> {
     /// session setting changed across one.
     pub fn cancel_on_disconnect(mut self) -> Self {
         self.cancel_on_disconnect = true;
+        self
+    }
+
+    /// Stops a tool call that runs past `limit`, which then fails with a
+    /// tool error: its future is dropped, and the statements it runs on a
+    /// [`CallPool`](crate::calls::CallPool)'s connections are cancelled, as
+    /// for an abandoned call. The same tools only, then, as
+    /// [`McpServer::cancel_on_disconnect`]. Calls that stop themselves
+    /// sooner, such as `query`, report their own outcome.
+    pub fn with_call_timeout(mut self, limit: Duration) -> Self {
+        self.call_timeout = Some(limit);
         self
     }
 }
@@ -451,13 +472,42 @@ impl<T: Tools> ServerHandler for McpServer<T> {
                 }
             }
         };
+        // A call that panics, or runs past the deadline, is dropped as an
+        // abandoned one is: the connections it holds are closed.
+        let limit = self.call_timeout;
+        let tool_name = name.as_str();
+        let call = async move {
+            let guarded = AssertUnwindSafe(abandonable(call)).catch_unwind();
+            let caught = match limit {
+                Some(limit) => match tokio::time::timeout(limit, guarded).await {
+                    Ok(caught) => caught,
+                    Err(_) => {
+                        tracing::warn!(tool = %tool_name, limit_ms = limit.as_millis() as u64, "tool call stopped at its deadline");
+                        return Ok(Output::Failed(format!(
+                            "the call ran past its {}-second limit and was stopped; \
+                             try again shortly, or narrow it",
+                            limit.as_secs_f64()
+                        )));
+                    }
+                },
+                None => guarded.await,
+            };
+            caught.unwrap_or_else(|panic| {
+                tracing::error!(tool = %tool_name, "tool call panicked");
+                tracing::debug!(tool = %tool_name, panic = %panic_message(&*panic), "why the tool call panicked");
+                Err(ErrorData::internal_error(
+                    "the tool failed unexpectedly",
+                    None,
+                ))
+            })
+        };
         let started = Instant::now();
         let outcome = if self.cancel_on_disconnect {
             // rmcp cancels the request's token when the client disconnects
             // before the answer.
             tokio::select! {
                 biased;
-                outcome = abandonable(call) => outcome,
+                outcome = call => outcome,
                 () = context.ct.cancelled() => {
                     let elapsed = started.elapsed();
                     let ms = elapsed.as_millis() as u64;
@@ -619,6 +669,15 @@ impl<T: Tools> ServerHandler for McpServer<T> {
         }
         Ok(CustomResult::new(result))
     }
+}
+
+/// A panic's message, if it has one.
+fn panic_message(panic: &(dyn Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic without a message")
 }
 
 /// A URI's characters in a usage event, at most.

@@ -12,7 +12,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use pghacker_core::embed::Embedder;
 use pghacker_core::text::truncate_chars;
 
 use crate::common::{AuthorRef, Mode, Searcher, resolve_author, snippet};
@@ -62,13 +61,13 @@ fn day(date: Option<NaiveDate>) -> Option<DateTime<Utc>> {
         .map(|d| d.and_utc())
 }
 
+/// `searcher` is [`Searcher::new`] of `args`' query and mode.
 pub async fn search_threads(
     client: &impl GenericClient,
-    embedder: Option<&Embedder>,
+    searcher: &Searcher,
     args: SearchThreadsArgs,
 ) -> Result<Value> {
     let limit = args.limit.unwrap_or(10).clamp(1, 30) as usize;
-    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
     let authors = match &args.author {
         Some(author) => Some(vec![resolve_author(client, author).await?]),
         None => None,

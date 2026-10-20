@@ -11,9 +11,10 @@
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadpool_postgres::{Manager, ManagerConfig, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, RecyclingMethod, Runtime};
 use rustls::RootCertStore;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
@@ -21,6 +22,13 @@ use tokio_postgres::{CancelToken, Client, Config};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 pub use deadpool_postgres::Pool;
+
+/// How long a pool may take to open a connection: a database that doesn't
+/// answer fails the caller rather than holding it.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a pool may take to check a connection before reusing it.
+const RECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The TLS connector of every connection, built once.
 pub fn tls() -> Result<MakeRustlsConnect> {
@@ -100,6 +108,9 @@ fn build_pool(mut config: Config, max_size: usize, application_name: &str) -> Re
     );
     Pool::builder(manager)
         .max_size(max_size)
+        .runtime(Runtime::Tokio1)
+        .create_timeout(Some(CREATE_TIMEOUT))
+        .recycle_timeout(Some(RECYCLE_TIMEOUT))
         .build()
         .context("cannot build the connection pool")
 }

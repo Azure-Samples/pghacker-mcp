@@ -12,7 +12,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use pghacker_core::embed::Embedder;
 use pghacker_core::search::{RRF_K, rrf};
 
 use crate::common::{AuthorRef, Mode, Searcher, citations, resolve_author, snippet};
@@ -162,9 +161,10 @@ pub async fn get_author(client: &impl GenericClient, args: GetAuthorArgs) -> Res
     }))
 }
 
+/// `searcher` is [`Searcher::new`] of `args`' topic and mode.
 pub async fn author_perspective(
     client: &impl GenericClient,
-    embedder: Option<&Embedder>,
+    searcher: &Searcher,
     args: AuthorPerspectiveArgs,
 ) -> Result<Value> {
     let limit = args.limit.unwrap_or(8).clamp(1, 20) as usize;
@@ -173,7 +173,6 @@ pub async fn author_perspective(
         .query_one("SELECT display_name FROM authors WHERE id = $1", &[&id])
         .await?
         .get(0);
-    let searcher = Searcher::new(args.mode, &args.topic, embedder).await?;
     let authors = vec![id];
     let until = args
         .until
@@ -182,7 +181,7 @@ pub async fn author_perspective(
     let paths = source_paths(&args.paths);
     // The topic's rankings fused into one, then fused with the paths' at
     // equal weight, so that neither crowds the other out.
-    let topic_ranked: Vec<i64> = rrf(&topic_positions(client, &searcher, id).await?, RRF_K)
+    let topic_ranked: Vec<i64> = rrf(&topic_positions(client, searcher, id).await?, RRF_K)
         .into_iter()
         .map(|(position, _)| position)
         .collect();
@@ -252,7 +251,7 @@ pub async fn author_perspective(
     let mut chunks = searcher
         .rank_chunks(client, Some(&authors), None, until, 40)
         .await?;
-    if let Some(embedding) = topic_embedding(&searcher) {
+    if let Some(embedding) = topic_embedding(searcher) {
         let ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
         let distances: HashMap<i64, Option<f64>> = client
             .query(
@@ -403,7 +402,7 @@ async fn positions_before(
 }
 
 /// The topic's embedding when the mode uses semantic search.
-fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfVector> {
+fn topic_embedding(searcher: &Searcher) -> Option<&pgvector::HalfVector> {
     searcher
         .embedding()
         .filter(|_| searcher.mode != Mode::Fulltext)
@@ -416,7 +415,7 @@ fn topic_embedding<'s>(searcher: &'s Searcher<'_>) -> Option<&'s pgvector::HalfV
 /// loose text matches drop out.
 async fn topic_positions(
     client: &impl GenericClient,
-    searcher: &Searcher<'_>,
+    searcher: &Searcher,
     author: i64,
 ) -> Result<Vec<Vec<i64>>> {
     let mut rankings: Vec<Vec<i64>> = Vec::new();

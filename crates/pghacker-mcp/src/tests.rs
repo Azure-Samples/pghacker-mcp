@@ -3,23 +3,29 @@
 
 //! The listeners as `main` assembles them: the public one's Front Door
 //! check, usage records, rate limit and feedback, and the internal one's
-//! records.
+//! records; their deadline and panics; and the tools under load: a busy
+//! pool, and a slow embeddings service.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::http::HeaderName;
+use axum::routing::get;
+use pghacker_core::calls::CallPool;
+use pghacker_core::embed::{EmbedConfig, Embedder};
 use pghacker_core::feedback::{Feedback, Settings as FeedbackSettings};
 use pghacker_core::mcp::{Effect, McpServer, Output, ToolSpec, Tools, parse, router, schema};
+use pghacker_core::testing::TestDb;
 use pghacker_core::usage::testing::Ingestion;
 use pghacker_core::usage::{ACTION, ERROR, Settings, Usage};
 use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{internal, public};
+use super::{guarded, internal, public};
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
+use crate::tools::Server;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct EchoArgs {
@@ -554,4 +560,142 @@ async fn without_details_calls_of_the_served_tools_keep_only_their_choices() {
         assert!(!event.contains(SECRET), "{event}");
     }
     assert_eq!(usage.lost(), 0);
+}
+
+#[tokio::test]
+async fn a_stalled_request_is_answered_503_and_a_panic_500() {
+    let app = Router::new()
+        .route(
+            "/slow",
+            get(|| async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                "late"
+            }),
+        )
+        .route(
+            "/panic",
+            get(|| async {
+                if Instant::now().elapsed() < Duration::from_secs(3600) {
+                    panic!("a test panic");
+                }
+                "unreachable"
+            }),
+        );
+    let base = listen(guarded(app, Duration::from_millis(300))).await;
+    let client = reqwest::Client::new();
+    let started = Instant::now();
+    let slow = client.get(format!("{base}/slow")).send().await.unwrap();
+    assert_eq!(slow.status().as_u16(), 503);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let panicked = client.get(format!("{base}/panic")).send().await.unwrap();
+    assert_eq!(panicked.status().as_u16(), 500);
+    // The listener serves on.
+    let again = client.get(format!("{base}/panic")).send().await.unwrap();
+    assert_eq!(again.status().as_u16(), 500);
+}
+
+/// The tools on `db` with a pool of one connection, waited for up to 300 ms.
+fn server(db: &TestDb, embedder: Option<Embedder>) -> (Server, CallPool) {
+    let pool = CallPool::new(db.reader_pool(1).unwrap(), Duration::from_millis(300));
+    let query = pghacker_sqlquery::QueryTool::new(&db.reader_url, 1).unwrap();
+    (Server::new(pool.clone(), embedder, query), pool)
+}
+
+#[tokio::test]
+async fn a_call_fails_soon_as_busy_when_every_connection_is_taken() {
+    let db = TestDb::create().await.unwrap();
+    let (server, pool) = server(&db, None);
+    let held = pool.get().await.unwrap();
+    for (tool, arguments) in [
+        ("search_authors", json!({ "query": "Tom" })),
+        ("search_threads", json!({ "query": "vacuum" })),
+        ("grep", json!({ "command": "grep -r vacuum src" })),
+    ] {
+        let started = Instant::now();
+        let output = server.call(tool, arguments).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "{tool}");
+        match output {
+            Output::Failed(text) => assert!(text.contains("busy; try again"), "{tool}: {text}"),
+            _ => panic!("{tool} ran without a connection"),
+        }
+    }
+    drop(held);
+    let output = server
+        .call("search_authors", json!({ "query": "Tom" }))
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::Json(_)));
+}
+
+#[tokio::test]
+async fn a_slow_embeddings_service_turns_semantic_search_to_full_text_without_a_connection() {
+    // An embeddings endpoint that takes connections and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let (accepted, mut accepts) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+            let _ = accepted.send(());
+        }
+    });
+    let embedder = Embedder::new(EmbedConfig {
+        url,
+        model: "test".into(),
+        dim: pghacker_core::embed::DIMENSIONS,
+        api_key: None,
+        api_key_header: "api-key".into(),
+        bearer: false,
+    })
+    .unwrap()
+    .with_interactive_budget(Duration::from_millis(800));
+    let db = TestDb::create().await.unwrap();
+    db.indexer()
+        .await
+        .unwrap()
+        .batch_execute(
+            "INSERT INTO authors (id, display_name, message_count) VALUES (1, 'Tom Lane', 0)",
+        )
+        .await
+        .unwrap();
+    let (server, pool) = server(&db, Some(embedder));
+    for (tool, arguments, results) in [
+        ("search_threads", json!({ "query": "vacuum" }), "threads"),
+        (
+            "search_extracts",
+            json!({ "query": "vacuum", "mode": "semantic" }),
+            "results",
+        ),
+        (
+            "author_perspective",
+            json!({ "author": 1, "topic": "vacuum" }),
+            "positions",
+        ),
+    ] {
+        let started = Instant::now();
+        let call = tokio::spawn({
+            let server = server.clone();
+            async move { server.call(tool, arguments).await }
+        });
+        accepts.recv().await.unwrap();
+        // While the call waits on the endpoint, its connection is free.
+        let free = pool.get().await.expect("the pool's one connection");
+        drop(free);
+        let output = call.await.unwrap().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "{tool}");
+        match output {
+            Output::Json(value) => {
+                assert_eq!(value["mode"], "fulltext", "{tool}: {value}");
+                assert!(value[results].is_array(), "{tool}: {value}");
+                let note = value["notes"][0].as_str().unwrap_or_default();
+                assert!(
+                    note.contains("semantic search is unavailable right now"),
+                    "{tool}: {value}"
+                );
+            }
+            Output::Failed(text) => panic!("{tool}: {text}"),
+            Output::Text(text) => panic!("{tool}: {text}"),
+        }
+    }
 }

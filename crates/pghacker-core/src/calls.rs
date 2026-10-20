@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use deadpool_postgres::{ClientWrapper, Object, Pool};
 use tokio::task::futures::TaskLocalFuture;
 
@@ -97,10 +97,11 @@ impl CallPool {
         &self.pool
     }
 
-    /// A connection, or an error once `wait` has passed with every one busy.
+    /// A connection, or an error once `wait` has passed with every one busy,
+    /// or when the database can't be reached.
     pub async fn get(&self) -> Result<CallClient> {
         let object = match tokio::time::timeout(self.wait, self.pool.get()).await {
-            Ok(object) => object?,
+            Ok(object) => object.context("the database is unavailable")?,
             Err(_) => {
                 return Err(anyhow!(
                     "all {} database connections for tool calls are busy; try again shortly",

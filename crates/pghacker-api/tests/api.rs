@@ -3,7 +3,7 @@
 
 //! The mail and graph tools on a synthetic corpus, as the read-only role.
 
-use pghacker_api::{extracts, ontology, people, threads};
+use pghacker_api::{Searcher, extracts, ontology, people, threads};
 use pghacker_core::embed::{EmbedConfig, Embedder};
 use pghacker_core::testing::TestDb;
 use serde_json::{Value, json};
@@ -67,6 +67,34 @@ fn args<T: serde::de::DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).unwrap()
 }
 
+/// The tools as pghacker-mcp calls them: the searcher first, then the search.
+async fn search_threads(
+    client: &tokio_postgres::Client,
+    embedder: Option<&Embedder>,
+    args: threads::SearchThreadsArgs,
+) -> anyhow::Result<Value> {
+    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
+    threads::search_threads(client, &searcher, args).await
+}
+
+async fn search_extracts(
+    client: &tokio_postgres::Client,
+    embedder: Option<&Embedder>,
+    args: extracts::SearchExtractsArgs,
+) -> anyhow::Result<Value> {
+    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
+    extracts::search_extracts(client, &searcher, args).await
+}
+
+async fn author_perspective(
+    client: &tokio_postgres::Client,
+    embedder: Option<&Embedder>,
+    args: people::AuthorPerspectiveArgs,
+) -> anyhow::Result<Value> {
+    let searcher = Searcher::new(args.mode, &args.topic, embedder).await?;
+    people::author_perspective(client, &searcher, args).await
+}
+
 fn no_emails(value: &Value) {
     let text = value.to_string();
     assert!(
@@ -79,7 +107,7 @@ fn no_emails(value: &Value) {
 async fn searches_threads_by_full_text_and_falls_back_from_hybrid() {
     let db = corpus().await;
     let reader = db.reader().await.unwrap();
-    let out = threads::search_threads(
+    let out = search_threads(
         &reader,
         None,
         args(json!({ "query": "PLAN clause", "mode": "fulltext" })),
@@ -96,14 +124,14 @@ async fn searches_threads_by_full_text_and_falls_back_from_hybrid() {
     );
     assert_eq!(out["threads"].as_array().unwrap().len(), 1);
 
-    let hybrid = threads::search_threads(&reader, None, args(json!({ "query": "autovacuum" })))
+    let hybrid = search_threads(&reader, None, args(json!({ "query": "autovacuum" })))
         .await
         .unwrap();
     assert_eq!(hybrid["mode"], "fulltext");
     assert!(hybrid["notes"][0].as_str().unwrap().contains("fell back"));
     assert_eq!(hybrid["threads"][0]["thread_id"], 11);
 
-    let semantic = threads::search_threads(
+    let semantic = search_threads(
         &reader,
         None,
         args(json!({ "query": "x", "mode": "semantic" })),
@@ -111,7 +139,7 @@ async fn searches_threads_by_full_text_and_falls_back_from_hybrid() {
     .await;
     assert!(semantic.is_err());
 
-    let by_author = threads::search_threads(
+    let by_author = search_threads(
         &reader,
         None,
         args(json!({ "query": "PLAN clause", "mode": "fulltext", "author": "Bob Reviewer" })),
@@ -122,7 +150,7 @@ async fn searches_threads_by_full_text_and_falls_back_from_hybrid() {
         by_author["threads"][0]["matches"][0]["message_id"],
         "m2@example.org"
     );
-    let dated = threads::search_threads(
+    let dated = search_threads(
         &reader,
         None,
         args(json!({ "query": "PLAN clause", "mode": "fulltext", "since": "2026-06-05" })),
@@ -184,7 +212,7 @@ async fn finds_authors_and_their_perspective() {
     assert_eq!(author["positions_by_stance"]["concerned"], 1);
     assert_eq!(author["features"][0]["slug"], "json-table-plan");
 
-    let perspective = people::author_perspective(
+    let perspective = author_perspective(
         &reader,
         None,
         args(json!({ "author": "Bob Reviewer", "topic": "PLAN clause complexity", "mode": "fulltext" })),
@@ -202,7 +230,7 @@ async fn finds_authors_and_their_perspective() {
     assert_eq!(perspective["messages"][0]["message_id"], "m2@example.org");
     no_emails(&perspective);
 
-    let none = people::author_perspective(
+    let none = author_perspective(
         &reader,
         None,
         args(json!({ "author": 2, "topic": "autovacuum", "mode": "fulltext" })),
@@ -278,7 +306,7 @@ async fn narrows_an_author_perspective_to_the_topic() {
     let embedder = fake_embedder().await;
     let reader = db.reader().await.unwrap();
     for mode in ["semantic", "hybrid"] {
-        let out = people::author_perspective(
+        let out = author_perspective(
             &reader,
             Some(&embedder),
             args(json!({ "author": 2, "topic": "the PLAN clause", "mode": mode })),
@@ -304,7 +332,7 @@ async fn narrows_an_author_perspective_to_the_topic() {
             .collect();
         assert_eq!(messages, ["m2@example.org"], "{mode}: {out:#}");
     }
-    let fulltext = people::author_perspective(
+    let fulltext = author_perspective(
         &reader,
         None,
         args(json!({ "author": 2, "topic": "the PLAN clause", "mode": "fulltext" })),
@@ -343,7 +371,7 @@ async fn adds_positions_on_the_paths_and_keeps_only_evidence_from_before_until()
         }
         let reader = &reader;
         async move {
-            people::author_perspective(reader, None, args(arguments))
+            author_perspective(reader, None, args(arguments))
                 .await
                 .unwrap()
         }
@@ -390,7 +418,7 @@ async fn adds_positions_on_the_paths_and_keeps_only_evidence_from_before_until()
     let earlier =
         perspective(json!({ "until": "2026-06-02", "paths": ["src/backend/parser"] })).await;
     assert!(ids(&earlier).is_empty(), "{earlier:#}");
-    let plan = people::author_perspective(
+    let plan = author_perspective(
         &reader,
         None,
         args(json!({ "author": 2, "topic": "PLAN clause complexity", "mode": "fulltext", "until": "2026-06-03" })),
@@ -405,7 +433,7 @@ async fn adds_positions_on_the_paths_and_keeps_only_evidence_from_before_until()
 async fn searches_extracts_with_citations() {
     let db = corpus().await;
     let reader = db.reader().await.unwrap();
-    let out = extracts::search_extracts(
+    let out = search_extracts(
         &reader,
         None,
         args(json!({ "query": "PLAN clause", "mode": "fulltext" })),
@@ -425,7 +453,7 @@ async fn searches_extracts_with_citations() {
         "adding the PLAN clause to JSON_TABLE"
     );
     assert_eq!(feature["files"][0], "src/backend/parser/parse_jsontable.c");
-    let decisions = extracts::search_extracts(
+    let decisions = search_extracts(
         &reader,
         None,
         args(json!({ "query": "nested path", "mode": "fulltext", "kind": "decision" })),

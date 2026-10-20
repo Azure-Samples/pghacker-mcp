@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 
-use pghacker_core::embed::Embedder;
 use pghacker_core::search::{RRF_K, rrf};
 
 use crate::common::{AuthorRef, Mode, Searcher, citations, resolve_author};
@@ -40,13 +39,13 @@ pub struct SearchExtractsArgs {
     pub limit: Option<u32>,
 }
 
+/// `searcher` is [`Searcher::new`] of `args`' query and mode.
 pub async fn search_extracts(
     client: &impl GenericClient,
-    embedder: Option<&Embedder>,
+    searcher: &Searcher,
     args: SearchExtractsArgs,
 ) -> Result<Value> {
     let limit = args.limit.unwrap_or(10).clamp(1, 30) as usize;
-    let searcher = Searcher::new(args.mode, &args.query, embedder).await?;
     let author = match &args.author {
         Some(author) => Some(resolve_author(client, author).await?),
         None => None,

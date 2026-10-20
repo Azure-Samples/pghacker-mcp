@@ -19,31 +19,48 @@ use pghacker_core::text::truncate_chars;
 pub type Mode = SearchMode;
 
 /// Ranks by mode. Holds the query's embedding once computed.
-pub struct Searcher<'a> {
+///
+/// A tool builds its searcher before it takes a connection: the embedding
+/// waits on the embeddings service, and no connection should wait with it.
+pub struct Searcher {
     pub mode: Mode,
-    embedder: Option<&'a Embedder>,
     query: String,
     embedding: Option<HalfVector>,
     /// What the caller should know about the mode, such as a fallback.
     pub notes: Vec<String>,
 }
 
-impl<'a> Searcher<'a> {
-    pub async fn new(mode: Mode, query: &str, embedder: Option<&'a Embedder>) -> Result<Self> {
+impl Searcher {
+    /// The searcher for `query` in `mode`, with the query's embedding unless
+    /// the mode is fulltext. Without an embedder, hybrid falls back to full
+    /// text and semantic fails. When the embeddings service fails or doesn't
+    /// answer within the interactive budget, both fall back to full text,
+    /// and a note says so.
+    pub async fn new(mode: Mode, query: &str, embedder: Option<&Embedder>) -> Result<Self> {
         let query = query.trim();
         if query.is_empty() {
             return Err(anyhow!("query is empty"));
         }
         let mut searcher = Self {
             mode,
-            embedder,
             query: query.to_owned(),
             embedding: None,
             notes: Vec::new(),
         };
         if mode != Mode::Fulltext {
-            match searcher.embedder {
-                Some(embedder) => searcher.embedding = Some(embedder.embed_one(query).await?),
+            match embedder {
+                Some(embedder) => match embedder.embed_one_interactive(query).await {
+                    Ok(embedding) => searcher.embedding = Some(embedding),
+                    Err(error) => {
+                        tracing::warn!(error = %format!("{error:#}"), "cannot embed a query; searching full text");
+                        searcher.notes.push(format!(
+                            "semantic search is unavailable right now (the embeddings service \
+                             failed or was slow); {} fell back to fulltext",
+                            mode.as_str()
+                        ));
+                        searcher.mode = Mode::Fulltext;
+                    }
+                },
                 None if mode == Mode::Semantic => {
                     return Err(anyhow!(
                         "semantic search isn't configured on this server; use mode fulltext"

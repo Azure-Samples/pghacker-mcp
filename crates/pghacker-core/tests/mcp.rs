@@ -4,17 +4,21 @@
 //! The MCP plumbing over HTTP, as clients use it: a legacy client's
 //! initialize then tools/list and tools/call without a session, structured
 //! results, tool errors, unknown tools, Host validation, ping from clients of
-//! either protocol, calls whose clients give up, and skills (SEP-2640) as
-//! clients of either protocol find, read and check them.
+//! either protocol, calls whose clients give up, calls past their deadline,
+//! calls that panic, and skills (SEP-2640) as clients of either protocol
+//! find, read and check them.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use pghacker_core::calls::CallPool;
+use pghacker_core::db;
 use pghacker_core::mcp::{
     Effect, McpServer, Output, ToolSpec, Tools, failed, parse, router, schema,
 };
 use pghacker_core::skills::{EXTENSION, Skills, frontmatter};
+use pghacker_core::testing::TestDb;
 use rmcp::ErrorData;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -367,6 +371,137 @@ async fn a_call_is_dropped_when_its_client_gives_up_if_the_server_cancels_on_dis
         !hang_dropped(false).await,
         "without cancel_on_disconnect, a call runs on as it always has"
     );
+}
+
+/// Tools on a database: `sleep` runs a long statement, `panic` panics
+/// holding a connection, and `one` reads a row.
+#[derive(Clone)]
+struct Database {
+    pool: CallPool,
+}
+
+static DATABASE: &[ToolSpec] = &[
+    ToolSpec {
+        name: "sleep",
+        description: "Sleeps in the database.",
+        effect: Effect::Read,
+        schema: schema::<NoArgs>,
+    },
+    ToolSpec {
+        name: "panic",
+        description: "Panics.",
+        effect: Effect::Read,
+        schema: schema::<NoArgs>,
+    },
+    ToolSpec {
+        name: "one",
+        description: "Reads one.",
+        effect: Effect::Read,
+        schema: schema::<NoArgs>,
+    },
+];
+
+impl Tools for Database {
+    fn specs(&self) -> &'static [ToolSpec] {
+        DATABASE
+    }
+
+    async fn call(&self, name: &str, _arguments: Value) -> Result<Output, ErrorData> {
+        let client = match self.pool.get().await {
+            Ok(client) => client,
+            Err(error) => return Ok(failed(error)),
+        };
+        let one: i32 = client.query_one("SELECT 1", &[]).await.unwrap().get(0);
+        match name {
+            "sleep" => {
+                client.execute("SELECT pg_sleep(30)", &[]).await.unwrap();
+                Ok(Output::Text("slept".into()))
+            }
+            "panic" => panic!("a test panic, holding a connection"),
+            _ => Ok(Output::Json(json!({ "one": one }))),
+        }
+    }
+}
+
+const DATABASE_APP: &str = "pghacker-test mcp";
+
+/// The pool's connections running pg_sleep, once `within` has passed or
+/// there are none.
+async fn sleeping(admin: &tokio_postgres::Client, within: Duration) -> i64 {
+    let started = Instant::now();
+    loop {
+        let count: i64 = admin
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND application_name = $1
+                   AND state = 'active' AND query LIKE 'SELECT pg_sleep%'",
+                &[&DATABASE_APP],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if count == 0 || started.elapsed() > within {
+            return count;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn call(id: u64, tool: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": tool, "arguments": {} } })
+}
+
+#[tokio::test]
+async fn a_call_past_its_deadline_fails_and_frees_its_connection() {
+    let db = TestDb::create().await.unwrap();
+    let admin = db.admin().await.unwrap();
+    let pool = CallPool::new(
+        db::pool(&db.reader_url, 1, DATABASE_APP).unwrap(),
+        Duration::from_secs(2),
+    );
+    let server = McpServer::new(Database { pool }, "db", "1", "Database tools.")
+        .with_call_timeout(Duration::from_millis(700));
+    let base = serve_server(server, None).await;
+    let client = reqwest::Client::new();
+
+    let started = Instant::now();
+    let (status, body) = rpc(&client, &base, call(1, "sleep")).await;
+    assert_eq!(status, 200);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("limit and was stopped"), "{text}");
+    // Its statement was cancelled, and the pool's one connection serves the
+    // next call.
+    assert_eq!(sleeping(&admin, Duration::from_secs(5)).await, 0);
+    let (_, body) = rpc(&client, &base, call(2, "one")).await;
+    assert_eq!(body["result"]["structuredContent"]["one"], 1, "{body}");
+}
+
+#[tokio::test]
+async fn a_call_that_panics_is_an_error_and_frees_its_connection() {
+    let db = TestDb::create().await.unwrap();
+    let pool = CallPool::new(
+        db::pool(&db.reader_url, 1, DATABASE_APP).unwrap(),
+        Duration::from_secs(2),
+    );
+    let base = serve_server(
+        McpServer::new(Database { pool }, "db", "1", "Database tools."),
+        None,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    for id in [1, 2] {
+        let (status, body) = rpc(&client, &base, call(id, "panic")).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["error"]["message"], "the tool failed unexpectedly",
+            "{body}"
+        );
+    }
+    let (_, body) = rpc(&client, &base, call(3, "one")).await;
+    assert_eq!(body["result"]["structuredContent"]["one"], 1, "{body}");
 }
 
 const SKILL: &str = "---\nname: demo\ndescription: Shows how; use when asked for a demo.\nlicense: MIT\nmetadata:\n  version: \"1\"\n---\n\n# Demo\n\nRead references/notes.md, then call echo.\n";
