@@ -467,12 +467,109 @@ fn data_and_declarations_are_not_function_executions() {
         "SELECT * FROM threads set_config(id)",
         "WITH set_config(n) AS (SELECT 1) \
          SELECT * FROM cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT * FROM threads AS t(id), cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT * FROM pghacker.threads t(id), cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT 1::numeric(10, 2), * FROM cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT * FROM threads AS cypher(id), cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT * FROM threads cypher(id), cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+    ] {
+        allowed(sql);
+    }
+    // The fallback can't always tell an alias from a call, so it refuses denied names as either.
+    for sql in [
         "SELECT * FROM threads AS set_config(id), \
          cypher('g', $$ RETURN 1 $$) AS (n agtype)",
         "SELECT * FROM pghacker.threads set_config(id), \
          cypher('g', $$ RETURN 1 $$) AS (n agtype)",
     ] {
-        allowed(sql);
+        refused(sql, "session settings");
+    }
+}
+
+#[test]
+fn lateral_calls_are_not_mistaken_for_aliases_in_the_fallback() {
+    let nested = format!("{}1{}", "(".repeat(70), ")".repeat(70));
+    for (call, effect) in [
+        ("pg_terminate_backend(a.pid)", "controls the server"),
+        ("pg_cancel_backend(a.pid)", "controls the server"),
+        (
+            "pg_catalog.pg_terminate_backend(a.pid)",
+            "controls the server",
+        ),
+        ("pg_sleep(30)", "delays"),
+        (
+            "query_to_xml('DELETE FROM authors', true, false, '')",
+            "SQL supplied as text",
+        ),
+    ] {
+        for join in [
+            "FROM pg_stat_activity a, LATERAL",
+            "FROM LATERAL",
+            "FROM pg_stat_activity a JOIN LATERAL",
+            "FROM pg_stat_activity a CROSS JOIN LATERAL",
+            "FROM pg_stat_activity a LEFT JOIN LATERAL",
+            "FROM pg_stat_activity a INNER JOIN LATERAL",
+        ] {
+            let on = if join.contains("CROSS") || !join.contains("JOIN") {
+                ""
+            } else {
+                " ON true"
+            };
+            for sql in [
+                format!("SELECT 1 {join} {call} t{on}"),
+                format!(
+                    "SELECT * FROM cypher('g', $$ RETURN 1 $$) AS (n agtype), \
+                     (SELECT 1 {join} {call} t{on}) q"
+                ),
+                format!("SELECT {nested} {join} {call} t{on}"),
+                format!("SELECT {nested} {join} {call}{on}"),
+            ] {
+                refused(&sql, effect);
+                let harmless = sql.replace(call, "generate_series(1, 2)");
+                if sql.contains("agtype") || sql.contains(&nested) {
+                    assert!(
+                        matches!(allowed(&harmless), Checked::Tokens(_)),
+                        "{harmless}"
+                    );
+                }
+            }
+        }
+    }
+    for sql in [
+        "SELECT * FROM threads t JOIN LATERAL cypher('g', $$ CREATE (m) RETURN m $$) \
+         AS (m agtype) ON true",
+        "SELECT * FROM threads t CROSS JOIN LATERAL \
+         ag_catalog.cypher('g', $$ CREATE (m) RETURN m $$) AS (m agtype)",
+        "SELECT * FROM LATERAL cypher('g', $$ CREATE (m) RETURN m $$) AS (m agtype)",
+        "SELECT * FROM threads t LEFT JOIN LATERAL cypher('g', $$ MATCH (n) DELETE n $$) \
+         AS (m agtype) ON true",
+    ] {
+        refused(sql, "Cypher query has");
+    }
+    for sql in [
+        "SELECT * FROM threads t JOIN LATERAL cypher('g', $1) AS (m agtype) ON true",
+        &format!(
+            "SELECT {nested} FROM threads t JOIN LATERAL cypher('g', 'MATCH (n) ' || 'RETURN n') \
+             AS (m agtype) ON true"
+        ),
+    ] {
+        refused(sql, "literal query text");
+    }
+    allowed(
+        "SELECT * FROM threads t JOIN LATERAL cypher('g', $$ MATCH (n) RETURN n $$) \
+         AS (m agtype) ON true",
+    );
+}
+
+#[test]
+fn operator_syntax_cannot_hide_calls_in_the_fallback() {
+    for sql in [
+        "SELECT 1 OPERATOR(pg_catalog.+) pg_sleep(1)::int \
+         FROM cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+        "SELECT OPERATOR(pg_catalog.-) pg_sleep(1)::int \
+         FROM cypher('g', $$ RETURN 1 $$) AS (n agtype)",
+    ] {
+        refused(sql, "delays");
     }
 }
 

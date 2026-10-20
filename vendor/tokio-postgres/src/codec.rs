@@ -3,6 +3,9 @@ use fallible_iterator::FallibleIterator;
 use postgres_protocol::message::backend;
 use postgres_protocol::message::frontend::CopyData;
 use std::io;
+// --- pghacker-mcp fork edit (7/9) ---
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub enum FrontendMessage {
@@ -35,7 +38,13 @@ impl FallibleIterator for BackendMessages {
     }
 }
 
-pub struct PostgresCodec;
+// --- pghacker-mcp fork edit (7/9) ---
+/// Upstream's codec is a unit struct. This one carries an optional limit on
+/// backend message size, and a flag it sets when a message exceeds it.
+pub struct PostgresCodec {
+    pub max_message_size: Option<usize>,
+    pub message_too_large: Arc<AtomicBool>,
+}
 
 impl Encoder<FrontendMessage> for PostgresCodec {
     type Error = io::Error;
@@ -60,6 +69,19 @@ impl Decoder for PostgresCodec {
 
         while let Some(header) = backend::Header::parse(&src[idx..])? {
             let len = header.len() as usize + 1;
+            // --- pghacker-mcp fork edit (7/9) ---
+            // Refuse an oversized message from its header, before buffering its
+            // body. Messages already complete are delivered first.
+            if let Some(max) = self.max_message_size.filter(|max| len > *max) {
+                if idx > 0 {
+                    break;
+                }
+                self.message_too_large.store(true, Ordering::Release);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("backend message of {len} bytes exceeds the limit of {max} bytes"),
+                ));
+            }
             if src[idx..].len() < len {
                 break;
             }

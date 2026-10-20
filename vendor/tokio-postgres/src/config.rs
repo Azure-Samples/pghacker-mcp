@@ -235,6 +235,8 @@ pub struct Config {
     pub(crate) target_session_attrs: TargetSessionAttrs,
     pub(crate) channel_binding: ChannelBinding,
     pub(crate) load_balance_hosts: LoadBalanceHosts,
+    // --- pghacker-mcp fork edit (6/9) ---
+    pub(crate) max_backend_message_size: Option<usize>,
 }
 
 impl Default for Config {
@@ -269,6 +271,8 @@ impl Config {
             target_session_attrs: TargetSessionAttrs::Any,
             channel_binding: ChannelBinding::Prefer,
             load_balance_hosts: LoadBalanceHosts::Disable,
+            // --- pghacker-mcp fork edit (6/9) ---
+            max_backend_message_size: None,
         }
     }
 
@@ -564,6 +568,27 @@ impl Config {
         self.load_balance_hosts
     }
 
+    // --- pghacker-mcp fork edit (6/9) ---
+    /// Sets the largest message the connection accepts from the server, in
+    /// bytes, counting its type byte and length.
+    ///
+    /// A message whose header announces more fails the connection before its
+    /// body is buffered, and [`Client::backend_message_too_large`] then
+    /// returns `true`. Defaults to no limit.
+    ///
+    /// [`Client::backend_message_too_large`]: crate::Client::backend_message_too_large
+    pub fn max_backend_message_size(&mut self, max_backend_message_size: usize) -> &mut Config {
+        self.max_backend_message_size = Some(max_backend_message_size);
+        self
+    }
+
+    // --- pghacker-mcp fork edit (6/9) ---
+    /// Gets the largest message the connection accepts from the server, if
+    /// one has been configured with the `max_backend_message_size` method.
+    pub fn get_max_backend_message_size(&self) -> Option<usize> {
+        self.max_backend_message_size
+    }
+
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         match key {
             "user" => {
@@ -797,6 +822,8 @@ impl fmt::Debug for Config {
             .field("target_session_attrs", &self.target_session_attrs)
             .field("channel_binding", &self.channel_binding)
             .field("load_balance_hosts", &self.load_balance_hosts)
+            // --- pghacker-mcp fork edit (6/9) ---
+            .field("max_backend_message_size", &self.max_backend_message_size)
             .finish()
     }
 }

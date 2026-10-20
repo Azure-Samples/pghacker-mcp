@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
-// --- pghacker-mcp fork edit (2/5) ---
+// --- pghacker-mcp fork edit (2/9) ---
 /// Result-column format code for the `Bind` message: binary. This is what
 /// upstream tokio-postgres always sends, and every `FromSql` implementation
 /// assumes it (`FromSql::from_sql` receives no format discriminator).
@@ -336,7 +336,7 @@ where
                 Err(e)
             }
         },
-        // --- pghacker-mcp fork edit (3/5) ---
+        // --- pghacker-mcp fork edit (3/9) ---
         // Upstream hardcodes `Some(1)` here, forcing every result column into
         // the binary wire format. A single format code applies to all result
         // columns; `FORMAT_TEXT` makes the server render values with each

@@ -21,15 +21,17 @@
 //! - `max_rows` is 100 by default and at most 1,000.
 //! - The statement timeout is 10 seconds, and the call as a whole has a
 //!   deadline of its own, [`CALL_TIMEOUT`].
-//! - The pool is pghacker-core's, over pgh_reader's URL with its TLS, and
-//!   the call waits for a connection with a tokio timeout rather than the
-//!   pool's.
+//! - The pool is built like pghacker-core's, over pgh_reader's URL with its
+//!   TLS, but its connections refuse server messages over
+//!   `MAX_MESSAGE_BYTES`. The call waits for a connection with a tokio
+//!   timeout rather than the pool's.
 //! - A dropped call's cancel task isn't spawned outside a tokio runtime.
 //! - Connection failures are logged and answered without their details.
 
 use std::time::{Duration, Instant};
 
-use deadpool_postgres::{Object, RecyclingMethod};
+use anyhow::Context;
+use deadpool_postgres::{Manager, ManagerConfig, Object, RecyclingMethod};
 use pghacker_core::db::{self, Pool};
 use pghacker_core::mcp::Output;
 use pghacker_core::text::truncate_chars;
@@ -37,7 +39,7 @@ use pghacker_core::usage::Scope;
 use tokio_postgres::error::SqlState;
 
 use crate::QueryArgs;
-use crate::execute::{QueryResponse, run_readonly_query};
+use crate::execute::{MAX_MESSAGE_BYTES, QueryResponse, run_readonly_query};
 use crate::policy::{Checked, Fallback};
 
 /// The longest SQL that query takes, in bytes.
@@ -142,9 +144,24 @@ impl QueryTool {
             max_connections > 0,
             "the query pool needs at least one connection"
         );
-        Ok(Self {
-            pool: db::pool(reader_database_url, max_connections, APPLICATION_NAME)?,
-        })
+        let mut config: tokio_postgres::Config = reader_database_url
+            .parse()
+            .context("the database URL is invalid")?;
+        config
+            .application_name(APPLICATION_NAME)
+            .max_backend_message_size(MAX_MESSAGE_BYTES);
+        let manager = Manager::from_config(
+            config,
+            db::tls()?,
+            ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            },
+        );
+        let pool = Pool::builder(manager)
+            .max_size(max_connections)
+            .build()
+            .context("cannot build the query connection pool")?;
+        Ok(Self { pool })
     }
 
     /// Runs `args`' statement: the CSV, or why it failed.
@@ -255,7 +272,10 @@ impl QueryTool {
         };
         let timeout_ms = i64::try_from(STATEMENT_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
         let response = run_readonly_query(checkout.client(), sql, max_rows, Some(timeout_ms)).await;
-        checkout.reset().await;
+        // A refused message closed the connection; dropping the checkout discards it.
+        if !checkout.client().backend_message_too_large() {
+            checkout.reset().await;
+        }
         Ok(response)
     }
 }

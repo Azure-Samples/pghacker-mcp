@@ -201,6 +201,46 @@ async fn large_results_are_cut_at_the_size_limit() {
 }
 
 #[tokio::test]
+async fn a_huge_row_is_refused_without_buffering_it_and_its_connection_is_dropped() {
+    let (_db, tool) = tool(1).await;
+    let started = Instant::now();
+    assert_eq!(
+        text(&tool, "SELECT 1 AS n, repeat('x', 50000000) AS x").await,
+        format!(
+            "Result is larger than {MAX_CSV_BYTES} bytes, and is too large to return. Only \
+             returning the first 0 rows.\n\nn,x\n\n(0 rows)"
+        )
+    );
+    let cut = text(
+        &tool,
+        "SELECT g, CASE WHEN g = 3 THEN repeat('x', 50000000) ELSE 'y' END AS x \
+         FROM generate_series(1, 5) g",
+    )
+    .await;
+    assert_eq!(
+        cut,
+        format!(
+            "Result is larger than {MAX_CSV_BYTES} bytes, and is too large to return. Only \
+             returning the first 2 rows.\n\ng,x\n1,y\n2,y\n\n(2 rows)"
+        )
+    );
+    assert!(started.elapsed() < Duration::from_secs(15));
+    let huge_error = failure(&tool, "SELECT repeat('x', 50000000)::integer").await;
+    assert!(
+        huge_error.starts_with(&format!(
+            "Result is larger than {MAX_CSV_BYTES} bytes, and is too large to return"
+        )),
+        "{}",
+        &huge_error[..huge_error.len().min(300)]
+    );
+    // The pool's one connection was dropped, and a new one answers.
+    assert_eq!(
+        value(&tool, "SELECT 'still works' AS s").await,
+        "still works"
+    );
+}
+
+#[tokio::test]
 async fn a_statement_past_the_timeout_is_cancelled() {
     let (db, tool) = tool(1).await;
     let mut admin = db.admin().await.unwrap();

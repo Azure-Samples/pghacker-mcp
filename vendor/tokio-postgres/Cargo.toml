@@ -9,7 +9,7 @@
 # will likely look very different (and much more reasonable).
 # See Cargo.toml.orig for the original contents.
 
-# --- pghacker-mcp fork edit (1/5) ---
+# --- pghacker-mcp fork edit (1/9) ---
 # Empty workspace table: this package is vendored inside the
 # repository's workspace directory but is deliberately excluded from it
 # (see `exclude` in ../../Cargo.toml). Without this table Cargo reports

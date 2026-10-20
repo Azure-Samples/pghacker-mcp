@@ -239,7 +239,7 @@ impl<'a> Transaction<'a> {
         bind::bind(self.client.inner(), statement, params).await
     }
 
-    // --- pghacker-mcp fork edit (5/5) ---
+    // --- pghacker-mcp fork edit (5/9) ---
     /// Like [`bind`], but binds the portal so the server returns every result
     /// column in the **text** wire format instead of binary.
     ///

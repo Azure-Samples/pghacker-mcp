@@ -17,6 +17,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
+// --- pghacker-mcp fork edit (9/9) ---
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll, ready};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
@@ -98,8 +101,16 @@ where
     )
     .await?;
 
+    // --- pghacker-mcp fork edit (9/9) ---
+    // The codec enforces `Config::max_backend_message_size`, and shares its
+    // flag with the client.
+    let message_too_large = Arc::new(AtomicBool::new(false));
+    let codec = PostgresCodec {
+        max_message_size: config.max_backend_message_size,
+        message_too_large: message_too_large.clone(),
+    };
     let mut stream = StartupStream {
-        inner: Framed::new(stream, PostgresCodec),
+        inner: Framed::new(stream, codec),
         buf: BackendMessages::empty(),
         delayed: VecDeque::new(),
     };
@@ -120,6 +131,7 @@ where
         config.ssl_negotiation,
         process_id,
         secret_key,
+        message_too_large, // pghacker-mcp fork edit (9/9)
     );
     let connection = Connection::new(stream.inner, stream.delayed, parameters, receiver);
 

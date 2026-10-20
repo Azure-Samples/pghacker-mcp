@@ -18,6 +18,10 @@
 //! - Rows are rendered as they stream in, and the CSV stops before
 //!   [`MAX_CSV_BYTES`], with a banner like the row cap's, since `max_rows`
 //!   bounds rows rather than bytes.
+//! - The query pool's connections refuse a server message over
+//!   [`MAX_MESSAGE_BYTES`] from its header, before buffering it, so that one
+//!   huge value can't fill memory: its row ends the CSV with the same banner,
+//!   and the connection, which the refusal closes, isn't reused.
 //! - PostgreSQL's errors read as psql prints them, `ERROR:  message` with
 //!   LINE, DETAIL, HINT and CONTEXT. The LINE pointer counts characters, and
 //!   shows psql's 60-character window around the position rather than the
@@ -33,6 +37,10 @@ use tokio_postgres::{Client, Column, Row, Transaction};
 /// The largest CSV that query returns, in bytes: rows past it are cut, with
 /// a banner.
 pub const MAX_CSV_BYTES: usize = 1024 * 1024;
+
+/// The largest message the query pool's connections take from the server,
+/// in bytes. A row larger than this can't fit in [`MAX_CSV_BYTES`] of CSV.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 2 * MAX_CSV_BYTES + 64 * 1024;
 
 /// How a NULL reads in the CSV.
 pub const NULL_TEXT: &str = "None";
@@ -227,7 +235,22 @@ pub async fn run_readonly_query(
     // Read-only path: always discard the transaction (dropping would also roll
     // back, but an explicit rollback keeps the connection state obvious).
     let _ = txn.rollback().await;
-    inner
+    match inner {
+        QueryResponse::Failed { .. } if client.backend_message_too_large() => {
+            QueryResponse::failed(message_too_large())
+        }
+        inner => inner,
+    }
+}
+
+/// Why a statement failed when the server sent a message over
+/// [`MAX_MESSAGE_BYTES`] before any rows, such as a huge error.
+fn message_too_large() -> String {
+    format!(
+        "Result is larger than {MAX_CSV_BYTES} bytes, and is too large to return: the server \
+         sent a message of more than {MAX_MESSAGE_BYTES} bytes. Return less, such as with left() \
+         or a narrower column list"
+    )
 }
 
 async fn run_query_capture(
@@ -277,6 +300,11 @@ async fn run_query_capture(
         let row = match rows.try_next().await {
             Ok(Some(row)) => row,
             Ok(None) => break,
+            // The connection refused a row too large to fit, and closed.
+            Err(_) if txn.client().backend_message_too_large() => {
+                banner = Some(size_banner(csv.rows));
+                break;
+            }
             Err(e) => return map_query_error(e, sql, statement_timeout_ms),
         };
         if csv.rows == max_result_rows {

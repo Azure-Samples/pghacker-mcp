@@ -23,7 +23,7 @@ where
     bind_with_result_format(client, statement, params, query::FORMAT_BINARY).await
 }
 
-// --- pghacker-mcp fork edit (4/5) ---
+// --- pghacker-mcp fork edit (4/9) ---
 /// Like [`bind`], but lets the caller choose the result-column format code
 /// (`query::FORMAT_BINARY` or `query::FORMAT_TEXT`) for the portal.
 ///

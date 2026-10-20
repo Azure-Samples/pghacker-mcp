@@ -116,7 +116,7 @@ The database remains the final boundary: the reader's privileges, a read-only tr
 | `get_commit` | A diff of 3,000 lines; context 3 lines by default, at most 1,000 |
 | `search_commits` | 30 commits by default, at most 200; `changed_lines` and `occurrences` read at most 300,000 lines, and show 10 per commit |
 | `search_patches` | 20 threads by default, at most 100, with 10 lines each; at most 50,000 matching lines and 20,000 patches read. Patches not yet indexed aren't searched: a search that finds nothing counts them |
-| `query` | 100 rows by default, at most 1,000, and 1 MiB of CSV; 64 KiB of SQL |
+| `query` | 100 rows by default, at most 1,000, and 1 MiB of CSV; 64 KiB of SQL. A row, or other server message, over 2 MiB + 64 KiB is refused from its header, without being read: the CSV ends at the rows before it, and its connection is closed |
 
 `search_commits` and `search_patches` say `incomplete` when the budget or a cap cut them short. The [search design](search-design.md#indexes-and-queries) explains the plans behind these limits.
 

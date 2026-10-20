@@ -14,8 +14,9 @@ A modified copy of the tokio-postgres crate, from rust-postgres
 (https://github.com/rust-postgres/rust-postgres), extracted from the published
 crate https://static.crates.io/crates/tokio-postgres/tokio-postgres-0.7.18.crate.
 The changes add text-format query results (Transaction::bind_text and
-bind_raw_text). Each change is marked "pghacker-mcp fork edit", and
-vendor/tokio-postgres/FORK-README.md lists them.
+bind_raw_text) and an optional cap on the size of a backend message
+(Config::max_backend_message_size). Each change is marked "pghacker-mcp fork
+edit", and vendor/tokio-postgres/FORK-README.md lists them.
 
 License: MIT OR Apache-2.0, at your option. The MIT License text follows. The
 Apache License 2.0 text is in vendor/tokio-postgres/LICENSE-APACHE.

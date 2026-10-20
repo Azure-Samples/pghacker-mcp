@@ -33,6 +33,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering}; // pghacker-mcp fork edit (8/9)
 use std::task::{Context, Poll, ready};
 #[cfg(feature = "runtime")]
 use std::time::Duration;
@@ -186,6 +187,8 @@ pub struct Client {
     ssl_negotiation: SslNegotiation,
     process_id: i32,
     secret_key: i32,
+    // --- pghacker-mcp fork edit (8/9) ---
+    message_too_large: Arc<AtomicBool>,
 }
 
 impl Client {
@@ -195,6 +198,8 @@ impl Client {
         ssl_negotiation: SslNegotiation,
         process_id: i32,
         secret_key: i32,
+        // --- pghacker-mcp fork edit (8/9) ---
+        message_too_large: Arc<AtomicBool>,
     ) -> Client {
         Client {
             inner: Arc::new(InnerClient {
@@ -208,6 +213,7 @@ impl Client {
             ssl_negotiation,
             process_id,
             secret_key,
+            message_too_large, // pghacker-mcp fork edit (8/9)
         }
     }
 
@@ -769,6 +775,17 @@ impl Client {
     /// In that case, all future queries will fail.
     pub fn is_closed(&self) -> bool {
         self.inner.sender.is_closed()
+    }
+
+    // --- pghacker-mcp fork edit (8/9) ---
+    /// Determines if the connection failed because the server sent a message
+    /// larger than [`Config::max_backend_message_size`] allows.
+    ///
+    /// In that case the connection is closed, and all future queries will fail.
+    ///
+    /// [`Config::max_backend_message_size`]: crate::Config::max_backend_message_size
+    pub fn backend_message_too_large(&self) -> bool {
+        self.message_too_large.load(Ordering::Acquire)
     }
 
     #[doc(hidden)]

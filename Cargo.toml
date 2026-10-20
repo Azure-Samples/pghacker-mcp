@@ -76,8 +76,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tempfile = "3"
 
 # A fork of tokio-postgres 0.7.18 (vendor/tokio-postgres; see its
-# FORK-README.md). It adds bind_text for the query tool's text-format reads
-# and only adds to the upstream API.
+# FORK-README.md). It adds bind_text for the query tool's text-format reads,
+# and a cap on backend message size for its pool, and only adds to the
+# upstream API.
 # Patching crates.io moves the whole graph, deadpool-postgres included, onto it.
 [patch.crates-io]
 tokio-postgres = { path = "vendor/tokio-postgres" }

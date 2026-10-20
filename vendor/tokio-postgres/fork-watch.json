@@ -7,7 +7,7 @@
   "workspace_cargo_path": "Cargo.toml",
   "cargo_lock_path": "Cargo.lock",
   "patch_marker": "pghacker-mcp fork edit",
-  "expected_patch_markers": 5,
+  "expected_patch_markers": 21,
   "required_snippets": [
     {
       "path": "Cargo.toml",
@@ -32,6 +32,26 @@
     {
       "path": "src/transaction.rs",
       "text": "pub async fn bind_raw_text",
+      "count": 1
+    },
+    {
+      "path": "src/config.rs",
+      "text": "pub fn max_backend_message_size",
+      "count": 1
+    },
+    {
+      "path": "src/codec.rs",
+      "text": "self.message_too_large.store(true, Ordering::Release)",
+      "count": 1
+    },
+    {
+      "path": "src/client.rs",
+      "text": "pub fn backend_message_too_large",
+      "count": 1
+    },
+    {
+      "path": "src/connect_raw.rs",
+      "text": "max_message_size: config.max_backend_message_size",
       "count": 1
     }
   ]

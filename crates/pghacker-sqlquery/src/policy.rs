@@ -563,6 +563,23 @@ fn closing_paren(tokens: &[Token], start: usize) -> Option<usize> {
     None
 }
 
+fn opening_paren(tokens: &[Token], end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=end).rev() {
+        match tokens[index] {
+            Token::RParen => depth += 1,
+            Token::LParen => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn check_fallback(tokens: &[Token]) -> Result<(), String> {
     let cte_names = check_ctes(tokens)?;
     for (index, token) in tokens.iter().enumerate() {
@@ -590,15 +607,13 @@ fn check_fallback(tokens: &[Token]) -> Result<(), String> {
         let Token::Word(word) = token else {
             continue;
         };
-        if tokens.get(index + 1) != Some(&Token::LParen)
-            || cte_names.contains(&index)
-            || is_alias_or_type(tokens, index)
-        {
+        if tokens.get(index + 1) != Some(&Token::LParen) || cte_names.contains(&index) {
             continue;
         }
+        // Checked even where it may be an alias or type: no denied name needs to be one.
         let name = identifier(&word.value, word.quote_style.is_some());
         check_function(&name)?;
-        if name == "cypher" {
+        if name == "cypher" && !is_alias_or_type(tokens, index) {
             let args = call_arguments(tokens, index + 1).ok_or_else(cypher_literal_refusal)?;
             let query = args.get(1).ok_or_else(cypher_literal_refusal)?;
             let mut parser = Parser::new(&PostgreSqlDialect {}).with_tokens(query.to_vec());
@@ -667,14 +682,23 @@ fn is_alias_or_type(tokens: &[Token], index: usize) -> bool {
         start -= 2;
     }
     let before = start.checked_sub(1).and_then(|i| tokens.get(i));
-    if keyword(before, Keyword::AS) || matches!(before, Some(Token::DoubleColon | Token::RParen)) {
+    if keyword(before, Keyword::AS) || before == Some(&Token::DoubleColon) {
         return true;
+    }
+    if before == Some(&Token::RParen) {
+        // `OPERATOR(schema.op) f(...)` applies an operator to a call.
+        return !opening_paren(tokens, start - 1)
+            .and_then(|open| open.checked_sub(1))
+            .is_some_and(|i| keyword(tokens.get(i), Keyword::OPERATOR));
     }
     // An implicit table alias with a column list, including AGE record types.
     let Some(mut relation) = start.checked_sub(1) else {
         return false;
     };
-    if !matches!(tokens[relation], Token::Word(_)) {
+    // `LATERAL f(...)` is a call, not a relation and its alias.
+    if !matches!(tokens[relation], Token::Word(_))
+        || keyword(tokens.get(relation), Keyword::LATERAL)
+    {
         return false;
     }
     while relation >= 2
