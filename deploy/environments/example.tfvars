@@ -85,7 +85,7 @@ usage_enabled = true
 # messages and sqlparser's errors. False, the default, keeps the rest: which
 # tools, argument names and size, fixed-choice values, outcomes, SQLSTATEs.
 usage_details_enabled = false
-# Feedback (PRIVACY.md): the chance that an address's hour of use brings one
+# Feedback (docs/reference.md#feedback): the chance that an address's hour of use brings one
 # "Was the last answer helpful?" to an interactive client, as its user's next
 # question starts; 0 asks nothing. feedback_question_gap_seconds (180),
 # feedback_session_gap_seconds (600), feedback_min_questions (3) and
@@ -93,11 +93,13 @@ usage_details_enabled = false
 # trying the form, asks at every question after a client's first.
 feedback_rate_per_hour = 0.1
 
-# Replace these with your GitHub organization and team slug.
+# Required: your GitHub organization and the slug of its team whose members may
+# sign in to the portal, whose agents run shell commands on your subscription.
+# The placeholders below fail validation until you replace them.
 # Explicit github_users can admit additional logins or work around an OAuth App
 # that your organization has not approved. Keep the list private and intentional.
-github_org   = "example-org"
-github_team  = "example-team"
+github_org   = "<your-github-org>"
+github_team  = "<your-github-team>"
 github_users = []
 portal_role  = "user"
 

@@ -188,6 +188,9 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
   if (start > max) throw new Error("PGHACKER_CRAWL_START_SESSIONS must not exceed PGHACKER_CRAWL_MAX_SESSIONS.");
   const role = value(env, "PGHACKER_PORTAL_ROLE") ?? "user";
   if (!["user", "admin"].includes(role)) throw new Error("PGHACKER_PORTAL_ROLE must be user or admin.");
+  // Who may sign in to the portal, whose agents have a shell. Terraform
+  // requires github_org and github_team and refuses their placeholders; here,
+  // at least one of the three must be set.
   const github = {
     org: value(env, "PGHACKER_GITHUB_ORG"),
     team: value(env, "PGHACKER_GITHUB_TEAM"),

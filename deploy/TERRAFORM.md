@@ -121,7 +121,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `restrict_origin_to_front_door` | `true` | Admit only `AzureFrontDoor.Backend`'s IPv4 ranges to the app's own host name |
 | `mcp_rate_per_minute`, `mcp_rate_burst` | `60`, `30` | Per-client limits of the public MCP endpoint (`PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST`) |
 | `crawl_start_sessions`, `crawl_max_sessions` | `8`, `16` | Extraction sessions at start and at most, up to 64 (`PGHACKER_CRAWL_START_SESSIONS`, `PGHACKER_CRAWL_MAX_SESSIONS`) |
-| `github_org`, `github_team` | `"example-org"`, `"example-team"` | Placeholder access settings; replace with your organization and team (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`) |
+| `github_org`, `github_team` | required | The GitHub organization and the slug of its team whose members may sign in to the portal (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`). There is no default: their members get agents that run shell commands on your subscription. Empty values and the placeholders `example-org` and `example-team` are refused |
 | `github_users` | `[]` | More GitHub logins allowed in (`PGHACKER_GITHUB_USERS`, omitted when empty) |
 | `portal_role` | `"user"` | Portal role of everyone signed in, `user` or `admin` (`PGHACKER_PORTAL_ROLE`) |
 | `privacy_url` | `null` | The privacy statement that the home page's footer links to, as "Privacy": an https URL of your own, such as `https://example.com/privacy` (`PGHACKER_PRIVACY_URL`, omitted when null). Null gives the home page no privacy link |

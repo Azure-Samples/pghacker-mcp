@@ -70,7 +70,7 @@ You need the Azure CLI, signed in (`az login`) with Owner on the subscription, T
 cp deploy/environments/example.tfvars deploy/environments/local.tfvars
 ```
 
-Replace its placeholder subscription ID, names, region, model capacities, and GitHub access settings with your own. Choose globally unique registry and vault names, and leave `create_app = false` until step 8. Real `.tfvars`, `.tfvars.json`, and `.backend.hcl` files are ignored; do not force-add them or commit secrets, state, or plans.
+Replace its placeholder subscription ID, names, region, model capacities, and GitHub access settings with your own. `github_org` and `github_team` have no default, and their placeholders fail validation: their members get the portal's agents, which run shell commands on your subscription. Choose globally unique registry and vault names, and leave `create_app = false` until step 8. Real `.tfvars`, `.tfvars.json`, and `.backend.hcl` files are ignored; do not force-add them or commit secrets, state, or plans.
 
 The remaining commands run from `deploy/terraform` unless they say otherwise. The `local` filenames are examples: use a separate settings file and backend for each environment.
 

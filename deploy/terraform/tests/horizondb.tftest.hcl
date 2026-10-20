@@ -14,6 +14,8 @@ variables {
   acr_name            = "examplepghacr12345"
   key_vault_name      = "pghacker-example-kv"
   image               = "examplepghacr12345.azurecr.io/pghacker-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  github_org          = "contoso"
+  github_team         = "pghacker-operators"
   deployer_object_ids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
 }
 

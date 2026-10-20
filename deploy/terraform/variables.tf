@@ -517,24 +517,34 @@ variable "crawl_max_sessions" {
 }
 
 variable "github_org" {
-  description = "The GitHub organization whose members may sign in to the portal (PGHACKER_GITHUB_ORG)."
+  description = "The GitHub organization whose members may sign in to the portal (PGHACKER_GITHUB_ORG). Required: its members get agents that run shell commands on your subscription."
   type        = string
-  default     = "example-org"
+  nullable    = false
 
   validation {
     condition     = can(regex("^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$", var.github_org)) && !strcontains(var.github_org, "--")
     error_message = "github_org must be a GitHub organization's login: 1 to 39 letters, digits and single hyphens, not starting or ending with a hyphen."
   }
+
+  validation {
+    condition     = lower(var.github_org) != "example-org"
+    error_message = "github_org must be your own organization, not the placeholder example-org, which is a real GitHub organization."
+  }
 }
 
 variable "github_team" {
-  description = "The slug of the github_org team whose members may sign in to the portal (PGHACKER_GITHUB_TEAM)."
+  description = "The slug of the github_org team whose members may sign in to the portal (PGHACKER_GITHUB_TEAM). Required, with no default."
   type        = string
-  default     = "example-team"
+  nullable    = false
 
   validation {
     condition     = can(regex("^[a-z0-9][a-z0-9_-]{0,99}$", var.github_team))
-    error_message = "github_team must be a team's slug: lowercase letters, digits, hyphens and underscores, such as example-team."
+    error_message = "github_team must be a team's slug: lowercase letters, digits, hyphens and underscores, such as pghacker-operators."
+  }
+
+  validation {
+    condition     = lower(var.github_team) != "example-team"
+    error_message = "github_team must be your own team, not the placeholder example-team."
   }
 }
 

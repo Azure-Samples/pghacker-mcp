@@ -36,8 +36,8 @@ const ENV = {
   PGHACKER_PORTAL_URL: "https://pghacker-abc.z01.azurefd.net",
   PGHACKER_PUBLIC_HOSTS: "mcp.example.org,pghacker-abc.z01.azurefd.net,pghacker-example.env.westus3.azurecontainerapps.io",
   PGHACKER_FRONT_DOOR_ID: "6e1b0e1c-0000-4000-8000-000000000000",
-  PGHACKER_GITHUB_ORG: "example-org",
-  PGHACKER_GITHUB_TEAM: "example-team",
+  PGHACKER_GITHUB_ORG: "contoso",
+  PGHACKER_GITHUB_TEAM: "pghacker-operators",
   // The platform's own settings, which no process may get.
   IDENTITY_ENDPOINT: "http://localhost:42356/msi/token",
   IDENTITY_HEADER: "identity-header-secret",
@@ -366,8 +366,8 @@ test("feedback's settings reach pghacker-mcp alone, and only with usage telemetr
 test("oauth2-proxy signs in the team for the portal, passes /mcp and the home page through, and gets no secret in its arguments", () => {
   const args = oauth2ProxyArgs(readAzureConfig(ENV));
   for (const expected of [
-    "--http-address=0.0.0.0:8080", "--provider=github", "--github-org=example-org",
-    "--github-team=example-team", "--skip-auth-route=^/mcp$", "--skip-auth-route=GET=^/$",
+    "--http-address=0.0.0.0:8080", "--provider=github", "--github-org=contoso",
+    "--github-team=pghacker-operators", "--skip-auth-route=^/mcp$", "--skip-auth-route=GET=^/$",
     "--skip-auth-route=GET=^/static/", "--api-route=^/api/",
     `--upstream=http://127.0.0.1:${PORTS.mcp}/mcp`, `--upstream=http://127.0.0.1:${PORTS.portal}/portal`,
     `--upstream=http://127.0.0.1:${PORTS.portal}/portal/`, `--upstream=http://127.0.0.1:${PORTS.portal}/api/`,

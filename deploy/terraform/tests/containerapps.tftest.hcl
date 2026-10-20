@@ -19,6 +19,8 @@ variables {
   acr_name            = "examplepghacr12345"
   key_vault_name      = "pghacker-example-kv"
   image               = "examplepghacr12345.azurecr.io/pghacker-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  github_org          = "contoso"
+  github_team         = "pghacker-operators"
   deployer_object_ids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
 }
 
@@ -203,8 +205,8 @@ run "app_and_restore_job" {
       PGHACKER_RATE_BURST             = "30"
       PGHACKER_CRAWL_START_SESSIONS   = "8"
       PGHACKER_CRAWL_MAX_SESSIONS     = "16"
-      PGHACKER_GITHUB_ORG             = "example-org"
-      PGHACKER_GITHUB_TEAM            = "example-team"
+      PGHACKER_GITHUB_ORG             = "contoso"
+      PGHACKER_GITHUB_TEAM            = "pghacker-operators"
       PGHACKER_PORTAL_ROLE            = "user"
       PGHACKER_FEEDBACK_RATE          = "0.1"
       PGHACKER_FEEDBACK_COMMENTS      = "false"
@@ -611,4 +613,46 @@ run "crawl_sessions_are_capped" {
   }
 
   expect_failures = [var.crawl_max_sessions]
+}
+
+# The portal's organization and team are required: the old placeholders name
+# a real organization, and empty values are refused.
+run "github_org_placeholder_is_rejected" {
+  command = plan
+
+  variables {
+    github_org = "Example-Org"
+  }
+
+  expect_failures = [var.github_org]
+}
+
+run "github_team_placeholder_is_rejected" {
+  command = plan
+
+  variables {
+    github_team = "example-team"
+  }
+
+  expect_failures = [var.github_team]
+}
+
+run "empty_github_org_is_rejected" {
+  command = plan
+
+  variables {
+    github_org = ""
+  }
+
+  expect_failures = [var.github_org]
+}
+
+run "empty_github_team_is_rejected" {
+  command = plan
+
+  variables {
+    github_team = ""
+  }
+
+  expect_failures = [var.github_team]
 }
