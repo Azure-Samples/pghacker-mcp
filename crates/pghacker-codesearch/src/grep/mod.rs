@@ -136,7 +136,7 @@ pub async fn select(
         let script = shell::parse(command).map_err(|e| anyhow!(e))?;
         let table = FileTable::view(client, revision, &mount_words(&script)).await?;
         let cwd = cwd_of(&script, &table, &revision.repo)?;
-        let words = expand(&script.stages[0].words, &table, &revision.repo, &cwd);
+        let words = expand(&script.stages[0].words, &table, &revision.repo, &cwd)?;
         check_program(&words)?;
         let mut opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
         opts.max_count = None;
@@ -210,10 +210,11 @@ fn cwd_of(script: &shell::Script, table: &FileTable, repo: &str) -> Result<Strin
 }
 
 /// Words after brace and wildcard expansion.
-fn expand(words: &[Word], table: &FileTable, repo: &str, cwd: &str) -> Vec<String> {
+fn expand(words: &[Word], table: &FileTable, repo: &str, cwd: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
+    let mut room = shell::Room::default();
     for word in words {
-        for w in shell::brace_expand(word) {
+        for w in shell::brace_expand(word, &mut room).map_err(|e| anyhow!(e))? {
             if w.has_wildcards() {
                 let matches = glob_paths(&w.glob_pattern(), table, repo, cwd);
                 if !matches.is_empty() {
@@ -224,7 +225,7 @@ fn expand(words: &[Word], table: &FileTable, repo: &str, cwd: &str) -> Vec<Strin
             out.push(w.text());
         }
     }
-    out
+    Ok(out)
 }
 
 /// Bash pathname expansion of `pattern` (a fnmatch pattern, quoted
@@ -667,14 +668,14 @@ async fn run_inner(
     let table = FileTable::view(client, revision, &mount_words(&script)).await?;
     let cwd = cwd_of(&script, &table, &revision.repo)?;
     let first = &script.stages[0];
-    let words = expand(&first.words, &table, &revision.repo, &cwd);
+    let words = expand(&first.words, &table, &revision.repo, &cwd)?;
     check_program(&words)?;
     let opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
     let compiled = compile(&opts)?;
     // Later stages are checked before the search runs.
     let mut later = Vec::new();
     for stage in &script.stages[1..] {
-        let words = expand(&stage.words, &table, &revision.repo, &cwd);
+        let words = expand(&stage.words, &table, &revision.repo, &cwd)?;
         check_stage(&words)?;
         later.push(words);
     }
@@ -732,12 +733,13 @@ async fn run_inner(
         let mut extra: HashMap<(usize, i32), String> = HashMap::new();
         if need_lines && (opts.before > 0 || opts.after > 0) {
             let max = opts.max_count.map_or(usize::MAX, |m| m as usize);
+            let (before, after) = opts.context_lines();
             let mut ranges = Vec::new();
             for (&k, lines) in &sel.lines {
                 let last = table.files[k].line_count;
                 for (n, _) in lines.iter().take(max) {
-                    let lo = (n - opts.before.max(0) as i32).max(1);
-                    let hi = (n + opts.after.max(0) as i32).min(last);
+                    let lo = n.saturating_sub(before).max(1);
+                    let hi = n.saturating_add(after).min(last);
                     ranges.push((table.files[k].id, lo, hi));
                 }
             }
@@ -824,7 +826,7 @@ async fn run_inner(
     if status != 0
         && let Some(fallback) = &script.fallback
     {
-        let words = expand(&fallback.words, &table, &revision.repo, &cwd);
+        let words = expand(&fallback.words, &table, &revision.repo, &cwd)?;
         match words[0].as_str() {
             "true" | ":" => status = 0,
             "echo" => {

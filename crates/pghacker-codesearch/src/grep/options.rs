@@ -391,6 +391,12 @@ impl Options {
     pub fn context_on(&self) -> bool {
         self.after >= 0 || self.before >= 0
     }
+
+    /// Lines of context before and after, as line numbers count them.
+    pub fn context_lines(&self) -> (i32, i32) {
+        let lines = |n: i64| i32::try_from(n.max(0)).unwrap_or(i32::MAX);
+        (lines(self.before), lines(self.after))
+    }
 }
 
 /// A long option by name or unambiguous prefix.
@@ -482,6 +488,9 @@ mod tests {
         assert_eq!(o.after, 2);
         let o = parse(&["-n12", "x"]).unwrap();
         assert_eq!(o.after, 12);
+        let o = parse(&["-A", "2147483648", "-B9999999999", "x"]).unwrap();
+        assert_eq!(o.context_lines(), (i32::MAX, i32::MAX));
+        assert_eq!(parse(&["-A3", "x"]).unwrap().context_lines(), (0, 3));
         assert_eq!(parse(&["-lc", "x"]).unwrap().mode, Mode::FilesWithMatches);
         assert_eq!(parse(&["-lq", "x"]).unwrap().mode, Mode::Quiet);
         assert!(

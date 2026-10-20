@@ -64,14 +64,14 @@ pub fn parse(rev: &str) -> Result<Spec> {
             let mut chars = tail.chars().peekable();
             while let Some(c) = chars.next() {
                 if c == '^' {
-                    back += 1;
+                    back = back.saturating_add(1);
                 } else {
                     let mut n = String::new();
                     while let Some(d) = chars.peek().filter(|d| d.is_ascii_digit()) {
                         n.push(*d);
                         chars.next();
                     }
-                    back += if n.is_empty() { 1 } else { n.parse::<u32>()? };
+                    back = back.saturating_add(if n.is_empty() { 1 } else { n.parse::<u32>()? });
                 }
             }
             (&rev[..m.start()], back)
@@ -415,6 +415,8 @@ mod tests {
         assert_eq!(parse("master^^").unwrap().back, 2);
         assert_eq!(parse("master~").unwrap().back, 1);
         assert_eq!(parse("abc1234~3^").unwrap().back, 4);
+        assert_eq!(parse("master~4294967295^").unwrap().back, u32::MAX);
+        assert_eq!(parse("master^~4294967295~9").unwrap().back, u32::MAX);
         assert_eq!(parse("19").unwrap().name, "19");
         assert!(parse("master@yesterday").is_err());
         assert!(parse("~2").is_err());

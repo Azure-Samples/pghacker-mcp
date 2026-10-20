@@ -110,7 +110,7 @@ The database remains the final boundary: the reader's privileges, a read-only tr
 | Tool | Limits |
 | --- | --- |
 | `search` | 100 results by default, at most 2,000. At one commit, context of at most 20 lines, and lines cut at 1,000 characters; with `history`, whole lines, without context |
-| `grep` | Output cut at 1 MiB |
+| `grep` | Output cut at 1 MiB; a command line of at most 8 KiB, whose brace expansion makes at most 10,000 words per command |
 | `read_file`, `blame` | 2,000 lines; `read_file` also 200 KB, but always its first line whole |
 | `list_files` | 500 entries by default, at most 5,000 |
 | `get_commit` | A diff of 3,000 lines; context 3 lines by default, at most 1,000 |

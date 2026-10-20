@@ -408,6 +408,9 @@ fn ansi_c_string(c: &[char], start: usize) -> Result<(String, usize), String> {
 /// Parses a command line into an optional `cd`, a pipeline and an optional
 /// `||` fallback.
 pub fn parse(line: &str) -> Result<Script, String> {
+    if line.len() > MAX_COMMAND {
+        return Err(format!("the command is longer than {MAX_COMMAND} bytes"));
+    }
     let tokens = tokenize(line)?;
     let mut lists: Vec<(Vec<Token>, Option<&'static str>)> = Vec::new();
     let mut cur = Vec::new();
@@ -496,101 +499,173 @@ fn simple(tokens: &[Token]) -> Result<Vec<Command>, String> {
     Ok(stages)
 }
 
+/// The longest command line, in bytes.
+pub const MAX_COMMAND: usize = 8 * 1024;
+
+/// The most words brace expansion may make of one command.
+pub const MAX_WORDS: usize = 10_000;
+
+/// The most characters brace expansion may write for one command, words
+/// it expands further included.
+pub const MAX_EXPANDED: usize = 1 << 22;
+
+/// The longest `{a..b..step}` body: three i64s and two `..`.
+const MAX_SEQUENCE: usize = 64;
+
+/// What brace expansion may still make of a command.
+#[derive(Clone, Copy, Debug)]
+pub struct Room {
+    words: usize,
+    chars: usize,
+}
+
+impl Default for Room {
+    fn default() -> Self {
+        Self {
+            words: MAX_WORDS,
+            chars: MAX_EXPANDED,
+        }
+    }
+}
+
+impl Room {
+    fn take_chars(&mut self, n: usize) -> Result<(), String> {
+        self.chars = self
+            .chars
+            .checked_sub(n)
+            .ok_or_else(|| format!("brace expansion makes more than {MAX_EXPANDED} characters"))?;
+        Ok(())
+    }
+}
+
+fn too_many_words() -> String {
+    format!("brace expansion makes more than {MAX_WORDS} words")
+}
+
 /// Bash brace expansion of an unquoted `{a,b}` or `{1..3}` (nested
-/// braces included). Returns the word itself when there is none.
-pub fn brace_expand(word: &Word) -> Vec<Word> {
-    // Flatten to (char, quoted) to find an unquoted, balanced brace pair
-    // with a top-level comma or a sequence.
-    let chars: Vec<(char, bool)> = word
-        .parts
-        .iter()
-        .flat_map(|p| p.text.chars().map(move |c| (c, p.quoted)))
-        .collect();
-    for open in 0..chars.len() {
-        if chars[open] != ('{', false) {
+/// braces included), within `room`. Returns the word itself when there is
+/// none.
+pub fn brace_expand(word: &Word, room: &mut Room) -> Result<Vec<Word>, String> {
+    let mut out = Vec::new();
+    room.take_chars(word.parts.iter().map(|p| p.text.len()).sum::<usize>() + 1)?;
+    // Depth first, alternatives in order: the stack holds them reversed.
+    let mut stack = vec![word.clone()];
+    while let Some(word) = stack.pop() {
+        // Flatten to (char, quoted) to find an unquoted, balanced brace
+        // pair with a top-level comma or a sequence.
+        let chars: Vec<(char, bool)> = word
+            .parts
+            .iter()
+            .flat_map(|p| p.text.chars().map(move |c| (c, p.quoted)))
+            .collect();
+        // Each pending word makes at least one.
+        let room_left = room.words.saturating_sub(stack.len());
+        let Some((open, close, alternatives)) = group(&chars, room_left)? else {
+            room.words = room.words.checked_sub(1).ok_or_else(too_many_words)?;
+            out.push(word);
             continue;
-        }
-        let mut depth = 0;
-        let mut commas = Vec::new();
-        let mut close = None;
-        for (j, &(c, quoted)) in chars.iter().enumerate().skip(open) {
-            if quoted {
-                continue;
-            }
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(j);
-                        break;
-                    }
-                }
-                ',' if depth == 1 => commas.push(j),
-                _ => {}
-            }
-        }
-        let Some(close) = close else { continue };
-        let body: String = chars[open + 1..close].iter().map(|c| c.0).collect();
-        let mut alternatives: Vec<Vec<(char, bool)>> = Vec::new();
-        if commas.is_empty() {
-            let Some(seq) = sequence(&body) else { continue };
-            for s in seq {
-                alternatives.push(s.chars().map(|c| (c, true)).collect());
-            }
-        } else {
-            let mut start = open + 1;
-            for &comma in commas.iter().chain(std::iter::once(&close)) {
-                alternatives.push(chars[start..comma].to_vec());
-                start = comma + 1;
-            }
-        }
+        };
         let prefix = &chars[..open];
         let suffix = &chars[close + 1..];
-        let mut out = Vec::new();
-        for alt in alternatives {
+        for alt in alternatives.iter().rev() {
+            room.take_chars(prefix.len() + alt.len() + suffix.len() + 1)?;
             let mut w = Word::default();
             for &(c, q) in prefix.iter().chain(alt.iter()).chain(suffix.iter()) {
                 w.push(c, q);
             }
-            out.extend(brace_expand(&w));
+            stack.push(w);
         }
-        return out;
     }
-    vec![word.clone()]
+    Ok(out)
 }
 
-/// `1..3`, `a..c` or `1..10..2`.
-fn sequence(body: &str) -> Option<Vec<String>> {
+type Alternatives = Vec<Vec<(char, bool)>>;
+
+/// The first brace group of `chars` that expands: its braces and its
+/// alternatives, at most `max` of them.
+fn group(
+    chars: &[(char, bool)],
+    max: usize,
+) -> Result<Option<(usize, usize, Alternatives)>, String> {
+    // Each unquoted `{` with its matching `}` and its own commas.
+    let mut close: Vec<Option<usize>> = vec![None; chars.len()];
+    let mut commas: Vec<Vec<usize>> = vec![Vec::new(); chars.len()];
+    let mut open = Vec::new();
+    for (j, &(c, quoted)) in chars.iter().enumerate() {
+        match (c, quoted) {
+            ('{', false) => open.push(j),
+            ('}', false) => {
+                if let Some(o) = open.pop() {
+                    close[o] = Some(j);
+                }
+            }
+            (',', false) => {
+                if let Some(&o) = open.last() {
+                    commas[o].push(j);
+                }
+            }
+            _ => {}
+        }
+    }
+    for open in 0..chars.len() {
+        let Some(close) = close[open] else { continue };
+        let commas = &commas[open];
+        if commas.is_empty() {
+            if close - open - 1 > MAX_SEQUENCE {
+                continue;
+            }
+            let body: String = chars[open + 1..close].iter().map(|c| c.0).collect();
+            let Some((count, values)) = sequence(&body) else {
+                continue;
+            };
+            if count > max as u128 {
+                return Err(too_many_words());
+            }
+            let alternatives = values
+                .map(|s| s.chars().map(|c| (c, true)).collect())
+                .collect();
+            return Ok(Some((open, close, alternatives)));
+        }
+        if commas.len() + 1 > max {
+            return Err(too_many_words());
+        }
+        let mut alternatives = Vec::new();
+        let mut start = open + 1;
+        for &comma in commas.iter().chain(std::iter::once(&close)) {
+            alternatives.push(chars[start..comma].to_vec());
+            start = comma + 1;
+        }
+        return Ok(Some((open, close, alternatives)));
+    }
+    Ok(None)
+}
+
+/// `1..3`, `a..c` or `1..10..2`: how many values there are, and the values.
+fn sequence(body: &str) -> Option<(u128, Box<dyn Iterator<Item = String>>)> {
     let parts: Vec<&str> = body.split("..").collect();
     if !(2..=3).contains(&parts.len()) {
         return None;
     }
     let step: i64 = parts.get(2).map_or(Some(1), |s| s.parse().ok())?.max(1);
+    let step = step as u64;
     if let (Ok(a), Ok(b)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-        let mut out = Vec::new();
-        let mut x = a;
-        while (a <= b && x <= b) || (a > b && x >= b) {
-            out.push(x.to_string());
-            x = if a <= b { x + step } else { x - step };
-        }
-        return Some(out);
+        let count = u128::from(a.abs_diff(b) / step) + 1;
+        let (a, step) = (i128::from(a), i128::from(step));
+        let dir = if a <= i128::from(b) { 1 } else { -1 };
+        let values = (0..count).map(move |k| (a + dir * k as i128 * step).to_string());
+        return Some((count, Box::new(values)));
     }
     let (a, b) = (parts[0], parts[1]);
     if a.chars().count() == 1 && b.chars().count() == 1 {
         let (a, b) = (a.chars().next()? as u32, b.chars().next()? as u32);
-        let range: Vec<u32> = if a <= b {
-            (a..=b).step_by(step as usize).collect()
-        } else {
-            (b..=a).rev().step_by(step as usize).collect()
-        };
-        return Some(
-            range
-                .into_iter()
-                .filter_map(char::from_u32)
-                .map(String::from)
-                .collect(),
-        );
+        let count = u128::from(u64::from(a.abs_diff(b)) / step) + 1;
+        let (a, step) = (i128::from(a), i128::from(step));
+        let dir = if a <= i128::from(b) { 1 } else { -1 };
+        let values = (0..count).filter_map(move |k| {
+            let c = u32::try_from(a + dir * k as i128 * step).ok()?;
+            char::from_u32(c).map(String::from)
+        });
+        return Some((count, Box::new(values)));
     }
     None
 }
@@ -648,7 +723,7 @@ mod tests {
         let expanded: Vec<String> = s.stages[0]
             .words
             .iter()
-            .flat_map(brace_expand)
+            .flat_map(|w| brace_expand(w, &mut Room::default()).unwrap())
             .map(|w| w.text())
             .collect();
         assert_eq!(
@@ -667,5 +742,89 @@ mod tests {
                 "--include=*.h"
             ]
         );
+    }
+
+    fn expand(word: &str) -> Result<Vec<String>, String> {
+        let word = Word {
+            parts: vec![Part {
+                text: word.into(),
+                quoted: false,
+            }],
+        };
+        Ok(brace_expand(&word, &mut Room::default())?
+            .iter()
+            .map(Word::text)
+            .collect())
+    }
+
+    #[test]
+    fn sequences() {
+        assert_eq!(expand("{a,b}").unwrap(), ["a", "b"]);
+        assert_eq!(expand("{1..3}").unwrap(), ["1", "2", "3"]);
+        assert_eq!(expand("{3..1}").unwrap(), ["3", "2", "1"]);
+        assert_eq!(expand("{1..10..2}").unwrap(), ["1", "3", "5", "7", "9"]);
+        assert_eq!(expand("{10..1..4}").unwrap(), ["10", "6", "2"]);
+        assert_eq!(expand("{a..c}").unwrap(), ["a", "b", "c"]);
+        assert_eq!(expand("{e..a..2}").unwrap(), ["e", "c", "a"]);
+        assert_eq!(expand("{-1..1}").unwrap(), ["-1", "0", "1"]);
+        assert_eq!(expand("x{1..1}").unwrap(), ["x1"]);
+        assert_eq!(expand("{1..}").unwrap(), ["{1..}"]);
+        assert_eq!(expand("{{a,b}").unwrap(), ["{a", "{b"]);
+    }
+
+    #[test]
+    fn sequences_at_the_i64_bounds() {
+        assert_eq!(
+            expand("{9223372036854775806..9223372036854775807}").unwrap(),
+            ["9223372036854775806", "9223372036854775807"]
+        );
+        assert_eq!(
+            expand("{-9223372036854775807..-9223372036854775808}").unwrap(),
+            ["-9223372036854775807", "-9223372036854775808"]
+        );
+        assert_eq!(
+            expand("{9223372036854775806..9223372036854775807..9223372036854775807}").unwrap(),
+            ["9223372036854775806"]
+        );
+        assert_eq!(
+            expand("{-9223372036854775808..9223372036854775807..9223372036854775807}").unwrap(),
+            ["-9223372036854775808", "-1", "9223372036854775806"]
+        );
+        assert!(expand("{-9223372036854775808..9223372036854775807}").is_err());
+    }
+
+    #[test]
+    fn expansion_is_capped() {
+        let start = std::time::Instant::now();
+        let err = expand("{1..99999999999}").unwrap_err();
+        assert!(err.contains("more than 10000 words"), "{err}");
+        assert!(expand("{\u{1}..\u{10FFFF}}").is_err());
+        assert!(expand(&"{a,b}".repeat(16)).is_err());
+        assert_eq!(expand(&"{a,b}".repeat(13)).unwrap().len(), 8192);
+        assert!(expand(&"{a,b}".repeat(800)).is_err());
+        assert!(expand(&format!("{}{}", "{".repeat(4000), "{a,b}".repeat(14))).is_err());
+        assert!(expand(&format!("{{{}}}", ",".repeat(MAX_WORDS))).is_err());
+        assert_eq!(
+            expand(&format!("{{{}}}", ",".repeat(MAX_WORDS - 1)))
+                .unwrap()
+                .len(),
+            MAX_WORDS
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        // Words share the room.
+        let s = parse(&format!("grep {}", "{1..5000} ".repeat(3))).unwrap();
+        let mut room = Room::default();
+        let words = &s.stages[0].words;
+        assert!(brace_expand(&words[1], &mut room).is_ok());
+        assert!(brace_expand(&words[2], &mut room).is_ok());
+        assert!(brace_expand(&words[3], &mut room).is_err());
+    }
+
+    #[test]
+    fn long_commands_are_refused() {
+        let ok = format!("grep {}", "x".repeat(MAX_COMMAND - 5));
+        assert!(parse(&ok).is_ok());
+        let err = parse(&format!("{ok}x")).unwrap_err();
+        assert!(err.contains("longer than"), "{err}");
     }
 }

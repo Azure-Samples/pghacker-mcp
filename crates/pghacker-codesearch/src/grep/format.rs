@@ -111,8 +111,7 @@ impl<'a> Printer<'a> {
             }
             Mode::Lines => {}
         }
-        let before = self.opts.before.max(0) as i32;
-        let after = self.opts.after.max(0) as i32;
+        let (before, after) = self.opts.context_lines();
         let mut last_printed = 0;
         let mut pending_until = 0;
         for &s in selected.iter().take(found as usize) {
@@ -122,7 +121,7 @@ impl<'a> Printer<'a> {
                     self.context_line(name, last_printed, &t);
                 }
             }
-            let start = (s - before).max(last_printed + 1).max(1);
+            let start = s.saturating_sub(before).max(last_printed + 1).max(1);
             let adjacent = last_printed > 0 && start == last_printed + 1;
             if self.opts.context_on()
                 && self.used
@@ -141,7 +140,7 @@ impl<'a> Printer<'a> {
                 self.selected_line(name, s, &t);
             }
             last_printed = s;
-            pending_until = s + after;
+            pending_until = s.saturating_add(after);
             self.used = true;
         }
         while last_printed < pending_until && last_printed < last {
@@ -229,6 +228,16 @@ mod tests {
             "foo 1\nfoo 2\nx\n"
         );
         assert_eq!(run(&["-m2", "-c", "foo"], &[("a", A)]), "2\n");
+    }
+
+    #[test]
+    fn huge_context_saturates() {
+        let all = "one\nfoo two\nthree\n";
+        assert_eq!(
+            run(&["-A2147483647", "foo"], &[("a", all)]),
+            "foo two\nthree\n"
+        );
+        assert_eq!(run(&["-C9999999999", "foo"], &[("a", all)]), all);
     }
 
     #[test]
