@@ -179,7 +179,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
 ## Updates
 
-Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap: the old revision serves until the new one has applied its migrations and is ready ([Schema upgrades](#schema-upgrades)). The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped.
+Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap: the old revision serves until the new one has applied its migrations and is ready ([Schema upgrades](#schema-upgrades)). The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped. Only the indexer that holds a session advisory lock runs jobs; it checks the lock's connection every 2 s. If that connection is lost, the lock goes with it, so the indexer drops its running jobs and exits, and the supervisor starts it again to wait for its turn. An indexer that takes the lock and finds jobs left running waits 30 s, until the one that ran them has stopped them, before it queues them again.
 
 ### Schema upgrades
 
@@ -203,8 +203,9 @@ Startup applies the migrations a database lacks, in name order and each in its o
 | `0021_shipped_releases` | Features' releases by the names they shipped as ([Shipped release names](#shipped-release-names)) |
 | `0022_rethread_mail` | `rethread_mail()` ([Threads](#threads)) |
 | `0026_redact_addresses` | Redacts stored mail's email addresses ([Email addresses](#email-addresses)) |
+| `0028_extraction_lease_purge` | Drafts deleted with their thread, so that ingest merges a thread that only drafts name; the `purge_leases` job deletes leases a day after they end, with their drafts |
 
-`0016` may have been applied before `0013`–`0015`: some images have `0016` but not `0013`–`0015`. No image that reads the snapshots runs after `0016`; an image that has `0016` but predates `0014` reads the history only and runs on the schema through `0018` ([Rolling back past 0014](#rolling-back-past-0014)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images with `0016` read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)).
+`0016` may have been applied before `0013`–`0015`: some images have `0016` but not `0013`–`0015`. No image that reads the snapshots runs after `0016`; an image that has `0016` but predates `0014` reads the history only and runs on the schema through `0018` ([Rolling back past 0014](#rolling-back-past-0014)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images with `0016` read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)). Images before `0028` run on its schema, but fail its `purge_leases` job, which retries with backoff: after rolling back to one, cancel it (`UPDATE pghacker.jobs SET state = 'cancelled' WHERE kind = 'purge_leases';`).
 
 ### Patch series
 

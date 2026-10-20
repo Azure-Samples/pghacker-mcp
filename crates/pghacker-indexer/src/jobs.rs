@@ -26,6 +26,9 @@ pub mod kind {
     pub const CODE_HISTORY_SYNC: &str = "code_history_sync";
     pub const PATCH_LINES: &str = "patch_lines";
     pub const DUPLICATES: &str = "duplicates";
+    /// Deletes extraction leases that ended a day ago, with their drafts
+    /// ([`crate::extraction::purge_leases`]).
+    pub const PURGE_LEASES: &str = "purge_leases";
     /// Parses every patch's series version and part again, a batch of
     /// threads at a time: queued once by migration 0019 (key `reparse`), and
     /// by [`super::queue_series_rules`] once per version of the rules.
@@ -52,6 +55,7 @@ pub const RECURRING: &[(&str, Duration)] = &[
     (kind::PATCH_LINES, Duration::from_secs(60)),
     // New features and decisions, compared for find_duplicates.
     (kind::DUPLICATES, Duration::from_secs(60)),
+    (kind::PURGE_LEASES, Duration::from_secs(600)),
 ];
 
 /// How long a graph sync job applies batches of changes before it yields.
@@ -59,6 +63,9 @@ const GRAPH_SYNC_BUDGET: Duration = Duration::from_secs(10);
 
 /// How long a duplicates job compares extracts before it yields.
 const DUPLICATES_BUDGET: Duration = Duration::from_secs(10);
+
+/// Ended extraction leases a purge_leases run deletes, with their drafts.
+const PURGE_LEASES_BATCH: i64 = 500;
 
 /// Patches a patch_lines run indexes.
 const PATCH_LINES_BATCH: i64 = 200;
@@ -195,14 +202,51 @@ pub async fn claim(
     }))
 }
 
+/// How often the leader checks the connection that holds its lock, and how
+/// long a check may take before the connection counts as lost.
+const LEAD_CHECK_EVERY: Duration = Duration::from_secs(2);
+const LEAD_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a new leader waits before it requeues the jobs left running:
+/// well past the time a leader that lost its lock takes to notice
+/// ([`LEAD_CHECK_EVERY`] and [`LEAD_CHECK_TIMEOUT`]) and stop them.
+pub const LEAD_GRACE: Duration = Duration::from_secs(30);
+
+/// The lock that makes this indexer the one that runs the jobs, held by its
+/// own connection ([`lead`]).
+pub struct Leader {
+    client: tokio_postgres::Client,
+}
+
+impl Leader {
+    /// Returns once the connection that holds the lock is lost (closed, or
+    /// silent for [`LEAD_CHECK_TIMEOUT`]), and the lock with it: another
+    /// indexer may lead now. The checks also keep the connection from idling.
+    pub async fn lost(&self) {
+        loop {
+            tokio::time::sleep(LEAD_CHECK_EVERY).await;
+            let error = if self.client.is_closed() {
+                "the connection closed".to_owned()
+            } else {
+                match tokio::time::timeout(LEAD_CHECK_TIMEOUT, self.client.simple_query("SELECT 1"))
+                    .await
+                {
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(error)) => format!("{error:#}"),
+                    Err(_) => format!("no answer in {} s", LEAD_CHECK_TIMEOUT.as_secs()),
+                }
+            };
+            tracing::error!(%error, "lost the connection that holds the jobs' lock");
+            return;
+        }
+    }
+}
+
 /// Waits to be the database's only indexer that runs jobs, which a new
 /// deployment's indexer must while the old one still runs: a session
-/// advisory lock, held by the returned connection until the process exits.
-/// None when `shutdown` comes first.
-pub async fn lead(
-    database_url: &str,
-    shutdown: &CancellationToken,
-) -> Result<Option<tokio_postgres::Client>> {
+/// advisory lock, held by the returned [`Leader`]'s connection until it's
+/// dropped or lost. None when `shutdown` comes first.
+pub async fn lead(database_url: &str, shutdown: &CancellationToken) -> Result<Option<Leader>> {
     let client = pghacker_core::db::connect(database_url, "pghacker-indexer leader").await?;
     let mut waiting = false;
     loop {
@@ -217,7 +261,7 @@ pub async fn lead(
             if waiting {
                 tracing::info!("the other indexer stopped; running the jobs");
             }
-            return Ok(Some(client));
+            return Ok(Some(Leader { client }));
         }
         if !waiting {
             tracing::info!("another indexer runs the jobs; waiting until it stops");
@@ -243,29 +287,36 @@ pub async fn requeue_orphans(client: &impl GenericClient) -> Result<u64> {
         .await?)
 }
 
-async fn finish(client: &impl GenericClient, job: &Job, outcome: Result<Outcome>) -> Result<()> {
-    match outcome {
+/// Records a job's outcome, unless the job is no longer `node`'s to finish:
+/// another indexer requeued it.
+async fn finish(
+    client: &impl GenericClient,
+    node: &str,
+    job: &Job,
+    outcome: Result<Outcome>,
+) -> Result<()> {
+    let recorded = match outcome {
         Ok(Outcome::Done(result)) => {
             client
                 .execute(
-                    "UPDATE jobs SET state = 'done', result = $2, last_error = NULL, finished_at = now(),
+                    "UPDATE jobs SET state = 'done', result = $3, last_error = NULL, finished_at = now(),
                          locked_by = NULL, locked_at = NULL
-                     WHERE id = $1",
-                    &[&job.id, &result],
+                     WHERE id = $1 AND state = 'running' AND locked_by = $2",
+                    &[&job.id, &node, &result],
                 )
-                .await?;
+                .await?
         }
         Ok(Outcome::Again { after, result }) => {
             let seconds = after.as_secs_f64();
             client
                 .execute(
-                    "UPDATE jobs SET state = 'queued', result = $2, last_error = NULL, attempts = 0,
-                         run_after = now() + make_interval(secs => $3), finished_at = now(),
+                    "UPDATE jobs SET state = 'queued', result = $3, last_error = NULL, attempts = 0,
+                         run_after = now() + make_interval(secs => $4), finished_at = now(),
                          locked_by = NULL, locked_at = NULL
-                     WHERE id = $1",
-                    &[&job.id, &result, &seconds],
+                     WHERE id = $1 AND state = 'running' AND locked_by = $2",
+                    &[&job.id, &node, &result, &seconds],
                 )
-                .await?;
+                .await?
         }
         Err(error) => {
             let message = format!("{error:#}");
@@ -274,14 +325,17 @@ async fn finish(client: &impl GenericClient, job: &Job, outcome: Result<Outcome>
             tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, attempts = job.attempts, retry, error = %message, "a job failed");
             client
                 .execute(
-                    "UPDATE jobs SET state = CASE WHEN $3 THEN 'queued' ELSE 'failed' END,
-                         last_error = $2, run_after = now() + make_interval(secs => $4),
+                    "UPDATE jobs SET state = CASE WHEN $4 THEN 'queued' ELSE 'failed' END,
+                         last_error = $3, run_after = now() + make_interval(secs => $5),
                          finished_at = now(), locked_by = NULL, locked_at = NULL
-                     WHERE id = $1",
-                    &[&job.id, &message, &retry, &backoff],
+                     WHERE id = $1 AND state = 'running' AND locked_by = $2",
+                    &[&job.id, &node, &message, &retry, &backoff],
                 )
-                .await?;
+                .await?
         }
+    };
+    if recorded == 0 {
+        tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, "a job's outcome isn't recorded: it was requeued while it ran");
     }
     Ok(())
 }
@@ -415,6 +469,19 @@ async fn execute(indexer: &Indexer, job: &Job) -> Result<Outcome> {
                 result: serde_json::to_value(report)?,
             })
         }
+        kind::PURGE_LEASES => {
+            let client = indexer.pool.get().await?;
+            let purged = crate::extraction::purge_leases(&**client, PURGE_LEASES_BATCH).await?;
+            let after = if purged.more {
+                Duration::ZERO
+            } else {
+                recurring_interval(kind::PURGE_LEASES)
+            };
+            Ok(Outcome::Again {
+                after,
+                result: serde_json::to_value(purged)?,
+            })
+        }
         kind::PATCH_SERIES => {
             let client = indexer.pool.get().await?;
             let after = job
@@ -496,6 +563,89 @@ async fn after_ingest(indexer: &Indexer) -> Result<()> {
 /// Runs `workers` workers until `shutdown` is cancelled; each finishes its
 /// current job first. Each worker claims the jobs of its [`lane`].
 pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) -> Result<()> {
+    run_workers(indexer, workers, shutdown, CancellationToken::new()).await
+}
+
+/// Runs the jobs as [`run`] does while `leader` leads.
+///
+/// Jobs left running when it starts are requeued after [`LEAD_GRACE`]: a
+/// leader that lost its lock stops its jobs well before. When `leader`'s
+/// connection is lost, the lock went with it, and another indexer may
+/// requeue the jobs running here and run them again: the workers stop at
+/// once, dropping their jobs without recording an outcome, and this returns
+/// an error. The process must then exit, which also stops what the jobs
+/// started outside the runtime's control, such as a blocking git fetch; its
+/// supervisor starts it again, to wait for the lead.
+pub async fn run_leading(
+    indexer: Indexer,
+    workers: usize,
+    leader: Leader,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let stop = shutdown.child_token();
+    let abort = CancellationToken::new();
+    let jobs = {
+        let (stop, abort) = (stop.clone(), abort.clone());
+        async move {
+            if !wait_for_orphans(&indexer, &stop).await? {
+                return Ok(());
+            }
+            run_workers(indexer, workers, stop, abort).await
+        }
+    };
+    tokio::pin!(jobs);
+    tokio::select! {
+        result = &mut jobs => result,
+        () = leader.lost() => {
+            abort.cancel();
+            stop.cancel();
+            // The workers drop their jobs at once.
+            if tokio::time::timeout(Duration::from_secs(5), jobs).await.is_err() {
+                tracing::warn!("the workers didn't stop in 5 s");
+            }
+            Err(anyhow!(
+                "lost the lead: another indexer may run the jobs now, so this one stopped them"
+            ))
+        }
+    }
+}
+
+/// Waits [`LEAD_GRACE`] if jobs are running, so that the leader that ran
+/// them stops them before they're requeued. False when `stop` comes first.
+async fn wait_for_orphans(indexer: &Indexer, stop: &CancellationToken) -> Result<bool> {
+    let running: i64 = {
+        let client = indexer
+            .pool
+            .get()
+            .await
+            .context("cannot connect to the database")?;
+        client
+            .query_one("SELECT count(*) FROM jobs WHERE state = 'running'", &[])
+            .await?
+            .get(0)
+    };
+    if running == 0 {
+        return Ok(true);
+    }
+    tracing::info!(
+        running,
+        seconds = LEAD_GRACE.as_secs(),
+        "jobs are left running; waiting for the indexer that ran them to stop them"
+    );
+    tokio::select! {
+        () = stop.cancelled() => Ok(false),
+        () = tokio::time::sleep(LEAD_GRACE) => Ok(true),
+    }
+}
+
+/// Runs the workers until `stop`, which lets each finish its job, or
+/// `abort`, which drops it.
+async fn run_workers(
+    indexer: Indexer,
+    workers: usize,
+    stop: CancellationToken,
+    abort: CancellationToken,
+) -> Result<()> {
     {
         let client = indexer
             .pool
@@ -514,15 +664,26 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
             );
         }
     }
-    let node = format!("pghacker-indexer-{}", std::process::id());
+    // Unique to this run, so that a job requeued from under it isn't its to
+    // finish, even where every container's process ID is the same.
+    let node = format!(
+        "pghacker-indexer-{}-{}",
+        std::process::id(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    );
     let mut handles = Vec::new();
     for worker in 0..workers {
         let indexer = indexer.clone();
-        let shutdown = shutdown.clone();
+        let (stop, abort) = (stop.clone(), abort.clone());
         let node = format!("{node}/{worker}");
         let kinds = lane(worker, workers);
         handles.push(tokio::spawn(async move {
-            worker_loop(indexer, node, kinds, shutdown).await
+            while !stop.is_cancelled() {
+                tokio::select! {
+                    () = abort.cancelled() => break,
+                    () = work(&indexer, &node, kinds, &stop) => {}
+                }
+            }
         }));
     }
     for handle in handles {
@@ -540,6 +701,7 @@ const RECURRING_KINDS: &[&str] = &[
     kind::CODE_HISTORY_SYNC,
     kind::PATCH_LINES,
     kind::DUPLICATES,
+    kind::PURGE_LEASES,
 ];
 
 /// The job kinds worker `worker` of `workers` claims: only these, when given.
@@ -550,53 +712,53 @@ pub fn lane(worker: usize, workers: usize) -> Option<&'static [&'static str]> {
     (worker == 0 && workers > 1).then_some(RECURRING_KINDS)
 }
 
-async fn worker_loop(
-    indexer: Indexer,
-    node: String,
+/// Claims and runs one job, or waits a moment when none is due.
+async fn work(
+    indexer: &Indexer,
+    node: &str,
     kinds: Option<&'static [&'static str]>,
-    shutdown: CancellationToken,
+    stop: &CancellationToken,
 ) {
-    while !shutdown.is_cancelled() {
-        let claimed = match indexer.pool.get().await {
-            Ok(client) => claim(&**client, &node, kinds).await,
-            Err(error) => Err(error.into()),
-        };
-        match claimed {
-            Ok(Some(job)) => {
-                let started = std::time::Instant::now();
-                let outcome = execute(&indexer, &job).await;
-                let ok = outcome.is_ok();
-                let finished = match indexer.pool.get().await {
-                    Ok(client) => finish(&**client, &job, outcome).await,
-                    Err(error) => Err(error.into()),
-                };
-                if let Err(error) = finished {
-                    tracing::error!(job = job.id, error = %format!("{error:#}"), "cannot record a job's outcome");
-                }
-                if !matches!(
-                    job.kind.as_str(),
-                    kind::EMBED
-                        | kind::RESOLVE_ANCHORS
-                        | kind::GRAPH_SYNC
-                        | kind::MAIL_REFRESH
-                        | kind::DUPLICATES
-                ) || !ok
-                {
-                    tracing::info!(job = job.id, kind = %job.kind, key = %job.key, ok, ms = started.elapsed().as_millis() as u64, "job finished");
-                }
+    let claimed = match indexer.pool.get().await {
+        Ok(client) => claim(&**client, node, kinds).await,
+        Err(error) => Err(error.into()),
+    };
+    match claimed {
+        Ok(Some(job)) => {
+            let started = std::time::Instant::now();
+            let outcome = execute(indexer, &job).await;
+            let ok = outcome.is_ok();
+            let finished = match indexer.pool.get().await {
+                Ok(client) => finish(&**client, node, &job, outcome).await,
+                Err(error) => Err(error.into()),
+            };
+            if let Err(error) = finished {
+                tracing::error!(job = job.id, error = %format!("{error:#}"), "cannot record a job's outcome");
             }
-            Ok(None) => {
-                tokio::select! {
-                    () = shutdown.cancelled() => {},
-                    () = tokio::time::sleep(Duration::from_secs(1)) => {},
-                }
+            if !matches!(
+                job.kind.as_str(),
+                kind::EMBED
+                    | kind::RESOLVE_ANCHORS
+                    | kind::GRAPH_SYNC
+                    | kind::MAIL_REFRESH
+                    | kind::DUPLICATES
+                    | kind::PURGE_LEASES
+            ) || !ok
+            {
+                tracing::info!(job = job.id, kind = %job.kind, key = %job.key, ok, ms = started.elapsed().as_millis() as u64, "job finished");
             }
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "cannot claim a job");
-                tokio::select! {
-                    () = shutdown.cancelled() => {},
-                    () = tokio::time::sleep(Duration::from_secs(5)) => {},
-                }
+        }
+        Ok(None) => {
+            tokio::select! {
+                () = stop.cancelled() => {},
+                () = tokio::time::sleep(Duration::from_secs(1)) => {},
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "cannot claim a job");
+            tokio::select! {
+                () = stop.cancelled() => {},
+                () = tokio::time::sleep(Duration::from_secs(5)) => {},
             }
         }
     }

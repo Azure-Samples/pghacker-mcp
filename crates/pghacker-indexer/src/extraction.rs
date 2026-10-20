@@ -332,9 +332,54 @@ impl Lease {
 /// working session keeps its threads, and an abandoned lease lapses soon.
 const LEASE_MINUTES: i32 = 20;
 
-/// SQL: no live lease holds thread `t`.
+/// SQL: no live lease holds thread `t`. `@>` can use the leases' GIN index.
 const FREE: &str = "NOT EXISTS (SELECT FROM extraction_leases l
-                    WHERE t.id = ANY (l.thread_ids) AND l.released_at IS NULL AND l.expires_at > now())";
+                    WHERE l.thread_ids @> ARRAY[t.id] AND l.released_at IS NULL AND l.expires_at > now())";
+
+/// How long a lease that ended, released or expired, is kept with its
+/// drafts before [`purge_leases`] deletes them. Nothing uses either once
+/// the lease ends: until then, a call with its token says how it ended.
+pub const LEASE_RETENTION_HOURS: i32 = 24;
+
+/// What a [`purge_leases`] run deleted.
+#[derive(Debug, Serialize)]
+pub struct Purged {
+    pub leases: i64,
+    pub drafts: i64,
+    /// Whether more ended leases wait.
+    pub more: bool,
+}
+
+/// Deletes up to `limit` leases that ended more than
+/// [`LEASE_RETENTION_HOURS`] ago, with their drafts: a submission copies
+/// what it keeps from its drafts into the extracts.
+pub async fn purge_leases(client: &impl GenericClient, limit: i64) -> Result<Purged> {
+    let row = client
+        .query_one(
+            "WITH ended AS (
+                 SELECT token FROM extraction_leases
+                 WHERE coalesce(released_at, expires_at) < now() - make_interval(hours => $1)
+                 LIMIT $2
+             ), drafts AS (
+                 DELETE FROM drafts WHERE lease_token IN (SELECT token FROM ended) RETURNING 1
+             ), leases AS (
+                 DELETE FROM extraction_leases WHERE token IN (SELECT token FROM ended) RETURNING 1
+             )
+             SELECT (SELECT count(*) FROM leases), (SELECT count(*) FROM drafts)",
+            &[&LEASE_RETENTION_HOURS, &limit],
+        )
+        .await?;
+    let leases: i64 = row.get(0);
+    let drafts: i64 = row.get(1);
+    if leases > 0 {
+        tracing::info!(leases, drafts, "purged ended extraction leases");
+    }
+    Ok(Purged {
+        leases,
+        drafts,
+        more: leases >= limit,
+    })
+}
 
 /// A thread to lease, and its content version as the lease reads it.
 type Leased = (i64, i32);
@@ -418,7 +463,7 @@ async fn lease(client: &impl GenericClient, token: &str) -> Result<Lease> {
         .await?
         .map(|row| row.get(0));
     Err(match released {
-        None => anyhow!("there's no such lease"),
+        None => anyhow!("there's no such lease, or it ended long ago; call next_extraction_batch"),
         Some(true) => anyhow!("the lease was released; call next_extraction_batch"),
         Some(false) => anyhow!("the lease expired; call next_extraction_batch"),
     })

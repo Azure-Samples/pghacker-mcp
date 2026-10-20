@@ -321,15 +321,15 @@ async fn run(env: &Env) -> Result<()> {
     let shutdown = CancellationToken::new();
     // The tools serve at once; the workers wait until no other indexer runs
     // the jobs, as while a new deployment replaces the old.
-    let workers = tokio::spawn({
+    let mut workers = tokio::spawn({
         let indexer = indexer.clone();
         let shutdown = shutdown.clone();
         async move {
-            let Some(_leader) = jobs::lead(&indexer.settings.database_url, &shutdown).await? else {
+            let Some(leader) = jobs::lead(&indexer.settings.database_url, &shutdown).await? else {
                 return Ok(());
             };
             let workers = indexer.settings.workers;
-            jobs::run(indexer, workers, shutdown).await
+            jobs::run_leading(indexer, workers, leader, shutdown).await
         }
     });
     let server = McpServer::new(
@@ -342,7 +342,21 @@ async fn run(env: &Env) -> Result<()> {
     let app = router(server, indexer.settings.allowed_hosts.clone());
     let addr = indexer.settings.addr.clone();
     let served = tokio::spawn(async move { serve(app, &addr).await });
-    shutdown_signal().await;
+    tokio::select! {
+        () = shutdown_signal() => {}
+        // The workers stop by themselves only when they fail or lose the
+        // lead. Exiting stops whatever their jobs left running, and the
+        // supervisor starts the indexer again, to wait for the lead.
+        stopped = &mut workers => {
+            let error = match stopped {
+                Ok(Ok(())) => "they stopped".to_owned(),
+                Ok(Err(error)) => format!("{error:#}"),
+                Err(error) => format!("{error:#}"),
+            };
+            tracing::error!(%error, "the job workers stopped; exiting");
+            std::process::exit(1);
+        }
+    }
     tracing::info!("shutting down; finishing running jobs");
     shutdown.cancel();
     served.abort();

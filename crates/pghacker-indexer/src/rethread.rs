@@ -322,7 +322,8 @@ async fn apply_group(
     let leased: Vec<i64> = tx
         .query(
             "SELECT DISTINCT t FROM extraction_leases l, unnest(l.thread_ids) AS t
-             WHERE l.released_at IS NULL AND l.expires_at > now() AND t = ANY ($1) ORDER BY 1",
+             WHERE l.released_at IS NULL AND l.expires_at > now() AND l.thread_ids && $1 AND t = ANY ($1)
+             ORDER BY 1",
             &[&ids],
         )
         .await?

@@ -1380,6 +1380,178 @@ async fn one_indexer_runs_the_jobs_at_a_time() {
     assert!(none.is_none());
 }
 
+/// Terminates the backend of the connection that holds the jobs' lock.
+async fn terminate_leader(db: &TestDb) {
+    let terminated: i64 = db
+        .admin()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity
+             WHERE datname = current_database() AND application_name = 'pghacker-indexer leader'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(terminated, 1);
+}
+
+#[tokio::test]
+async fn losing_the_lead_stops_the_workers_and_their_jobs() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
+    use tokio_util::sync::CancellationToken;
+
+    // An archive that takes downloads and never answers: the mbox job runs
+    // until something drops it.
+    let archive = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", archive.local_addr().unwrap());
+    let (asked, dropped) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    tokio::spawn({
+        let (asked, dropped) = (asked.clone(), dropped.clone());
+        async move {
+            while let Ok((mut socket, _)) = archive.accept().await {
+                asked.store(true, Ordering::SeqCst);
+                let dropped = dropped.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    while matches!(socket.read(&mut buffer).await, Ok(n) if n > 0) {}
+                    dropped.store(true, Ordering::SeqCst);
+                });
+            }
+        }
+    });
+    let db = TestDb::create().await.unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let env = Env::from_pairs([
+        ("PGHACKER_INDEXER_DATABASE_URL", db.indexer_url.as_str()),
+        ("PGHACKER_ARCHIVE_BASE_URL", base.as_str()),
+    ]);
+    let mut settings = Settings::from_env(&env).unwrap();
+    settings.slices_path = pghacker_core::config::repo_root()
+        .unwrap()
+        .join("config/test-slices.toml");
+    settings.cache_dir = cache.path().to_owned();
+    settings.git_dir = cache.path().to_owned();
+    let indexer = Indexer::new(settings, &env).unwrap();
+    let client = db.indexer().await.unwrap();
+    jobs::enqueue(
+        &client,
+        None,
+        jobs::kind::MBOX_MONTH,
+        "pgsql-hackers/2026-06",
+        &json!({ "list": "pgsql-hackers", "month": "2026-06" }),
+        0,
+    )
+    .await
+    .unwrap();
+
+    let shutdown = CancellationToken::new();
+    let leader = jobs::lead(&db.indexer_url, &shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = tokio::spawn(jobs::run_leading(
+        indexer.clone(),
+        2,
+        leader,
+        shutdown.clone(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !asked.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the mbox job didn't start");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The lock goes with its connection: the workers stop, dropping the job.
+    terminate_leader(&db).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(20), running)
+        .await
+        .expect("the workers didn't stop")
+        .unwrap();
+    assert!(
+        format!("{:#}", stopped.unwrap_err()).contains("lost the lead"),
+        "an error says why"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dropped.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the job's download still runs");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Its outcome isn't recorded: the next leader requeues it.
+    let row = client
+        .query_one(
+            "SELECT state, finished_at IS NULL FROM jobs WHERE kind = $1",
+            &[&jobs::kind::MBOX_MONTH],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (row.get::<_, String>(0), row.get::<_, bool>(1)),
+        ("running".to_owned(), true)
+    );
+    // Nothing claims jobs any more.
+    jobs::enqueue(&client, None, "test", "after", &json!({}), 100)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let state: String = client
+        .query_one("SELECT state FROM jobs WHERE key = 'after'", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(state, "queued");
+}
+
+#[tokio::test]
+async fn a_new_leader_waits_before_requeueing_running_jobs() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let client = db.indexer().await.unwrap();
+    jobs::enqueue(&client, None, "test", "orphan", &json!({}), 0)
+        .await
+        .unwrap();
+    let orphan = jobs::claim(&client, "old-leader/1", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let shutdown = CancellationToken::new();
+    let leader = jobs::lead(&db.indexer_url, &shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = tokio::spawn(jobs::run_leading(indexer, 2, leader, shutdown.clone()));
+    // The old leader may still run the job: it stays its own for a while.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let row = client
+        .query_one(
+            "SELECT state, locked_by FROM jobs WHERE id = $1",
+            &[&orphan.id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (row.get::<_, String>(0), row.get::<_, Option<String>>(1)),
+        ("running".to_owned(), Some("old-leader/1".to_owned()))
+    );
+    assert!(jobs::LEAD_GRACE > Duration::from_secs(10));
+    // Stopping ends the wait.
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn the_history_sync_fetches_and_applies_new_commits() {
     let src = tempfile::tempdir().unwrap();
