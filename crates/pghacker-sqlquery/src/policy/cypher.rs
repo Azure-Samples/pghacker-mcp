@@ -67,7 +67,15 @@ pub(super) fn check(text: &str) -> Result<(), String> {
 }
 
 fn expression_position(tokens: &[Token], index: usize) -> bool {
-    match index.checked_sub(1).and_then(|i| tokens.get(i)) {
+    let before = |offset: usize| index.checked_sub(offset).and_then(|i| tokens.get(i));
+    match before(1) {
+        // `WITH *` and `RETURN *` project every variable: what follows starts a clause.
+        Some(Token::Punct('*'))
+            if matches!(before(2), Some(Token::Word(word))
+                if matches!(word.to_ascii_uppercase().as_str(), "WITH" | "RETURN" | "DISTINCT")) =>
+        {
+            false
+        }
         Some(Token::Punct('.' | ':' | ',' | '=' | '+' | '-' | '*' | '/' | '<' | '>' | '|')) => true,
         Some(Token::Word(word)) => matches!(
             word.to_ascii_uppercase().as_str(),

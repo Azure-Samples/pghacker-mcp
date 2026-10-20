@@ -13,8 +13,11 @@
 //!   syntax; it is not a complete SQL sandbox. Untokenizable input is refused.
 //!   It says which way a statement passed ([`Checked`]).
 //! - [`QueryTool::run`] returns an [`Output`], `Failed` for refused
-//!   statements, PostgreSQL's errors and timeouts alike. The SQL is logged at
-//!   debug level only.
+//!   statements, PostgreSQL's errors and timeouts alike. Logs at info have
+//!   the outcome and, for a failed statement, its SQLSTATE and the first
+//!   line of its message with what it double-quotes elided. The SQL, a
+//!   refusal's reason and the whole message, which can quote the SQL, are
+//!   logged at debug level only.
 //! - [`QueryTool::run_with_usage`] also records, in the call's usage, each
 //!   statement that passed by its tokens: an `McpQueryFallback` event, with
 //!   sqlparser's error, which quotes the SQL. Its log line says only why.
@@ -129,6 +132,29 @@ fn record_error_code(sqlstate: &str, scope: Option<&Scope>) {
     }
 }
 
+/// The longest error that a failed query's log line at info keeps.
+const LOG_ERROR_CHARS: usize = 200;
+
+/// A failed statement's error for the log at info: the first line of its
+/// message, without the LINE, DETAIL and HINT lines that follow, and with
+/// what it double-quotes, which can be the SQL's names and values, elided.
+fn log_line(message: &str) -> String {
+    let first = message.lines().next().unwrap_or_default();
+    let mut line = String::with_capacity(first.len());
+    let mut quoted = false;
+    for ch in first.chars() {
+        if ch == '"' {
+            if !quoted {
+                line.push_str("\"…\"");
+            }
+            quoted = !quoted;
+        } else if !quoted {
+            line.push(ch);
+        }
+    }
+    truncate_chars(&line, LOG_ERROR_CHARS).to_owned()
+}
+
 /// The query tool, with its pool of pgh_reader connections. Cheap to clone:
 /// clones share the pool.
 #[derive(Clone)]
@@ -181,7 +207,8 @@ impl QueryTool {
         tracing::debug!(sql = %truncate_chars(&sql, 1000), "a query");
         match check(&sql) {
             Err(reason) => {
-                tracing::info!(outcome = "refused", reason = %reason, "refused a query");
+                tracing::info!(outcome = "refused", "refused a query");
+                tracing::debug!(reason = %reason, "why the query was refused");
                 return Output::Failed(reason);
             }
             Ok(Checked::Parsed) => {}
@@ -213,7 +240,14 @@ impl QueryTool {
                 Output::Failed(TIMEOUT_MESSAGE.to_owned())
             }
             QueryResponse::Failed { message, sqlstate } => {
-                tracing::info!(outcome = "failed", duration_ms, sqlstate = sqlstate.as_deref(), error = %truncate_chars(&message, 300), "a query failed");
+                tracing::info!(
+                    outcome = "failed",
+                    duration_ms,
+                    sqlstate = sqlstate.as_deref(),
+                    error = %log_line(&message),
+                    "a query failed"
+                );
+                tracing::debug!(error = %truncate_chars(&message, 300), "why the query failed");
                 if let Some(sqlstate) = &sqlstate {
                     record_error_code(sqlstate, scope);
                 }
@@ -583,6 +617,8 @@ mod tests {
             "SELECT nextval('some_sequence')",
             "SELECT * FROM cypher('g', $$ CREATE (n) $$) AS (n agtype)",
             "WITH w AS (DELETE FROM authors RETURNING *) SELECT * FROM w",
+            "SELECT query FROM pg_stat_activity",
+            "SELECT * FROM cypher('g', $$ MATCH (n) WITH * DELETE n $$) AS (n agtype)",
         ] {
             let expected = check(sql).unwrap_err();
             assert!(
@@ -610,6 +646,93 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn writes_after_a_star_projection_are_refused_by_the_database_too() {
+        let db = pghacker_core::testing::TestDb::create().await.unwrap();
+        let indexer = db.indexer().await.unwrap();
+        indexer
+            .batch_execute(
+                r#"
+                WITH l AS (SELECT id FROM ag_catalog.ag_label WHERE name = 'Author'
+                           AND graph = (SELECT graphid FROM ag_catalog.ag_graph
+                                        WHERE name = 'pghacker_graph'))
+                INSERT INTO pghacker_graph."Author" (id, properties)
+                SELECT ag_catalog._graphid(l.id, nextval('pghacker_graph."Author_id_seq"')),
+                       '{"key": "author:1", "name": "Ada Example"}'::ag_catalog.agtype
+                FROM l;
+                "#,
+            )
+            .await
+            .unwrap();
+        let graph = "SELECT count(*), max(properties::text) FROM pghacker_graph.\"Author\"";
+        let before: (i64, String) = {
+            let row = indexer.query_one(graph, &[]).await.unwrap();
+            (row.get(0), row.get(1))
+        };
+        assert_eq!(before.0, 1);
+        let tool = QueryTool::new(&db.reader_url, 1).unwrap();
+        let reader = db.reader().await.unwrap();
+        reader
+            .batch_execute("SET default_transaction_read_only = off")
+            .await
+            .unwrap();
+        for text in [
+            "MATCH (n:Author) WITH * CREATE (m:Author {key: 'author:2'}) RETURN m",
+            "MATCH (n:Author) WITH * MERGE (m:Author {key: 'author:2'}) RETURN m",
+            "MATCH (n:Author) WITH * SET n.name = 'changed' RETURN n",
+            "MATCH (n:Author) with *\n  remove n.name RETURN n",
+            "MATCH (n:Author) WITH * DELETE n RETURN 1",
+            "MATCH (n:Author) WITH * DETACH DELETE n RETURN 1",
+        ] {
+            let sql =
+                format!("SELECT * FROM cypher('pghacker_graph', $$ {text} $$) AS (result agtype)");
+            assert!(check(&sql).is_err(), "{sql}");
+            let response = unchecked(&tool, &sql).await;
+            assert!(
+                matches!(&response, QueryResponse::Failed { message, .. }
+                    if message.contains("read-only transaction")),
+                "{text}: {response:?}"
+            );
+            // Without the read-only transaction, pgh_reader's privileges refuse it.
+            let error = reader.batch_execute(&sql).await.unwrap_err();
+            let message = error
+                .as_db_error()
+                .map(|db| db.message())
+                .unwrap_or_default();
+            assert!(message.contains("permission denied"), "{text}: {error:?}");
+        }
+        let after: (i64, String) = {
+            let row = indexer.query_one(graph, &[]).await.unwrap();
+            (row.get(0), row.get(1))
+        };
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn failures_are_logged_at_info_without_what_they_quote() {
+        assert_eq!(
+            log_line(
+                "ERROR:  invalid input syntax for type integer: \"secret\"\n\
+                 LINE 1: SELECT 'secret'::int\n                ^"
+            ),
+            "ERROR:  invalid input syntax for type integer: \"…\""
+        );
+        assert_eq!(
+            log_line("ERROR:  column \"a\"\"b\" of \"t\" does not exist\nDETAIL:  secret"),
+            "ERROR:  column \"…\"\"…\" of \"…\" does not exist"
+        );
+        assert_eq!(
+            log_line("ERROR:  unterminated \"secret"),
+            "ERROR:  unterminated \"…\""
+        );
+        assert_eq!(
+            log_line("ERROR:  division by zero"),
+            "ERROR:  division by zero"
+        );
+        assert_eq!(log_line(TIMEOUT_MESSAGE), TIMEOUT_MESSAGE);
+        assert_eq!(log_line(&"x".repeat(500)).chars().count(), LOG_ERROR_CHARS);
     }
 
     #[tokio::test]

@@ -119,6 +119,38 @@ pub fn parse<T: DeserializeOwned>(tool: &str, arguments: Value) -> Result<T, Err
         .map_err(|error| ErrorData::invalid_params(format!("{tool}'s arguments: {error}"), None))
 }
 
+/// A rejected call's error for the log at info. For malformed arguments
+/// ([`parse`]), it's the kind of problem, such as missing field `sql` or
+/// invalid type, without the values and unknown names serde's message
+/// quotes; for other errors, which are the server's own, the message.
+fn rejection(error: &ErrorData) -> String {
+    if error.code != ErrorCode::INVALID_PARAMS {
+        return error.message.to_string();
+    }
+    let problem = error
+        .message
+        .split_once("'s arguments: ")
+        .map_or("", |(_, problem)| problem);
+    if let Some((field, _)) = problem
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`'))
+    {
+        return format!("missing field `{field}`");
+    }
+    [
+        "unknown field",
+        "duplicate field",
+        "invalid type",
+        "invalid value",
+        "invalid length",
+        "unknown variant",
+    ]
+    .into_iter()
+    .find(|kind| problem.starts_with(kind))
+    .unwrap_or("invalid arguments")
+    .to_owned()
+}
+
 /// A tool failure the caller sees, from any error: the message and its causes.
 pub fn failed(error: impl Into<anyhow::Error>) -> Output {
     let error = error.into();
@@ -478,11 +510,14 @@ impl<T: Tools> ServerHandler for McpServer<T> {
                 CallToolResult::success(vec![ContentBlock::text(text)])
             }
             Ok(Output::Failed(text)) => {
-                tracing::info!(tool = %name, ms, error = %crate::text::truncate_chars(&text, 300), "tool call failed");
+                // A failure can quote the caller's arguments: only debug logs have it.
+                tracing::info!(tool = %name, ms, "tool call failed");
+                tracing::debug!(tool = %name, error = %crate::text::truncate_chars(&text, 300), "why the tool call failed");
                 CallToolResult::error(vec![ContentBlock::text(text)])
             }
             Err(error) => {
-                tracing::info!(tool = %name, ms, error = %error.message, "tool call rejected");
+                tracing::info!(tool = %name, ms, code = error.code.0, error = %rejection(&error), "tool call rejected");
+                tracing::debug!(tool = %name, error = %error.message, "why the tool call was rejected");
                 return Err(error);
             }
         };
@@ -923,5 +958,51 @@ pub async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Args {
+        sql: String,
+        max_rows: Option<u32>,
+    }
+
+    fn rejected(arguments: Value) -> ErrorData {
+        parse::<Args>("query", arguments).expect_err("malformed arguments")
+    }
+
+    #[test]
+    fn rejections_are_logged_without_the_callers_values() {
+        for (arguments, expected, quoted) in [
+            (json!({}), "missing field `sql`", "`sql`"),
+            (
+                json!({"sql": "SELECT 1", "secret_name": 1}),
+                "unknown field",
+                "secret_name",
+            ),
+            (
+                json!({"sql": "SELECT 'secret value'", "max_rows": "secret count"}),
+                "invalid type",
+                "secret count",
+            ),
+            (
+                json!({"sql": "SELECT 1", "max_rows": -424242}),
+                "invalid value",
+                "424242",
+            ),
+            (json!("secret element"), "invalid type", "secret element"),
+        ] {
+            let error = rejected(arguments);
+            assert!(error.message.contains(quoted), "{}", error.message);
+            assert_eq!(rejection(&error), expected, "{}", error.message);
+        }
+        let internal = ErrorData::internal_error("cannot serialize the result", None);
+        assert_eq!(rejection(&internal), "cannot serialize the result");
     }
 }

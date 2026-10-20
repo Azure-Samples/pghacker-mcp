@@ -70,6 +70,11 @@ pub(super) fn check(sql: &str, max_bytes: usize) -> Result<Checked, String> {
         }
     };
     check_head(statement)?;
+    for token in statement {
+        if let Token::Word(word) = token {
+            check_session_sql(&identifier(&word.value, word.quote_style.is_some()))?;
+        }
+    }
     match Parser::new(&PostgreSqlDialect {})
         .with_tokens(statement.to_vec())
         .parse_statements()
@@ -391,7 +396,29 @@ fn cypher_literal_refusal() -> String {
         .to_owned()
 }
 
+/// Refuses the relations and functions that show other connections' SQL.
+/// Every caller of query connects as pgh_reader, so PostgreSQL would show
+/// them other callers' queries. Checked for every name in the statement,
+/// wherever it is, so that aliases and qualified or quoted names can't
+/// hide them.
+fn check_session_sql(name: &str) -> Result<(), String> {
+    if matches!(
+        name,
+        "pg_stat_activity"
+            | "pg_stat_get_activity"
+            | "pg_stat_get_backend_activity"
+            | "pg_stat_statements"
+    ) {
+        return Err(format!(
+            "query doesn't read {name}: it shows other connections' SQL, which can be other \
+             callers' queries. Use EXPLAIN to see how your own statement runs"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn check_function(name: &str) -> Result<(), String> {
+    check_session_sql(name)?;
     let (effect, hint) = match name {
         "set_config" | "setseed" | "set_limit" => (
             "changes session settings",
@@ -524,6 +551,15 @@ pub(super) fn check_function(name: &str) -> Result<(), String> {
             "can execute SQL supplied as text",
             "Express the read directly as SQL instead",
         ),
+        name if name.starts_with("table_to_xml")
+            || name.starts_with("schema_to_xml")
+            || name.starts_with("database_to_xml") =>
+        {
+            (
+                "reads relations named in text",
+                "Express the read directly as SQL instead",
+            )
+        }
         "create_graph"
         | "alter_graph"
         | "drop_graph"
@@ -540,6 +576,10 @@ pub(super) fn check_function(name: &str) -> Result<(), String> {
         | "_cypher_set_clause" => (
             "changes or loads the AGE graph",
             "Use cypher() with MATCH/RETURN without graph updates",
+        ),
+        "age_prepare_cypher" => (
+            "hands cypher() query text that query can't check",
+            "Pass cypher() its query text as a literal",
         ),
         _ => return Ok(()),
     };

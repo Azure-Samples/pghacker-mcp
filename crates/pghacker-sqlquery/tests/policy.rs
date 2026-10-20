@@ -207,6 +207,22 @@ fn dangerous_function_families_are_refused() {
             ],
         ),
         (
+            "relations named in text",
+            vec![
+                "table_to_xml",
+                "table_to_xmlschema",
+                "table_to_xml_and_xmlschema",
+                "schema_to_xml",
+                "schema_to_xml_and_xmlschema",
+                "database_to_xml",
+                "database_to_xml_and_xmlschema",
+            ],
+        ),
+        (
+            "query text that query can't check",
+            vec!["age_prepare_cypher"],
+        ),
+        (
             "AGE",
             vec![
                 "create_graph",
@@ -423,6 +439,114 @@ fn writing_cypher_and_its_function_calls_are_refused() {
 }
 
 #[test]
+fn writes_after_a_star_projection_are_refused() {
+    for projection in [
+        "WITH *",
+        "RETURN *",
+        "with *",
+        "Return *",
+        "WITH DISTINCT *",
+        "WITH\n  *\n",
+        "RETURN\t*  ",
+        "WITH /* all */ *",
+    ] {
+        for (clause, name) in [
+            ("CREATE (m:Feature)", "CREATE"),
+            ("create (m:Feature)", "CREATE"),
+            ("MERGE (m:Feature {key: 'x'})", "MERGE"),
+            ("DELETE n", "DELETE"),
+            ("DETACH DELETE n", "DETACH"),
+            ("detach\n delete n", "DETACH"),
+            ("SET n.x = 1", "SET"),
+            ("Set n:Feature", "SET"),
+            ("REMOVE n.x", "REMOVE"),
+            ("remove n:Feature", "REMOVE"),
+        ] {
+            refused(
+                &graph(&format!("MATCH (n) {projection}\n{clause}")),
+                &format!("{name} clause"),
+            );
+        }
+    }
+    // A star that multiplies is still an expression's.
+    for text in [
+        "MATCH (n) RETURN n.x * create",
+        "WITH 2 AS create RETURN 3 * create",
+        "MATCH (n) RETURN count(*) AS set",
+        "MATCH (n) WITH * RETURN n",
+        "MATCH (n) WITH * WHERE n.x = 1 RETURN *",
+        "MATCH (n) RETURN * ORDER BY n.x LIMIT 1",
+    ] {
+        allowed(&graph(text));
+    }
+}
+
+#[test]
+fn age_prepare_cypher_is_refused_in_sql_and_cypher() {
+    for sql in [
+        "SELECT age_prepare_cypher('pghacker_graph', 'CREATE (n)')",
+        "SELECT ag_catalog.age_prepare_cypher('pghacker_graph', 'CREATE (n)')",
+        "SELECT \"age_prepare_cypher\"('pghacker_graph', 'CREATE (n)')",
+        "SELECT * FROM cypher('g', $$ RETURN 1 $$) AS (n agtype), \
+         LATERAL ag_catalog.AGE_PREPARE_CYPHER('g', 'CREATE (n)') p",
+        &graph("RETURN prepare_cypher('g', 'CREATE (n)')"),
+        &graph("RETURN age_prepare_cypher('g', 'CREATE (n)')"),
+        &graph("RETURN ag_catalog.age_prepare_cypher('g', 'CREATE (n)')"),
+    ] {
+        refused(sql, "age_prepare_cypher() hands cypher() query text");
+    }
+}
+
+#[test]
+fn other_connections_sql_is_refused() {
+    for name in [
+        "pg_stat_activity",
+        "pg_stat_get_activity",
+        "pg_stat_get_backend_activity",
+        "pg_stat_statements",
+    ] {
+        for sql in [
+            format!("SELECT * FROM {name}"),
+            format!("SELECT query FROM pg_catalog.{name}"),
+            format!("SELECT query FROM \"pg_catalog\".\"{name}\""),
+            format!("SELECT query FROM PG_CATALOG.{}", name.to_uppercase()),
+            format!("SELECT * FROM public.{name}"),
+            format!("TABLE {name}"),
+            format!("SELECT (SELECT max(query) FROM {name}) AS q"),
+            format!("WITH a AS (SELECT * FROM {name}) SELECT * FROM a"),
+            format!("SELECT * FROM threads t JOIN {name} a ON true"),
+            format!("SELECT * FROM {name}(NULL)"),
+            format!("SELECT {name}(1)"),
+            format!("SELECT (pg_catalog.{name}(NULL)).query"),
+            format!("SELECT * FROM ROWS FROM (pg_catalog.{name}(NULL))"),
+            format!("EXPLAIN ANALYZE SELECT * FROM {name}"),
+            format!("SELECT * FROM cypher('g', $$ RETURN 1 $$) AS (n agtype), pg_catalog.{name} a"),
+            graph(&format!("RETURN pg_catalog.{name}(NULL)")),
+        ] {
+            refused(&sql, &format!("doesn't read {name}"));
+            refused(&sql, "other connections' SQL");
+        }
+    }
+    refused(
+        r#"SELECT query FROM U&"pg_stat_activit\0079""#,
+        "doesn't read pg_stat_activity",
+    );
+    refused(
+        "SELECT table_to_xml('pg_stat_activity', true, false, '')",
+        "relations named in text",
+    );
+    refused(
+        "SELECT schema_to_xml('pg_catalog', true, false, '')",
+        "relations named in text",
+    );
+    // Another relation of that name isn't pg_catalog's, and text is data.
+    allowed("SELECT * FROM \"PG_STAT_ACTIVITY\"");
+    allowed("SELECT 'pg_stat_activity', 'pg_stat_activity'::regclass::oid");
+    allowed("SELECT pid, mode, granted FROM pg_locks");
+    allowed("SELECT * FROM pg_stat_database");
+}
+
+#[test]
 fn read_only_cypher_keeps_identifiers_comments_strings_and_parameters() {
     for text in [
         "MATCH (a:Author)-[:AUTHORED]->(m:Message) RETURN a.name, count(m)",
@@ -503,12 +627,12 @@ fn lateral_calls_are_not_mistaken_for_aliases_in_the_fallback() {
         ),
     ] {
         for join in [
-            "FROM pg_stat_activity a, LATERAL",
+            "FROM pg_locks a, LATERAL",
             "FROM LATERAL",
-            "FROM pg_stat_activity a JOIN LATERAL",
-            "FROM pg_stat_activity a CROSS JOIN LATERAL",
-            "FROM pg_stat_activity a LEFT JOIN LATERAL",
-            "FROM pg_stat_activity a INNER JOIN LATERAL",
+            "FROM pg_locks a JOIN LATERAL",
+            "FROM pg_locks a CROSS JOIN LATERAL",
+            "FROM pg_locks a LEFT JOIN LATERAL",
+            "FROM pg_locks a INNER JOIN LATERAL",
         ] {
             let on = if join.contains("CROSS") || !join.contains("JOIN") {
                 ""
@@ -590,7 +714,7 @@ fn postgres_show_explain_and_read_only_workload_shapes_pass() {
         "SHOW variables.value",
         "SELECT current_setting('work_mem'), pg_typeof(1), random(), clock_timestamp()",
         "SELECT * FROM pg_catalog.pg_settings",
-        "SELECT * FROM pg_stat_activity",
+        "SELECT * FROM pg_locks",
         "SELECT pg_current_wal_lsn(), pg_wal_lsn_diff('0/10', '0/0')",
         "SELECT pg_replication_origin_oid('origin'), pg_replication_origin_session_progress(false)",
         "SELECT show_limit(), to_bm25query('planner', 'pghacker.message_chunks_bm25')",
