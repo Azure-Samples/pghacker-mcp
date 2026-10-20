@@ -109,7 +109,7 @@ pub async fn ingest_mbox_month(
             let data = data.clone();
             tokio::task::spawn_blocking(move || {
                 todo.into_iter()
-                    .map(|range| parse::parse(&data[range]))
+                    .map(|range| parse_one(&data[range]))
                     .collect::<Vec<_>>()
             })
             .await?
@@ -189,7 +189,7 @@ pub async fn ingest_thread(
         }
         let parsed = tokio::task::spawn_blocking(move || {
             raws.into_iter()
-                .map(|(id, raw)| (id, parse::parse(&raw)))
+                .map(|(id, raw)| (id, parse_one(&raw)))
                 .collect::<Vec<_>>()
         })
         .await?;
@@ -220,6 +220,19 @@ pub async fn ingest_thread(
         "ingested a thread"
     );
     Ok(stats)
+}
+
+/// [`parse::parse`], with a panic over a malformed message made that
+/// message's error, so that it can't fail the whole ingestion.
+fn parse_one(raw: &[u8]) -> Result<ParsedMessage> {
+    std::panic::catch_unwind(|| parse::parse(raw)).unwrap_or_else(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        Err(anyhow::anyhow!("parsing panicked: {what}"))
+    })
 }
 
 /// Which of `ids` are stored.

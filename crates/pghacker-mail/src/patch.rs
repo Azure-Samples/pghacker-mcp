@@ -106,7 +106,10 @@ pub(crate) fn is_quoted(line: &str) -> bool {
 
 fn from_attachment(attachment: &Attachment) -> Vec<PatchFile> {
     let name = attachment.filename.clone().unwrap_or_default();
-    let lower = name.to_lowercase();
+    // ASCII lowercasing keeps byte offsets, so a suffix found in `lower`
+    // ends `name` at a char boundary; full Unicode lowercasing doesn't
+    // ('İ' becomes 3 bytes).
+    let lower = name.to_ascii_lowercase();
     let gzip = attachment.data.starts_with(&[0x1f, 0x8b]);
     if gzip {
         let Some(inner) = gunzip(&attachment.data) else {
@@ -115,8 +118,8 @@ fn from_attachment(attachment: &Attachment) -> Vec<PatchFile> {
         if is_tar(&inner) {
             return from_tar(&inner);
         }
-        let inner_name = if let Some(stem) = lower.strip_suffix(".tgz") {
-            format!("{}.tar", &name[..stem.len()])
+        let inner_name = if lower.ends_with(".tgz") {
+            format!("{}.tar", &name[..name.len() - 4])
         } else if lower.ends_with(".gz") {
             name[..name.len() - 3].to_owned()
         } else {
@@ -148,7 +151,7 @@ fn from_tar(data: &[u8]) -> Vec<PatchFile> {
 /// under a name that doesn't say otherwise.
 fn candidate(name: &str, content_type: &str, text: Option<String>) -> Option<PatchFile> {
     let text = text?;
-    let lower = name.to_lowercase();
+    let lower = name.to_ascii_lowercase();
     let named = lower.ends_with(".patch") || lower.ends_with(".diff");
     let typed = matches!(
         content_type,

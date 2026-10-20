@@ -190,7 +190,16 @@ pub async fn upsert_message(
     if let Some(stored) = existing(tx, &message_id).await? {
         return Ok(stored);
     }
-    let derived = Derived::new(msg);
+    // A panic over a malformed message is that message's error, so that it
+    // can't fail the whole ingestion.
+    let derived = std::panic::catch_unwind(|| Derived::new(msg)).map_err(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        anyhow!("deriving message {message_id} panicked: {what}")
+    })?;
     tx.batch_execute("SAVEPOINT pghacker_upsert_message")
         .await?;
     match insert(tx, ctx, msg, &message_id, &derived).await {

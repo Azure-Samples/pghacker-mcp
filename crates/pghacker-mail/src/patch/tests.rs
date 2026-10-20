@@ -324,3 +324,47 @@ fn diff_lines_are_classified() {
         ]
     );
 }
+
+fn gzip_attachment(name: &str, data: &[u8]) -> Attachment {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(data).unwrap();
+    Attachment {
+        filename: Some(name.into()),
+        content_type: "application/gzip".into(),
+        data: encoder.finish().unwrap(),
+        text: None,
+    }
+}
+
+#[test]
+fn names_whose_lowercase_changes_length_are_safe() {
+    // 'İ' lowercases to 3 bytes, the Kelvin sign and 'ẞ' to fewer; 'ǅ' is
+    // titlecase.
+    let msg = message(
+        "x",
+        "",
+        vec![
+            gzip_attachment("İİİİİ.tgz", SMALL_DIFF.as_bytes()),
+            gzip_attachment("ǅ.diff.gz", SMALL_DIFF.as_bytes()),
+            gzip_attachment("\u{212A}\u{212A}.TGZ", SMALL_DIFF.as_bytes()),
+            gzip_attachment("ẞİ-fix.Patch.GZ", SMALL_DIFF.as_bytes()),
+            gzip_attachment("İ", SMALL_DIFF.as_bytes()),
+            text_attachment("İİİ.PATCH", "application/octet-stream", SMALL_DIFF),
+            text_attachment("ẞ.Diff", "application/octet-stream", "no diff"),
+        ],
+    );
+    let names: Vec<_> = extract(&msg).into_iter().map(|p| p.filename).collect();
+    assert_eq!(
+        names,
+        [
+            "İİİİİ.tar",
+            "ǅ.diff",
+            "\u{212A}\u{212A}.tar",
+            "ẞİ-fix.Patch",
+            "İ",
+            "İİİ.PATCH",
+            "ẞ.Diff"
+        ]
+    );
+}
