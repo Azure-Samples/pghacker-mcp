@@ -15,8 +15,8 @@ PostgreSQL's design history lives in about 600K pgsql-hackers messages and the s
 | --- | --- |
 | **1** | Local PilotSwarm: pgsql-hackers slices become threads, authors, features, decisions, positions, anchors and an AGE graph, with full-text, semantic and hybrid search, `author_perspective` and code search over a PG19 subset. Done when code search matches ripgrep on replayed agent searches and 20 test questions get correct, cited answers. |
 | **2** | Commits and diffs for the PG19 subset: history tools, diff search, `Discussion:` links to threads. |
-| **3** | Mort: crawler sessions, both containers, public endpoint, full PG19 and archive, hourly refresh. |
-| **4** | Rest of the Loop: patches, commit and PR graph data, feature trends, semantic code search, welcome page, telemetry. Out of scope: CommitFest site, docs, other lists, MCP App UI. |
+| **3** | Crawler sessions, both containers, public endpoint, full PG19 and archive, hourly refresh. |
+| **4** | Patches, commit and PR graph data, feature trends, semantic code search, welcome page, telemetry. Out of scope: CommitFest site, docs, other lists, MCP App UI. |
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Tables in schema `pghacker` are authoritative. Messages and extracts support thr
 
 **Extracts** cite Message-IDs and verbatim quotes: **features** (proposal to commit, revert or rejection; release), **decisions** (outcome, alternatives, rationale) and **positions** (an author's stance in a thread).
 
-**Graph.** The AGE graph `pghacker_graph` adapts the `postgres-hackers/v2` node types:
+**Graph.** The AGE graph `pghacker_graph` has these node types and edges:
 
 | Source | Edges |
 | --- | --- |
@@ -47,7 +47,7 @@ Tables in schema `pghacker` are authoritative. Messages and extracts support thr
 
 ## Ingestion
 
-Deterministic code handles verbatim facts and models only judgments; the agent-built v2 graph needed 127 recovery batches for two months of mail. Crawler sessions use these indexer tools:
+Deterministic code handles verbatim facts and models only judgments: an earlier prototype, in which agents built the whole graph themselves, needed 127 recovery batches for two months of mail. Crawler sessions use these indexer tools:
 
 - **Sources:** `add_source`, `remove_source` and `list_sources` pick mailing lists: the test slices locally, any list, months and threads in Azure. Async workers retrieve them (monthly mbox, flat thread pages), thread mail, match authors by email, record patches, chunk and embed; a followed list's current month is retrieved again hourly. PostgreSQL's code isn't a source: an operator builds the commit history, an hourly job syncs it, and `list_sources` and `ingest_status` report it.
 - **Email addresses:** ingest replaces the addresses in subjects, bodies and patches with `[email]`, keeping Message-IDs in URLs, and senders' names lose theirs, as the archive's web pages obfuscate them; `author_emails`, which matches senders to authors, isn't readable by pghacker-mcp or the graph.
@@ -84,7 +84,7 @@ Results add totals, cut and budget flags, and similar names when nothing matches
 
 | Wave | Subset and purpose |
 | --- | --- |
-| **1** | June–July 2026 mbox (≈5K messages, 190 MB), to compare with the v2 graph |
+| **1** | June–July 2026 mbox (≈5K messages, 190 MB), the months the earlier prototype's graph covered, for comparison |
 | **1** | SQL/PGQ and SQL/JSON threads from archive search: reverted and uncommitted work |
 | **1** | `src/backend/{parser,utils/adt}`, `src/include/nodes` and `contrib/pg_trgm` at a pinned `REL_19_STABLE` SHA: 206 files with the SQL/JSON code |
 | **2** | The 540 of 3,662 PG19 commits since 2025-07-01 that touch that subset |

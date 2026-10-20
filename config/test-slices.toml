@@ -5,7 +5,7 @@
 
 [mail]
 list = "pgsql-hackers"
-# Monthly mbox archives, for comparison with the postgres-hackers/v2 graph.
+# Two monthly mbox archives: a small, recent sample of the list.
 months = ["2026-06", "2026-07"]
 
 # Whole threads, found by archive search, on reverted and uncommitted work.

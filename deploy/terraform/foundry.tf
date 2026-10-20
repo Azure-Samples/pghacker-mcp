@@ -3,8 +3,8 @@
 
 # Azure AI Foundry: an AIServices account with the app's model deployments,
 # reachable only through its private endpoint. Key (local) authentication is
-# off, as the subscription's policy requires: the app's managed identity calls
-# the models with Entra tokens, which a proxy in the container adds to the
+# disabled by design: the app's managed identity calls the models with Entra
+# tokens, which a proxy in the container adds to the
 # requests of PilotSwarm, the embedder and the crawl scheduler
 # (scripts/lib/foundry.mjs).
 

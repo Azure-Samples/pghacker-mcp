@@ -134,7 +134,7 @@ variable "seed_image" {
 # --- Key Vault and logs -------------------------------------------------------
 
 variable "key_vault_name" {
-  description = "The Key Vault's name, which is globally unique. It holds the generated passwords, the Foundry key and the GitHub OAuth App's credentials."
+  description = "The Key Vault's name, which is globally unique. It holds the generated passwords and keys and the GitHub OAuth App's credentials."
   type        = string
 
   validation {
@@ -756,7 +756,7 @@ variable "usage_details_enabled" {
 }
 
 variable "feedback_rate_per_hour" {
-  description = "The chance, from 0 to 1, that an address's hour of use of the public MCP endpoint brings one request for feedback, \"Was the last answer helpful?\", which an interactive client's own form shows as the user's next question starts (PGHACKER_FEEDBACK_RATE; PRIVACY.md). Only the apps in feedback_clients that declare form elicitation, under MCP 2026-07-28, are asked, after feedback_min_questions questions and only in an active session. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
+  description = "The chance, from 0 to 1, that an address's hour of use of the public MCP endpoint brings one request for feedback, \"Was the last answer helpful?\", which an interactive client's own form shows as the user's next question starts (PGHACKER_FEEDBACK_RATE; docs/reference.md#feedback). Only the apps in feedback_clients that declare form elicitation, under MCP 2026-07-28, are asked, after feedback_min_questions questions and only in an active session. It needs usage_enabled, whose telemetry records the answers; 0 turns feedback off."
   type        = number
   default     = 0.1
   nullable    = false
@@ -768,7 +768,7 @@ variable "feedback_rate_per_hour" {
 }
 
 variable "feedback_comments_enabled" {
-  description = "Whether the feedback form also takes an optional comment of up to 500 characters, recorded with the rating (PGHACKER_FEEDBACK_COMMENTS). Off by default: a comment is free text, which can hold personal data; update PRIVACY.md before turning it on."
+  description = "Whether the feedback form also takes an optional comment of up to 500 characters, recorded with the rating (PGHACKER_FEEDBACK_COMMENTS). Off by default: a comment is free text, which can hold personal data; update your privacy statement (privacy_url) before turning it on."
   type        = bool
   default     = false
   nullable    = false

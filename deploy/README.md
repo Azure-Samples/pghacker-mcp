@@ -31,7 +31,7 @@ flowchart LR
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door and the ingress pass a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
-- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. The subscription's policy refuses keys, so the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
+- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design; the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
 - **Usage telemetry** goes to Application Insights on the logs' workspace.
   - It records an event for each request to `/mcp`: the tool, its arguments' names, its outcome and the shape of its answer, and the client. It also records each view of the home page.
   - `usage_details_enabled = true` also records what users type into tools: arguments' values, error messages and sqlparser's errors. Off by default, a call keeps only the values of its fixed-choice arguments (enums and booleans) and, for `query`, PostgreSQL's SQLSTATE.
@@ -204,17 +204,17 @@ Startup applies the migrations a database lacks, in name order and each in its o
 | `0022_rethread_mail` | `rethread_mail()` ([Threads](#threads)) |
 | `0026_redact_addresses` | Redacts stored mail's email addresses ([Email addresses](#email-addresses)) |
 
-Production applied `0016` before `0013`–`0015`. No image that reads the snapshots runs after `0016`; the previous production image, `33616a4`, reads the history only and runs on the schema through `0018` ([Rolling back to 33616a4](#rolling-back-to-33616a4)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images from `33616a4` on read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)).
+`0016` may have been applied before `0013`–`0015`: some images have `0016` but not `0013`–`0015`. No image that reads the snapshots runs after `0016`; an image that has `0016` but predates `0014` reads the history only and runs on the schema through `0018` ([Rolling back past 0014](#rolling-back-past-0014)). Images before `0019` read patches' series versions as numbers ([Patch series](#patch-series)). `0020` changes nothing that images with `0016` read: none of them stores a PostgreSQL version. Images before `0021` save features' releases as their threads name them ([Shipped release names](#shipped-release-names)). `0022` adds a function only; images before it don't know its job ([Threads](#threads)).
 
 ### Patch series
 
 An image with migration `0019_patch_series_text` stores a patch's series version as text, as its file name or subject writes it, and takes parts from file names only ([reference](../docs/reference.md#patch-series)).
 - The migration replaces the `series_version` column, which only changes the catalog, and queues the `patch_series` job (key `reparse`).
-- The job parses every thread's patch names and subjects again, 500 threads a run, and updates the rows that change: about 90,000 in production, whose lines go into the `text_ids` index again. `ingest_status` shows its state; its `result` counts the threads, patches and changes.
+- The job parses every thread's patch names and subjects again, 500 threads a run, and updates the rows that change, whose lines go into the `text_ids` index again. `ingest_status` shows its state; its `result` counts the threads, patches and changes.
 - Until it finishes, `search_patches` and `get_commit` show no version for the threads it hasn't reached.
-- When the rules change, `RULES` in `crates/pghacker-mail/src/series.rs` goes up, and the leading indexer queues the job once more as it starts (key `rules-<N>`). That run updates only the patches the new rules parse differently, which keep their old values until it reaches them. Rules 2 correct 27 versions in production: dates after a version (`insert_on_dup.v3.2013_09_10` gave `3.2013`, now `3`) and slugs taken as labels (`v2-Opclass-bitwise-equality-0001` gave `2-Opclass-bitwise-equality`, now `2`).
+- When the rules change, `RULES` in `crates/pghacker-mail/src/series.rs` goes up, and the leading indexer queues the job once more as it starts (key `rules-<N>`). That run updates only the patches the new rules parse differently, which keep their old values until it reaches them. Rules 2 correct two kinds of version: dates after a version (`insert_on_dup.v3.2013_09_10` gave `3.2013`, now `3`) and slugs taken as labels (`v2-Opclass-bitwise-equality-0001` gave `2-Opclass-bitwise-equality`, now `2`).
 
-An image with older rules, such as `00080af` (rules 1), reads the same column: rolling back to one needs nothing, and it runs a `rules-<N>` job it finds queued with its own rules. After rolling forward, queue the jobs again, as `pgh_indexer`:
+An image with older rules, such as rules 1, reads the same column: rolling back to one needs nothing, and it runs a `rules-<N>` job it finds queued with its own rules. After rolling forward, queue the jobs again, as `pgh_indexer`:
 
 ```sql
 UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_after = now(),
@@ -222,7 +222,7 @@ UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_aft
 WHERE kind = 'patch_series';
 ```
 
-Images before `0019`, such as `aad595a` and `33616a4`, read the column as a number. While the old revision overlaps the new one during the upgrade, its `search_patches` and `get_commit` fail; its ingest still works. To roll back to one, as `pgh_indexer`, give it an empty number column, and stop the job, which it doesn't know:
+Images before `0019` read the column as a number. While the old revision overlaps the new one during the upgrade, its `search_patches` and `get_commit` fail; its ingest still works. To roll back to one, as `pgh_indexer`, give it an empty number column, and stop the job, which it doesn't know:
 
 ```sql
 ALTER TABLE pghacker.patches DROP COLUMN series_version;
@@ -244,10 +244,10 @@ WHERE kind = 'patch_series';
 ### Shipped release names
 
 An image with migration `0021_shipped_releases` saves a feature's release by the name it shipped as. Four releases were renamed during their development, and their threads use the development names: 6.6 for 7.0, 7.5 for 8.0, 8.5 for 9.0 and 9.7 for 10 ([reference](../docs/reference.md#extraction)).
-- The migration renames the features saved before: 76 in production, and more as extraction reaches older threads.
+- The migration renames the features saved before.
 - The graph sync then moves their `TARGETS` edges and drops the four development names' `Release` vertices, without a full sync.
 
-Images before `0021`, such as `aad595a` and `33616a4`, save releases as their threads name them. That includes the old revision while it overlaps the new one during the upgrade. Rolling back to one needs nothing. After the upgrade, and after rolling forward from one, rename the releases they saved, as `pgh_indexer`; it changes nothing when there are none:
+Images before `0021` save releases as their threads name them. That includes the old revision while it overlaps the new one during the upgrade. Rolling back to one needs nothing. After the upgrade, and after rolling forward from one, rename the releases they saved, as `pgh_indexer`; it changes nothing when there are none:
 
 ```sql
 UPDATE pghacker.features SET release = pghacker.shipped_release(release)
@@ -381,15 +381,15 @@ Check `tools/list` (First deployment, step 9) and run the evaluation.
 
 **Retired snapshots.** Migration `0016_retire_snapshots` drops the snapshots' tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and cancels unfinished `code_snapshot` jobs. It records the graph keys of their files and of the history's, so that the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history without a full sync: a File is `loaded` when the history has its path. Migration `0020_retire_version_sources` then deletes what their loader left: the 15 `postgres_version` rows in `sources` and its `code_snapshot` jobs, so `sources` lists mailing lists only.
 
-**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph ([the graph](../docs/reference.md#the-graph)): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. With production's 105,545 commits, that's about 730,000 elements, 18% more graph.
+**The graph.** An image with migration `0014_commit_graph` projects the installed history's commits into the graph ([the graph](../docs/reference.md#the-graph)): a `Commit` vertex for each of its commits, and their `MODIFIES`, `DISCUSSED_IN`, `BACKPATCH_OF` and `COMMITTED` edges. That's about seven elements a commit: several hundred thousand for PostgreSQL's history of over 100,000 commits.
 - The upgrade asks for one full graph sync, which also re-keys mail's commit citations by their full SHA. So does each install.
 - Full syncs, including the weekly reconcile, take longer accordingly: locally, the history's part took 20 s.
 - The history's writers record their changes for the incremental sync: an hourly sync's few commits cost a batch of milliseconds.
 
-### Rolling back to 33616a4
+### Rolling back past 0014
 
-`33616a4`, the previous production image, reads the history only and
-predates `0014`. Give it patches' number column first ([Patch series](#patch-series)).
+An image that has `0016` but predates `0014` reads the history only.
+Give it patches' number column first ([Patch series](#patch-series)).
 After rolling back to it, as `pgh_indexer`, cancel the jobs of kinds it
 doesn't know, which would fail and retry, drop the graph changes of labels it
 doesn't know, and ask for a full sync:
@@ -530,7 +530,7 @@ Without `--skill`, the agents, which don't declare the skills extension, must fi
   - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. The next bootstrap sets it on the role.
 - **Front Door's ranges** change now and then. Every apply reads the `AzureFrontDoor.Backend` tag again.
 - **Limits.**
-  - The app has 4 vCPU and 8 GiB of memory; each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
-  - HorizonDB has 32 vCores (`horizondb_vcores`).
-  - `gpt-6-luna` has the subscription's whole 1M tokens per minute in westus3.
+  - The app has `cpu` vCPU and `memory` (4 and 8 GiB by default); each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
+  - HorizonDB has `horizondb_vcores` vCores per replica (4 by default).
+  - Extraction's pace is bounded by `gpt-6-luna`'s capacity in `foundry_deployments`, within the subscription's quota for the region.
   - The ephemeral disk holds the commit history's clone (about 850 MB, once a history is installed) and no mbox files.
