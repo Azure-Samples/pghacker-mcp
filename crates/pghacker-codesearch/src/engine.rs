@@ -55,36 +55,95 @@ impl Budget {
         self.start.elapsed() >= self.limit
     }
 
+    /// Sets the statement timeout to the time left, for the call's
+    /// transaction; false, setting nothing, once the budget is spent.
     pub async fn apply(&self, client: &impl GenericClient) -> Result<bool> {
         if self.exceeded() {
             return Ok(false);
         }
-        set_timeout(client, self.remaining_ms()).await?;
+        client
+            .execute(
+                "SELECT set_config('statement_timeout', $1, true)",
+                &[&format!("{}ms", self.remaining_ms())],
+            )
+            .await
+            .context("cannot set statement_timeout")?;
         Ok(true)
     }
 }
 
-/// Sets the session's statement_timeout, returning the previous value.
-pub async fn set_timeout(client: &impl GenericClient, ms: u64) -> Result<String> {
-    let row = client
-        .query_one(
-            "SELECT current_setting('statement_timeout'), \
-                    set_config('statement_timeout', $1, false)",
-            &[&format!("{ms}ms")],
-        )
-        .await
-        .context("cannot set statement_timeout")?;
-    Ok(row.get(0))
+/// The savepoint a call goes back to after a statement timeout.
+const SAVEPOINT: &str = "pghacker_budget";
+
+/// A call's transaction, which holds its budget as a transaction-local
+/// statement_timeout: the setting ends with the transaction, so it can't
+/// outlive the call and reach the connection's next user. A cancelled call
+/// drops its scope, which queues a ROLLBACK on the connection, as a
+/// dropped `tokio_postgres::Transaction` does. Pass a client in autocommit
+/// mode.
+pub struct TimeoutScope<'a> {
+    client: &'a tokio_postgres::Client,
+    open: bool,
 }
 
-/// Restores statement_timeout; a failure (in an aborted transaction) is
-/// left for the caller's rollback to undo.
-pub async fn restore_timeout(client: &impl GenericClient, old: &str) {
+impl<'a> TimeoutScope<'a> {
+    /// Begins the call's transaction, with the whole budget as its
+    /// statement timeout.
+    pub async fn begin(client: &'a impl GenericClient, budget: &Budget) -> Result<Self> {
+        let scope = Self {
+            client: client.client(),
+            open: true,
+        };
+        client
+            .batch_execute(&format!(
+                "BEGIN; SET LOCAL statement_timeout = {}; SAVEPOINT {SAVEPOINT}",
+                budget.remaining_ms()
+            ))
+            .await
+            .context("cannot set statement_timeout")?;
+        Ok(scope)
+    }
+
+    /// Ends the call's transaction. It only read, so it is rolled back.
+    pub async fn end(mut self) {
+        if let Err(error) = self.client.batch_execute("ROLLBACK").await {
+            tracing::warn!(%error, "cannot end code search's transaction");
+        }
+        self.open = false;
+    }
+}
+
+impl Drop for TimeoutScope<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            // Sent without waiting, ahead of anything the next user sends.
+            self.client.__private_api_rollback(None);
+        }
+    }
+}
+
+/// After a statement timeout aborted the call's transaction, goes back to
+/// its start (and its first statement timeout) so later statements can run.
+pub async fn recover(client: &impl GenericClient) {
     if let Err(error) = client
-        .execute("SELECT set_config('statement_timeout', $1, false)", &[&old])
+        .batch_execute(&format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}"))
         .await
     {
-        tracing::warn!(%error, "cannot restore code search's statement_timeout");
+        tracing::debug!(%error, "cannot recover from a statement timeout");
+    }
+}
+
+/// Runs CPU-bound work on the fetched rows, such as exact pattern matching,
+/// on Tokio's blocking threads, so it can't stall the async workers.
+pub async fn off_runtime<T, F>(work: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => Ok(value),
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => Err(anyhow::anyhow!("code search work was cancelled: {error}")),
     }
 }
 
@@ -201,6 +260,7 @@ pub(crate) async fn stream_rows<T>(
         Ok(stream) => stream,
         Err(error) if is_timeout(&error) => {
             out.timed_out = true;
+            recover(client).await;
             return Ok(rows);
         }
         Err(error) => return Err(error).context("the line query failed"),
@@ -222,6 +282,7 @@ pub(crate) async fn stream_rows<T>(
             Ok(None) => break,
             Err(error) if is_timeout(&error) => {
                 out.timed_out = true;
+                recover(client).await;
                 break;
             }
             Err(error) => return Err(error).context("the line query failed"),

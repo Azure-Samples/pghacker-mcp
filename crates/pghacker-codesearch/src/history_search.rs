@@ -276,27 +276,32 @@ pub(crate) async fn search(
     };
     let (rows, found) = matching(client, h, require, reject, scope, range.as_ref(), budget).await?;
     // Lines alive somewhere in the range, by path and text.
-    let mut groups: HashMap<(String, String), Vec<Instance>> = HashMap::new();
-    for m in rows {
-        if !filter.allows("", &m.path) || !patterns.is_match(&m.line) {
-            continue;
+    let matchers = patterns.matchers();
+    let ordered = engine::off_runtime(move || {
+        let mut groups: HashMap<(String, String), Vec<Instance>> = HashMap::new();
+        for m in rows {
+            if !filter.allows("", &m.path) || !matchers.is_match(&m.line) {
+                continue;
+            }
+            groups.entry((m.path, m.line)).or_default().push(Instance {
+                lo: m.lo,
+                alive: m.alive,
+                weave: m.weave,
+                version: m.version,
+            });
         }
-        groups.entry((m.path, m.line)).or_default().push(Instance {
-            lo: m.lo,
-            alive: m.alive,
-            weave: m.weave,
-            version: m.version,
+        let mut ordered: Vec<((String, String), Vec<Instance>)> = groups.into_iter().collect();
+        for (_, instances) in &mut ordered {
+            instances.sort_by_key(|i| i.lo);
+        }
+        ordered.sort_by(|a, b| {
+            tree_cmp(&a.0.0, &b.0.0)
+                .then_with(|| a.1[0].lo.cmp(&b.1[0].lo))
+                .then_with(|| a.0.1.cmp(&b.0.1))
         });
-    }
-    let mut ordered: Vec<((String, String), Vec<Instance>)> = groups.into_iter().collect();
-    for (_, instances) in &mut ordered {
-        instances.sort_by_key(|i| i.lo);
-    }
-    ordered.sort_by(|a, b| {
-        tree_cmp(&a.0.0, &b.0.0)
-            .then_with(|| a.1[0].lo.cmp(&b.1[0].lo))
-            .then_with(|| a.0.1.cmp(&b.0.1))
-    });
+        ordered
+    })
+    .await?;
     let total_files = {
         let mut paths: Vec<&str> = ordered.iter().map(|g| g.0.0.as_str()).collect();
         paths.dedup();

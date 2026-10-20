@@ -14,7 +14,7 @@ use tokio_postgres::GenericClient;
 
 use crate::engine::{self, Budget, LineQuery, MAX_CANDIDATES};
 use crate::glob::RgFilter;
-use crate::pattern::{self, Compiled, Dialect, PatternSpec, Semantics};
+use crate::pattern::{self, Compiled, Dialect, LineMatcher, PatternSpec, Semantics};
 use crate::revision::{FileTable, Revision};
 
 /// Default and largest page sizes, and the most context lines.
@@ -288,10 +288,28 @@ pub(crate) struct Patterns<'a> {
 }
 
 impl Patterns<'_> {
+    /// The patterns' matchers, owned, to match lines off the async runtime.
+    pub fn matchers(&self) -> Matchers {
+        Matchers {
+            query: self.query.matcher.clone(),
+            also: self.also.iter().map(|a| a.matcher.clone()).collect(),
+            not: self.not.map(|n| n.matcher.clone()),
+        }
+    }
+}
+
+/// The matchers a line must pass: the query, every `also`, and not `not`.
+pub(crate) struct Matchers {
+    query: LineMatcher,
+    also: Vec<LineMatcher>,
+    not: Option<LineMatcher>,
+}
+
+impl Matchers {
     pub fn is_match(&self, line: &str) -> bool {
-        self.query.matcher.is_match(line)
-            && self.also.iter().all(|a| a.matcher.is_match(line))
-            && !self.not.is_some_and(|n| n.matcher.is_match(line))
+        self.query.is_match(line)
+            && self.also.iter().all(|a| a.is_match(line))
+            && !self.not.as_ref().is_some_and(|n| n.is_match(line))
     }
 }
 
@@ -338,40 +356,47 @@ pub(crate) async fn find_lines(
         scope_first,
     };
     let found = engine::candidates(client, &q, budget).await?;
-    let mut timed_out = found.timed_out;
-    let mut hits = Vec::new();
-    for row in found.rows {
-        if budget.exceeded() {
-            timed_out = true;
-            break;
-        }
-        if let Some(ks) = by_id.get(&row.file_id)
-            && patterns.is_match(&row.line)
-        {
-            for &k in ks {
-                hits.push((k, row.line_no, row.line.clone()));
+    let capped = found.capped;
+    let matchers = patterns.matchers();
+    let budget = *budget;
+    let (hits, timed_out) = engine::off_runtime(move || {
+        let mut timed_out = found.timed_out;
+        let mut hits = Vec::new();
+        for row in found.rows {
+            if budget.exceeded() {
+                timed_out = true;
+                break;
+            }
+            if let Some(ks) = by_id.get(&row.file_id)
+                && matchers.is_match(&row.line)
+            {
+                for &k in ks {
+                    hits.push((k, row.line_no, row.line.clone()));
+                }
             }
         }
-    }
-    hits.sort_unstable_by_key(|h| (h.0, h.1));
+        hits.sort_unstable_by_key(|h| (h.0, h.1));
+        (hits, timed_out)
+    })
+    .await?;
     Ok(Found {
         hits,
-        capped: found.capped,
+        capped,
         timed_out,
     })
 }
 
-/// Searches `revision`. Pass a client in autocommit mode: the budget is a
-/// statement timeout, and a timeout inside a caller's transaction aborts it.
+/// Searches `revision`. Pass a client in autocommit mode: the search runs
+/// in its own transaction, with the budget as its statement timeout.
 pub async fn search(
     client: &impl GenericClient,
     revision: &Revision,
     args: &SearchArgs,
 ) -> Result<SearchResult> {
     let budget = Budget::new(args.budget_ms);
-    let old = engine::set_timeout(client, budget.remaining_ms()).await?;
+    let scope = engine::TimeoutScope::begin(client, &budget).await?;
     let result = search_inner(client, revision, args, &budget).await;
-    engine::restore_timeout(client, &old).await;
+    scope.end().await;
     result
 }
 
@@ -701,7 +726,7 @@ async fn search_inner(
     };
     let found = find_lines(client, revision, &table, &files, whole, &patterns, budget).await?;
     let mut notes: BTreeMap<&'static str, ()> = BTreeMap::new();
-    let hits = found.hits;
+    let mut hits = found.hits;
     let total_lines = hits.len() as u64;
     let mut per_file: Vec<(usize, u64)> = Vec::new();
     for h in &hits {
@@ -715,16 +740,21 @@ async fn search_inner(
     // Coverage: the distinct query terms each file matches.
     let mut cover: HashMap<usize, u32> = HashMap::new();
     if !plan.terms.is_empty() {
-        let mut seen: HashMap<usize, HashSet<usize>> = HashMap::new();
-        for (file, _, line) in &hits {
-            let set = seen.entry(*file).or_default();
-            for (t, term) in plan.terms.iter().enumerate() {
-                if !set.contains(&t) && term.matcher.is_match(line) {
-                    set.insert(t);
+        let terms: Vec<LineMatcher> = plan.terms.iter().map(|t| t.matcher.clone()).collect();
+        (hits, cover) = engine::off_runtime(move || {
+            let mut seen: HashMap<usize, HashSet<usize>> = HashMap::new();
+            for (file, _, line) in &hits {
+                let set = seen.entry(*file).or_default();
+                for (t, term) in terms.iter().enumerate() {
+                    if !set.contains(&t) && term.is_match(line) {
+                        set.insert(t);
+                    }
                 }
             }
-        }
-        cover = seen.into_iter().map(|(f, s)| (f, s.len() as u32)).collect();
+            let cover = seen.into_iter().map(|(f, s)| (f, s.len() as u32)).collect();
+            (hits, cover)
+        })
+        .await?;
         per_file.sort_by_key(|(f, _)| (std::cmp::Reverse(cover.get(f).copied().unwrap_or(0)), *f));
     }
     let file_rank: HashMap<usize, usize> = per_file
@@ -813,20 +843,27 @@ async fn search_inner(
             }
         }
         (OutputMode::Lines, GroupBy::Match) => {
-            let mut parts: Vec<(usize, i32, String)> = Vec::new();
-            let mut ordered: Vec<&Hit> = hits.iter().collect();
-            if !plan.terms.is_empty() {
-                ordered.sort_by_key(|h| (file_rank[&h.0], h.1));
-            }
-            for (f, n, line) in ordered {
-                if budget.exceeded() {
-                    result.budget_exceeded = true;
-                    break;
+            let by_coverage = !plan.terms.is_empty();
+            let matcher = plan.query.matcher.clone();
+            let deadline = *budget;
+            let (parts, exceeded) = engine::off_runtime(move || {
+                let mut parts: Vec<(usize, i32, String)> = Vec::new();
+                let mut ordered: Vec<&Hit> = hits.iter().collect();
+                if by_coverage {
+                    ordered.sort_by_key(|h| (file_rank[&h.0], h.1));
                 }
-                for (s, e) in plan.query.matcher.matches(line) {
-                    parts.push((*f, *n, line[s..e].to_owned()));
+                for (f, n, line) in ordered {
+                    if deadline.exceeded() {
+                        return (parts, true);
+                    }
+                    for (s, e) in matcher.matches(line) {
+                        parts.push((*f, *n, line[s..e].to_owned()));
+                    }
                 }
-            }
+                (parts, false)
+            })
+            .await?;
+            result.budget_exceeded |= exceeded;
             result.total_matches = Some(parts.len() as u64);
             result.cut = offset + limit < parts.len();
             for (f, n, text) in parts.into_iter().skip(offset).take(limit) {
@@ -850,20 +887,28 @@ async fn search_inner(
             }
         }
         (OutputMode::Counts, GroupBy::Match) => {
-            let mut counts: HashMap<String, u64> = HashMap::new();
-            let mut total = 0;
-            for (_, _, line) in &hits {
-                if budget.exceeded() {
-                    result.budget_exceeded = true;
-                    break;
+            let matcher = plan.query.matcher.clone();
+            let deadline = *budget;
+            let (counts, total, exceeded) = engine::off_runtime(move || {
+                let mut counts: HashMap<String, u64> = HashMap::new();
+                let mut total = 0;
+                let mut exceeded = false;
+                for (_, _, line) in &hits {
+                    if deadline.exceeded() {
+                        exceeded = true;
+                        break;
+                    }
+                    for (s, e) in matcher.matches(line) {
+                        *counts.entry(line[s..e].to_owned()).or_default() += 1;
+                        total += 1;
+                    }
                 }
-                for (s, e) in plan.query.matcher.matches(line) {
-                    *counts.entry(line[s..e].to_owned()).or_default() += 1;
-                    total += 1;
-                }
-            }
-            let mut counts: Vec<(String, u64)> = counts.into_iter().collect();
-            counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let mut counts: Vec<(String, u64)> = counts.into_iter().collect();
+                counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                (counts, total, exceeded)
+            })
+            .await?;
+            result.budget_exceeded |= exceeded;
             result.total_matches = Some(total);
             result.cut = offset + limit < counts.len();
             for (text, count) in counts.into_iter().skip(offset).take(limit) {
@@ -1126,6 +1171,7 @@ async fn similar_names(
             Ok(rows) => rows,
             Err(error) if engine::is_timeout(&error) => {
                 timed_out = true;
+                engine::recover(client).await;
                 break;
             }
             Err(error) => return Err(error).context("cannot find alternative name spellings"),
@@ -1163,6 +1209,7 @@ async fn similar_names(
             Ok(rows) => rows,
             Err(error) if engine::is_timeout(&error) => {
                 timed_out = true;
+                engine::recover(client).await;
                 break;
             }
             Err(error) => return Err(error).context("cannot find similar names"),

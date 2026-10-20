@@ -162,9 +162,9 @@ pub async fn search_patches(
     args: &SearchPatchesArgs,
 ) -> Result<SearchPatchesResult> {
     let budget = Budget::new(args.budget_ms);
-    let old = crate::engine::set_timeout(client, budget.remaining_ms()).await?;
+    let scope = crate::engine::TimeoutScope::begin(client, &budget).await?;
     let result = search_patches_inner(client, history, args, &budget).await;
-    crate::engine::restore_timeout(client, &old).await;
+    scope.end().await;
     result
 }
 

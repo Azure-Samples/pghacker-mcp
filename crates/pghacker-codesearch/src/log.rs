@@ -199,9 +199,9 @@ pub async fn search_commits(
     args: &SearchCommitsArgs,
 ) -> Result<SearchCommitsResult> {
     let budget = Budget::new(args.budget_ms);
-    let old = crate::engine::set_timeout(client, budget.remaining_ms()).await?;
+    let scope = crate::engine::TimeoutScope::begin(client, &budget).await?;
     let result = search_commits_inner(client, schema, repo, args, &budget).await;
-    crate::engine::restore_timeout(client, &old).await;
+    scope.end().await;
     result
 }
 

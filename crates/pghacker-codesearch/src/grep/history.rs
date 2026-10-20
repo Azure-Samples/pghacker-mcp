@@ -115,10 +115,13 @@ pub(crate) async fn grep(
         if found.capped || found.timed_out {
             return Ok(None);
         }
-        let rows: Vec<_> = rows
-            .into_iter()
-            .filter(|m| compiled.matcher.is_match(&m.line))
-            .collect();
+        let matcher = compiled.matcher.clone();
+        let rows: Vec<_> = crate::engine::off_runtime(move || {
+            rows.into_iter()
+                .filter(|m| matcher.is_match(&m.line))
+                .collect()
+        })
+        .await?;
         // Each line at the first commit in the range that has it.
         let firsts: Vec<i64> = rows
             .iter()
@@ -194,18 +197,24 @@ pub(crate) async fn grep(
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
-    let mut printer = Printer::new(opts, &compiled.matcher, opts.with_filename != Some(false));
-    for f in &files {
-        let selected: Vec<i32> = f.lines.iter().map(|l| l.0).collect();
-        let by_line: HashMap<i32, &str> = f.lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
-        let text = |n: i32| by_line.get(&n).map(|t| (*t).to_owned());
-        let sha = shas.get(&f.addr).map_or("?", String::as_str);
-        let name = format!("/commit/{sha}/{}", f.path);
-        let found = printer.file(&name, &selected, None, f.last, &text);
-        if opts.mode == Mode::Quiet && found > 0 {
-            break;
+    let opts = opts.clone();
+    let matcher = compiled.matcher.clone();
+    crate::engine::off_runtime(move || {
+        let mut printer = Printer::new(&opts, &matcher, opts.with_filename != Some(false));
+        for f in &files {
+            let selected: Vec<i32> = f.lines.iter().map(|l| l.0).collect();
+            let by_line: HashMap<i32, &str> =
+                f.lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
+            let text = |n: i32| by_line.get(&n).map(|t| (*t).to_owned());
+            let sha = shas.get(&f.addr).map_or("?", String::as_str);
+            let name = format!("/commit/{sha}/{}", f.path);
+            let found = printer.file(&name, &selected, None, f.last, &text);
+            if opts.mode == Mode::Quiet && found > 0 {
+                break;
+            }
         }
-    }
-    let status = i32::from(printer.selected == 0);
-    Ok(Some((printer.out, Vec::new(), status)))
+        let status = i32::from(printer.selected == 0);
+        Some((printer.out, Vec::new(), status))
+    })
+    .await
 }

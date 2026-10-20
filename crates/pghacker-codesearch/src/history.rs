@@ -475,6 +475,7 @@ pub async fn candidates(
                 .is_some_and(is_timeout) =>
         {
             out.timed_out = true;
+            crate::engine::recover(client).await;
             return Ok(out);
         }
         Err(error) => return Err(error.context("cannot number the lines")),

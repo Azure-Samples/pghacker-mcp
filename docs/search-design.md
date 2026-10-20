@@ -30,10 +30,13 @@ Text that isn't UTF-8 is binary to the tools: searches at a commit skip it, and 
 ## Indexes and queries
 
 `search`, `grep`, `search_patches` and `search_commits` take `budget_ms`: 10
-seconds by default, at most 15. Each sets the statement timeout for its
-queries and restores the previous setting before returning, errors included.
-The budget is checked between steps, so the step in progress can run past
-it. `query` keeps the reader's 10-second timeout, with 5 seconds to get a
+seconds by default, at most 15. Each runs its queries in one read
+transaction whose statement timeout is the budget (`SET LOCAL`), so the
+setting ends with the call, errors and cancelled calls included; after a
+timeout the call rolls back to a savepoint and reads on. The budget is
+checked between steps, so the step in progress can run past it. Matching
+the candidate lines, and printing grep's output, runs on Tokio's blocking
+threads, so a long search doesn't hold up other calls. `query` keeps the reader's 10-second timeout, with 5 seconds to get a
 connection and 20 for the whole call. The reference lists the [other
 limits](reference.md#limits).
 

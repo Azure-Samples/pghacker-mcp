@@ -493,7 +493,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
         ))
         .await?;
     let budget = pghacker_codesearch::engine::Budget::new(Some(500));
-    let old = pghacker_codesearch::engine::set_timeout(&reader, budget.remaining_ms()).await?;
+    let scope = pghacker_codesearch::engine::TimeoutScope::begin(&reader, &budget).await?;
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
     let q = pghacker_codesearch::engine::LineQuery {
         history: &revision.history,
@@ -507,7 +507,7 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     let candidates = pghacker_codesearch::engine::candidates(&reader, &q, &budget).await?;
     assert!(candidates.timed_out);
     assert!(budget.elapsed_ms() < 750, "{}ms", budget.elapsed_ms());
-    pghacker_codesearch::engine::restore_timeout(&reader, &old).await;
+    scope.end().await;
     let mut args = SearchArgs::new("makeNode");
     args.budget_ms = Some(80);
     let result = search(&reader, &revision, &args).await?;
@@ -560,5 +560,97 @@ async fn timeouts_restore_settings_and_do_not_invert_unknown_results() -> Result
     let one: i32 = reader.query_one("SELECT 1", &[]).await?.get(0);
     assert_eq!(one, 1);
     blocker.batch_execute("ROLLBACK").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_history_search_reads_on_after_a_timeout() -> Result<()> {
+    let db = TestDb::create().await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
+    let reader = db.reader().await?;
+    let blocker = db.admin().await?;
+    blocker
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {}.code_line_instances IN ACCESS EXCLUSIVE MODE",
+            revision.history.schema
+        ))
+        .await?;
+    let args = SearchArgs {
+        query: "makeNode".into(),
+        history: Some("all".into()),
+        budget_ms: Some(300),
+        ..SearchArgs::default()
+    };
+    // The timeout aborts the call's transaction; the statements after it
+    // still run.
+    let result = search(&reader, &revision, &args).await?;
+    assert!(result.budget_exceeded && !result.complete);
+    blocker.batch_execute("ROLLBACK").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_cancelled_call_leaves_its_pooled_connection_as_it_was() -> Result<()> {
+    use pghacker_codesearch::grep::{Limits, run};
+    use pghacker_codesearch::revision::FileTable;
+
+    let db = TestDb::create().await?;
+    let revision = common::load(&db, "postgres", "19", &common::files()).await?;
+    let pool = db.reader_pool(1)?;
+    {
+        let client = pool.get().await?;
+        FileTable::load(&**client, &revision).await?;
+        client
+            .batch_execute("SET statement_timeout = '1739ms'")
+            .await?;
+    }
+    let blocker = db.admin().await?;
+    blocker
+        .batch_execute(&format!(
+            "BEGIN; LOCK TABLE {}.code_line_instances IN ACCESS EXCLUSIVE MODE",
+            revision.history.schema
+        ))
+        .await?;
+    let wait = std::time::Duration::from_millis(300);
+    for call in ["search", "grep"] {
+        let client = pool.get().await?;
+        let cancelled = match call {
+            "search" => {
+                let mut args = SearchArgs::new("makeNode");
+                args.budget_ms = Some(5_000);
+                tokio::time::timeout(wait, search(&**client, &revision, &args))
+                    .await
+                    .is_err()
+            }
+            _ => {
+                let limits = Limits {
+                    budget_ms: 5_000,
+                    ..Limits::default()
+                };
+                tokio::time::timeout(
+                    wait,
+                    run(&**client, &revision, "grep -r makeNode src", limits),
+                )
+                .await
+                .is_err()
+            }
+        };
+        assert!(cancelled, "{call} finished before the lock was released");
+    }
+    blocker.batch_execute("ROLLBACK").await?;
+    let client = pool.get().await?;
+    let timeout: String = client
+        .query_one("SHOW statement_timeout", &[])
+        .await?
+        .get(0);
+    assert_eq!(timeout, "1739ms");
+    // Not left in a transaction block: a savepoint has nothing to mark.
+    let error = client.batch_execute("SAVEPOINT probe").await.unwrap_err();
+    assert_eq!(
+        error.code(),
+        Some(&tokio_postgres::error::SqlState::NO_ACTIVE_SQL_TRANSACTION)
+    );
+    let result = search(&**client, &revision, &SearchArgs::new("makeNode")).await?;
+    assert!(result.complete && result.total_lines > 0);
     Ok(())
 }

@@ -21,13 +21,13 @@ regex-syntax.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 pghacker-code.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 
 # A performance-tuning program, not an API example: it profiles code searches
 # on a synthetic commit history. Cargo builds it as an example.

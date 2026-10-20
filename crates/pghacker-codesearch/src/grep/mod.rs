@@ -20,7 +20,7 @@ use tokio_postgres::GenericClient;
 
 use crate::engine::{self, Budget, LineQuery, MAX_CANDIDATES};
 use crate::glob::fnmatch;
-use crate::pattern::{self, Compiled, Dialect, PatternSpec, Semantics};
+use crate::pattern::{self, Compiled, Dialect, LineMatcher, PatternSpec, Semantics};
 use crate::revision::{FileTable, Revision};
 use format::Printer;
 use options::{Directories, Mode, Options};
@@ -116,9 +116,9 @@ pub async fn run(
     limits: Limits,
 ) -> Result<Output> {
     let budget = Budget::new(Some(limits.budget_ms));
-    let old = engine::set_timeout(client, budget.remaining_ms()).await?;
+    let scope = engine::TimeoutScope::begin(client, &budget).await?;
     let result = run_inner(client, revision, command, limits, &budget).await;
-    engine::restore_timeout(client, &old).await;
+    scope.end().await;
     result
 }
 
@@ -131,7 +131,7 @@ pub async fn select(
     budget_ms: u32,
 ) -> Result<(Vec<Searched>, bool)> {
     let budget = Budget::new(Some(budget_ms));
-    let old = engine::set_timeout(client, budget.remaining_ms()).await?;
+    let scope = engine::TimeoutScope::begin(client, &budget).await?;
     let result = async {
         let script = shell::parse(command).map_err(|e| anyhow!(e))?;
         let table = FileTable::view(client, revision, &mount_words(&script)).await?;
@@ -164,7 +164,7 @@ pub async fn select(
         Ok((searched, selection.incomplete || budget.exceeded()))
     }
     .await;
-    engine::restore_timeout(client, &old).await;
+    scope.end().await;
     result
 }
 
@@ -598,7 +598,37 @@ async fn selection(
     };
     let found = engine::candidates(client, &q, budget).await?;
     sel.incomplete = found.capped || found.timed_out;
-    for row in found.rows {
+    let matcher = compiled.matcher.clone();
+    let invert = opts.invert;
+    let line_counts: Vec<i32> = files.iter().map(|&k| table.files[k].line_count).collect();
+    let budget = *budget;
+    engine::off_runtime(move || {
+        match_rows(
+            sel,
+            found.rows,
+            &by_id,
+            &matcher,
+            (invert, need),
+            (&files, &line_counts),
+            &budget,
+        )
+    })
+    .await
+}
+
+/// Matches the candidate rows exactly and fills in the selection; CPU-bound,
+/// so it runs off the async runtime.
+fn match_rows(
+    mut sel: Selection,
+    rows: Vec<engine::Row>,
+    by_id: &HashMap<i32, Vec<usize>>,
+    matcher: &LineMatcher,
+    (invert, need): (bool, Need),
+    (files, line_counts): (&[usize], &[i32]),
+    budget: &Budget,
+) -> Selection {
+    let need_lines = need == Need::Texts;
+    for row in rows {
         if budget.exceeded() {
             sel.incomplete = true;
             break;
@@ -606,16 +636,16 @@ async fn selection(
         let Some(ks) = by_id.get(&row.file_id) else {
             continue;
         };
-        let is_match = compiled.matcher.is_match(&row.line);
+        let is_match = matcher.is_match(&row.line);
         for &k in ks {
-            if opts.invert && !need_lines {
+            if invert && !need_lines {
                 if is_match {
                     *sel.matched.entry(k).or_default() += 1;
                     if need == Need::Numbers {
                         sel.matched_lines.entry(k).or_default().push(row.line_no);
                     }
                 }
-            } else if is_match != opts.invert {
+            } else if is_match != invert {
                 sel.lines
                     .entry(k)
                     .or_default()
@@ -626,18 +656,18 @@ async fn selection(
     for lines in sel.lines.values_mut() {
         lines.sort_unstable_by_key(|(n, _)| *n);
     }
-    sel.invert_counts = opts.invert && !need_lines;
-    if opts.invert && need == Need::Numbers {
+    sel.invert_counts = invert && !need_lines;
+    if invert && need == Need::Numbers {
         if sel.incomplete {
-            return Ok(sel);
+            return sel;
         }
         // The selected lines are the complement of the matching ones.
         sel.invert_counts = false;
-        for &k in &files {
+        for (&k, &line_count) in files.iter().zip(line_counts) {
             let matching = sel.matched_lines.entry(k).or_default();
             matching.sort_unstable();
             let mut lines = Vec::new();
-            for n in 1..=table.files[k].line_count {
+            for n in 1..=line_count {
                 if budget.exceeded() {
                     sel.incomplete = true;
                     break;
@@ -654,7 +684,7 @@ async fn selection(
             }
         }
     }
-    Ok(sel)
+    sel
 }
 
 async fn run_inner(
@@ -705,7 +735,7 @@ async fn run_inner(
         } else {
             Need::Counts
         };
-        let prepared = if hopeless {
+        let mut prepared = if hopeless {
             Prepared {
                 items: Vec::new(),
                 stderr: Vec::new(),
@@ -761,34 +791,20 @@ async fn run_inner(
             }
         }
 
-        let mut printer = Printer::new(&opts, &compiled.matcher, prepared.with_filename);
-        for item in &prepared.items {
-            let k = item.file;
-            let f = &table.files[k];
-            let empty = Vec::new();
-            let lines = sel.lines.get(&k).unwrap_or(&empty);
-            let selected: Vec<i32> = lines.iter().map(|(n, _)| *n).collect();
-            let count = sel.invert_counts.then(|| {
-                (f.line_count as u64).saturating_sub(sel.matched.get(&k).copied().unwrap_or(0))
-            });
-            let by_line: HashMap<i32, &str> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
-            let text = |n: i32| {
-                by_line
-                    .get(&n)
-                    .map(|t| (*t).to_owned())
-                    .or_else(|| extra.get(&(k, n)).cloned())
-            };
-            let found = printer.file(&item.display, &selected, count, f.line_count, &text);
-            if opts.mode == Mode::Quiet && found > 0 {
-                break;
-            }
-            if budget.exceeded() {
-                return Ok(incomplete_output());
-            }
-        }
-        let selected_any = printer.selected > 0;
-        let listed = printer.listed;
-        let stdout = printer.out;
+        let job = PrintJob {
+            opts: opts.clone(),
+            matcher: compiled.matcher.clone(),
+            with_filename: prepared.with_filename,
+            items: std::mem::take(&mut prepared.items),
+            table: table.clone(),
+            sel,
+            extra,
+        };
+        let deadline = *budget;
+        let printed = engine::off_runtime(move || job.print(&deadline)).await?;
+        let Some((stdout, selected_any, listed)) = printed else {
+            return Ok(incomplete_output());
+        };
         let mut status = if opts.mode == Mode::FilesWithoutMatch {
             if listed > 0 { 0 } else { 1 }
         } else if selected_any {
@@ -812,13 +828,24 @@ async fn run_inner(
     } else if first.stderr_null() {
         stderr.clear();
     }
-    for words in later {
-        if budget.exceeded() {
+    if !later.is_empty() {
+        let deadline = *budget;
+        let staged = engine::off_runtime(move || -> Result<Option<(Vec<u8>, i32)>> {
+            for words in later {
+                if deadline.exceeded() {
+                    return Ok(None);
+                }
+                let (out, code) = run_stage(&words, &stdout)?;
+                stdout = out;
+                status = code;
+            }
+            Ok(Some((stdout, status)))
+        })
+        .await??;
+        let Some(staged) = staged else {
             return Ok(incomplete_output());
-        }
-        let (out, code) = run_stage(&words, &stdout)?;
-        stdout = out;
-        status = code;
+        };
+        (stdout, status) = staged;
     }
     if budget.exceeded() {
         return Ok(incomplete_output());
@@ -861,6 +888,53 @@ async fn run_inner(
         status,
         incomplete: false,
     })
+}
+
+/// What grep prints, ready to print off the async runtime: it is
+/// CPU-bound.
+struct PrintJob {
+    opts: Options,
+    matcher: LineMatcher,
+    with_filename: bool,
+    items: Vec<Item>,
+    table: std::sync::Arc<FileTable>,
+    sel: Selection,
+    extra: HashMap<(usize, i32), String>,
+}
+
+impl PrintJob {
+    /// Prints the selected lines of each file, in order: standard output,
+    /// whether any line was selected, and the files listed; None past the
+    /// budget.
+    fn print(self, budget: &Budget) -> Option<(Vec<u8>, bool, u64)> {
+        let (opts, sel, extra) = (&self.opts, &self.sel, &self.extra);
+        let mut printer = Printer::new(opts, &self.matcher, self.with_filename);
+        for item in &self.items {
+            let k = item.file;
+            let f = &self.table.files[k];
+            let empty = Vec::new();
+            let lines = sel.lines.get(&k).unwrap_or(&empty);
+            let selected: Vec<i32> = lines.iter().map(|(n, _)| *n).collect();
+            let count = sel.invert_counts.then(|| {
+                (f.line_count as u64).saturating_sub(sel.matched.get(&k).copied().unwrap_or(0))
+            });
+            let by_line: HashMap<i32, &str> = lines.iter().map(|(n, t)| (*n, t.as_str())).collect();
+            let text = |n: i32| {
+                by_line
+                    .get(&n)
+                    .map(|t| (*t).to_owned())
+                    .or_else(|| extra.get(&(k, n)).cloned())
+            };
+            let found = printer.file(&item.display, &selected, count, f.line_count, &text);
+            if opts.mode == Mode::Quiet && found > 0 {
+                break;
+            }
+            if budget.exceeded() {
+                return None;
+            }
+        }
+        Some((printer.out, printer.selected > 0, printer.listed))
+    }
 }
 
 fn incomplete_output() -> Output {
