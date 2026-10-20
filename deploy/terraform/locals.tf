@@ -117,6 +117,8 @@ locals {
       PGHACKER_FRONT_DOOR_ID        = azurerm_cdn_frontdoor_profile.this.resource_guid
       PGHACKER_RATE_PER_MINUTE      = tostring(var.mcp_rate_per_minute)
       PGHACKER_RATE_BURST           = tostring(var.mcp_rate_burst)
+      PGHACKER_MCP_POOL             = tostring(var.mcp_pool_size)
+      PGHACKER_QUERY_POOL           = tostring(var.mcp_query_pool_size)
       PGHACKER_CRAWL_START_SESSIONS = tostring(var.crawl_start_sessions)
       PGHACKER_CRAWL_MAX_SESSIONS   = tostring(var.crawl_max_sessions)
       PGHACKER_GITHUB_ORG           = var.github_org

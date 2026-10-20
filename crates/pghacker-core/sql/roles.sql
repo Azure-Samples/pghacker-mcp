@@ -46,4 +46,8 @@ ALTER ROLE pgh_reader SET search_path = pghacker, ag_catalog, public;
 ALTER ROLE pgh_reader SET default_transaction_read_only = on;
 ALTER ROLE pgh_reader SET statement_timeout = '10s';
 ALTER ROLE pgh_reader SET idle_in_transaction_session_timeout = '30s';
-ALTER ROLE pgh_reader CONNECTION LIMIT 64;
+-- Its pools (PGHACKER_MCP_POOL and PGHACKER_QUERY_POOL, across replicas)
+-- decide how many connections it uses. The limit is a backstop, about twice
+-- the largest pools a deployment allows (128 in all), so that a fault on the
+-- public side can't take the connections the indexer and PilotSwarm need.
+ALTER ROLE pgh_reader CONNECTION LIMIT 160;

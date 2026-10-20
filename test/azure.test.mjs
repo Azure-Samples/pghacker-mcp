@@ -104,6 +104,13 @@ test("agents use the internal pghacker-mcp listener; the public one is rate-limi
   assert.equal(environments.mcp.PGHACKER_CLIENT_IP_HEADER, "x-azure-socketip");
   assert.equal(environments.mcp.PGHACKER_FRONT_DOOR_ID, ENV.PGHACKER_FRONT_DOOR_ID);
   assert.equal(environments.mcp.PGHACKER_RATE_PER_MINUTE, "60");
+  // The pools' sizes come from Terraform; without them, pghacker-mcp's defaults.
+  assert.equal(environments.mcp.PGHACKER_MCP_POOL, "16");
+  assert.equal(environments.mcp.PGHACKER_QUERY_POOL, "8");
+  const sized = processEnvironments(readAzureConfig({ ...ENV, PGHACKER_MCP_POOL: "64", PGHACKER_QUERY_POOL: "16" }));
+  assert.equal(sized.mcp.PGHACKER_MCP_POOL, "64");
+  assert.equal(sized.mcp.PGHACKER_QUERY_POOL, "16");
+  assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_MCP_POOL: "500" }));
   assert.deepEqual(environments.mcp.PGHACKER_ALLOWED_HOSTS.split(","), ENV.PGHACKER_PUBLIC_HOSTS.split(","));
   assert.equal(environments.indexer.PGHACKER_SOURCES, "open");
   assert.equal(environments.indexer.PGHACKER_EXTRACTION, "automatic");

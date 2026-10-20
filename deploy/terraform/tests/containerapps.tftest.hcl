@@ -203,6 +203,8 @@ run "app_and_restore_job" {
       PGHACKER_FRONT_DOOR_ID          = "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11"
       PGHACKER_RATE_PER_MINUTE        = "60"
       PGHACKER_RATE_BURST             = "30"
+      PGHACKER_MCP_POOL               = "16"
+      PGHACKER_QUERY_POOL             = "8"
       PGHACKER_CRAWL_START_SESSIONS   = "8"
       PGHACKER_CRAWL_MAX_SESSIONS     = "16"
       PGHACKER_GITHUB_ORG             = "contoso"
@@ -424,6 +426,31 @@ run "privacy_url_reaches_only_the_app" {
       ]))
     )
     error_message = "privacy_url must reach the app, and only the app, as PGHACKER_PRIVACY_URL, for the home page's footer."
+  }
+}
+
+run "mcp_pools_stay_under_the_reader_limit" {
+  command = plan
+
+  variables {
+    mcp_pool_size       = 120
+    mcp_query_pool_size = 16
+  }
+
+  expect_failures = [var.mcp_pool_size]
+}
+
+run "mcp_pools_sized_to_the_database_plan" {
+  command = plan
+
+  variables {
+    mcp_pool_size       = 64
+    mcp_query_pool_size = 16
+  }
+
+  assert {
+    condition     = local.app_env.PGHACKER_MCP_POOL == "64" && local.app_env.PGHACKER_QUERY_POOL == "16"
+    error_message = "The app should get the pool sizes."
   }
 }
 

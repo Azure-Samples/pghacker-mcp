@@ -120,6 +120,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `job_cpu`, `job_memory` | `2`, `"4Gi"` | Jobs' containers; memory is twice cpu |
 | `restrict_origin_to_front_door` | `true` | Admit only `AzureFrontDoor.Backend`'s IPv4 ranges to the app's own host name |
 | `mcp_rate_per_minute`, `mcp_rate_burst` | `60`, `30` | Per-client limits of the public MCP endpoint (`PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST`) |
+| `mcp_pool_size`, `mcp_query_pool_size` | `16`, `8` | pghacker-mcp's `pgh_reader` connections: every tool but `query`, and `query` (`PGHACKER_MCP_POOL`, `PGHACKER_QUERY_POOL`). Size them to the database: about twice its vCores in all, a quarter of them for `query`, such as `64` and `16` for 32 vCores. At most 128 together, under `pgh_reader`'s connection limit of 160 |
 | `crawl_start_sessions`, `crawl_max_sessions` | `8`, `16` | Extraction sessions at start and at most, up to 64 (`PGHACKER_CRAWL_START_SESSIONS`, `PGHACKER_CRAWL_MAX_SESSIONS`) |
 | `github_org`, `github_team` | required | The GitHub organization and the slug of its team whose members may sign in to the portal (`PGHACKER_GITHUB_ORG`, `PGHACKER_GITHUB_TEAM`). There is no default: their members get agents that run shell commands on your subscription. Empty values and the placeholders `example-org` and `example-team` are refused |
 | `github_users` | `[]` | More GitHub logins allowed in (`PGHACKER_GITHUB_USERS`, omitted when empty) |

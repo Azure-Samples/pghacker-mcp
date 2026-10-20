@@ -257,6 +257,11 @@ export function readAzureConfig(env = process.env, { serve = true, root = APP_RO
       perMinute: integer(env, "PGHACKER_RATE_PER_MINUTE", 60),
       burst: integer(env, "PGHACKER_RATE_BURST", 30),
     },
+    // pgh_reader connections: every tool but query, and query.
+    pools: {
+      mcp: integer(env, "PGHACKER_MCP_POOL", 16, { max: 128 }),
+      query: integer(env, "PGHACKER_QUERY_POOL", 8, { max: 128 }),
+    },
     crawl: {
       enabled: value(env, "PGHACKER_CRAWL") !== "off",
       start,
@@ -478,6 +483,8 @@ export function processEnvironments(config) {
       PGHACKER_CLIENT_IP_HEADER: "x-azure-socketip",
       PGHACKER_RATE_PER_MINUTE: String(config.rate.perMinute),
       PGHACKER_RATE_BURST: String(config.rate.burst),
+      PGHACKER_MCP_POOL: String(config.pools.mcp),
+      PGHACKER_QUERY_POOL: String(config.pools.query),
       ...(config.public.frontDoorId ? { PGHACKER_FRONT_DOOR_ID: config.public.frontDoorId } : {}),
       ...usage,
       ...(config.usage ? { PGHACKER_USAGE_DETAILS: String(config.usage.details) } : {}),

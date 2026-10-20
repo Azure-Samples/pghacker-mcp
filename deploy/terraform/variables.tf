@@ -494,6 +494,28 @@ variable "mcp_rate_burst" {
   }
 }
 
+variable "mcp_pool_size" {
+  description = "pgh_reader connections for every pghacker-mcp tool but query (PGHACKER_MCP_POOL). Size both pools to the database's capacity: about twice its vCores in all."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.mcp_pool_size >= 1 && floor(var.mcp_pool_size) == var.mcp_pool_size && var.mcp_pool_size + var.mcp_query_pool_size <= 128
+    error_message = "mcp_pool_size must be a whole number of at least 1, and with mcp_query_pool_size at most 128: pgh_reader's connection limit is 160."
+  }
+}
+
+variable "mcp_query_pool_size" {
+  description = "pgh_reader connections for pghacker-mcp's query tool, which runs users' SQL for up to 10 seconds each (PGHACKER_QUERY_POOL)."
+  type        = number
+  default     = 8
+
+  validation {
+    condition     = var.mcp_query_pool_size >= 1 && floor(var.mcp_query_pool_size) == var.mcp_query_pool_size
+    error_message = "mcp_query_pool_size must be a whole number of at least 1."
+  }
+}
+
 variable "crawl_start_sessions" {
   description = "Extraction sessions the crawler starts with; it adds more while Foundry doesn't throttle it (PGHACKER_CRAWL_START_SESSIONS)."
   type        = number
