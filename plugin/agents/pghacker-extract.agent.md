@@ -73,7 +73,9 @@ bug fix: include a fix only when the thread treats it as a design question.
   CommitFest), `withdrawn` (the author withdrew it), `unknown`. A committer
   saying the feature's patches were committed or pushed makes it `committed`,
   even if follow-up fixes continue. When reusing a feature, give the status
-  this thread shows; the indexer keeps the most advanced status it has seen.
+  this thread shows; the indexer keeps the status of the feature's most
+  recent thread, except that `proposed` or `in_progress` never replaces
+  `committed` and `unknown` never replaces any.
 - `release`: the one major version the feature shipped in, or targets while
   it isn't committed: two parts before 10 (`9.6`, `8.4`), one from 10 on
   (`17`). A committed feature shipped in the release whose development it was

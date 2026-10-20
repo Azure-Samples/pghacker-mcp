@@ -186,7 +186,9 @@ pub struct FeatureIn {
     pub name: String,
     pub description: String,
     /// What the thread shows by its last messages (see status_signals). A
-    /// reused feature keeps the most advanced status any of its threads showed.
+    /// feature's status follows its threads' statuses by date: the newest
+    /// wins, except that unknown is no evidence, and proposed or in_progress
+    /// never replaces committed.
     pub status: FeatureStatus,
     /// The one major version it shipped in, or targets until it's committed: "9.6" before 10 (two parts), "19" from 10 on. A committed feature shipped in the release whose development it was committed in, even if it was back-patched: never give a branch it was back-ported to, a list or a range of versions, or a minor release (17.2, 8.0.1), which aren't saved. Leave it out when the thread doesn't settle it. It replaces the feature's release, by the name it shipped as: 6.6 as 7.0, 7.5 as 8.0, 8.5 as 9.0, 9.7 as 10.
     #[serde(default)]
@@ -939,8 +941,195 @@ struct Draft {
     candidates: Vec<Candidate>,
 }
 
-/// Validates and applies one thread's extracts, all or nothing. Errors list
-/// every problem so the caller can fix them and resubmit.
+/// A status's rank among evidence of the same date: the more advanced last.
+fn status_rank(status: &str) -> i32 {
+    match status {
+        "proposed" => 1,
+        "in_progress" => 2,
+        "returned" | "withdrawn" => 3,
+        "rejected" | "committed" => 4,
+        "reverted" => 5,
+        _ => 0,
+    }
+}
+
+/// Evidence for a feature's status: what a thread showed, and when the
+/// thread's latest message was written then.
+pub(crate) type StatusEvidence = (String, Option<DateTime<Utc>>);
+
+/// A feature's status by its evidence, folded in the order it was written
+/// (undated first; on the same date, the less advanced first): each replaces
+/// the status so far, except that `unknown` is no evidence, and `proposed` or
+/// `in_progress` never replaces `committed` (a thread proposing more work on a
+/// committed feature doesn't un-commit it). The order evidence arrives in
+/// doesn't matter. None without evidence.
+pub(crate) fn fold_status(mut evidence: Vec<StatusEvidence>) -> Option<StatusEvidence> {
+    evidence.retain(|(status, _)| status != "unknown");
+    evidence.sort_by(|a, b| (a.1, status_rank(&a.0), &a.0).cmp(&(b.1, status_rank(&b.0), &b.0)));
+    let mut out: Option<StatusEvidence> = None;
+    for item in evidence {
+        let stays = out.as_ref().is_some_and(|(status, _)| {
+            status == "committed" && matches!(item.0.as_str(), "proposed" | "in_progress")
+        });
+        if !stays {
+            out = Some(item);
+        }
+    }
+    out
+}
+
+/// The features whose status evidence counts for feature $1: itself and
+/// those merged into it, at any depth.
+const STATUS_FAMILY: &str = "WITH RECURSIVE family (id, depth) AS (
+        SELECT $1::int8, 0
+        UNION ALL
+        SELECT f.id, family.depth + 1 FROM features f JOIN family ON f.merged_into = family.id
+        WHERE family.depth < 32
+    )";
+
+/// Gives feature `feature`, if its family has no status evidence but it has a
+/// status (set before evidence was recorded), that status as the evidence of
+/// one of its threads: one it didn't get by a merge, the latest. Migration
+/// 0027 does the same.
+async fn seed_status(client: &impl GenericClient, feature: i64) -> Result<()> {
+    client
+        .execute(
+            &format!(
+                "{STATUS_FAMILY}
+                 UPDATE feature_threads ft SET status = f.status, status_at = f.status_at
+                 FROM features f
+                 WHERE f.id = $1 AND f.status <> 'unknown' AND ft.feature_id = $1
+                   AND NOT EXISTS (SELECT FROM feature_threads e JOIN family ON family.id = e.feature_id
+                                   WHERE e.status IS NOT NULL)
+                   AND ft.thread_id = (
+                       SELECT o.thread_id FROM feature_threads o JOIN threads t ON t.id = o.thread_id
+                       WHERE o.feature_id = $1
+                       ORDER BY EXISTS (SELECT FROM feature_threads m JOIN features mf ON mf.id = m.feature_id
+                                        WHERE mf.merged_into = $1 AND m.thread_id = o.thread_id),
+                                t.last_at DESC NULLS LAST, o.thread_id
+                       LIMIT 1)"
+            ),
+            &[&feature],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Sets feature `feature`'s status and status_at by its family's evidence;
+/// without any, a feature with threads has none to show (unknown), and one
+/// without keeps its own.
+pub(crate) async fn recompute_status(client: &impl GenericClient, feature: i64) -> Result<()> {
+    let evidence: Vec<StatusEvidence> = client
+        .query(
+            &format!(
+                "{STATUS_FAMILY}
+                 SELECT ft.status, ft.status_at FROM feature_threads ft JOIN family ON family.id = ft.feature_id
+                 WHERE ft.status IS NOT NULL"
+            ),
+            &[&feature],
+        )
+        .await?
+        .iter()
+        .map(|row| (row.get(0), row.get(1)))
+        .collect();
+    match fold_status(evidence) {
+        Some((status, at)) => {
+            client
+                .execute(
+                    "UPDATE features SET status = $2, status_at = $3, updated_at = now()
+                     WHERE id = $1 AND (status, status_at) IS DISTINCT FROM ($2, $3)",
+                    &[&feature, &status, &at],
+                )
+                .await?;
+        }
+        None => {
+            client
+                .execute(
+                    "UPDATE features SET status = 'unknown', status_at = NULL, updated_at = now()
+                     WHERE id = $1 AND status <> 'unknown'
+                       AND EXISTS (SELECT FROM feature_threads WHERE feature_id = $1)",
+                    &[&feature],
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Combines `evidence` with what thread `thread` showed of feature `feature`
+/// before, by [`fold_status`].
+async fn add_thread_status(
+    client: &impl GenericClient,
+    feature: i64,
+    thread: i64,
+    evidence: Vec<StatusEvidence>,
+) -> Result<()> {
+    let before = client
+        .query_opt(
+            "SELECT status, status_at FROM feature_threads
+             WHERE feature_id = $1 AND thread_id = $2 AND status IS NOT NULL",
+            &[&feature, &thread],
+        )
+        .await?
+        .map(|row| (row.get(0), row.get(1)));
+    if let Some((status, at)) = fold_status(evidence.into_iter().chain(before).collect()) {
+        client
+            .execute(
+                "UPDATE feature_threads SET status = $3, status_at = $4 WHERE feature_id = $1 AND thread_id = $2",
+                &[&feature, &thread, &status, &at],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Records that thread `thread`, whose latest message was written at `at`,
+/// shows feature `feature` with `status`, and recomputes the feature's status.
+async fn record_status(
+    client: &impl GenericClient,
+    feature: i64,
+    thread: i64,
+    status: FeatureStatus,
+    at: Option<DateTime<Utc>>,
+) -> Result<()> {
+    if status == FeatureStatus::Unknown {
+        return Ok(());
+    }
+    seed_status(client, feature).await?;
+    add_thread_status(
+        client,
+        feature,
+        thread,
+        vec![(status.as_str().to_owned(), at)],
+    )
+    .await?;
+    recompute_status(client, feature).await
+}
+
+/// Gives thread `to`'s link to feature `feature` the status evidence of its
+/// link to thread `from`, combined with its own: rethreading moves a link.
+pub(crate) async fn move_thread_status(
+    client: &impl GenericClient,
+    feature: i64,
+    from: i64,
+    to: i64,
+) -> Result<()> {
+    let evidence: Vec<StatusEvidence> = client
+        .query_opt(
+            "SELECT status, status_at FROM feature_threads
+             WHERE feature_id = $1 AND thread_id = $2 AND status IS NOT NULL",
+            &[&feature, &from],
+        )
+        .await?
+        .map(|row| (row.get(0), row.get(1)))
+        .into_iter()
+        .collect();
+    if evidence.is_empty() || from == to {
+        return Ok(());
+    }
+    add_thread_status(client, feature, to, evidence).await
+}
+
 pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     let mut client = indexer.tools.get().await?;
     let lease_record = lease(&**client, &args.lease_token).await?;
@@ -1340,14 +1529,6 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
     };
 
     let tx = client.transaction().await?;
-    tx.batch_execute(
-        "CREATE OR REPLACE FUNCTION pg_temp.status_rank(text) RETURNS int LANGUAGE sql IMMUTABLE AS $$
-             SELECT CASE $1 WHEN 'unknown' THEN 0 WHEN 'proposed' THEN 1 WHEN 'in_progress' THEN 2
-                            WHEN 'returned' THEN 3 WHEN 'withdrawn' THEN 3 WHEN 'rejected' THEN 4
-                            WHEN 'committed' THEN 4 WHEN 'reverted' THEN 5 ELSE 0 END
-         $$",
-    )
-    .await?;
     let session = lease_record.session.clone();
     let model = lease_record.model.clone();
     let mut judged_distinct = 0;
@@ -1386,14 +1567,15 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 let slug = feature.slug.clone().expect("validated");
                 let embedding = vectors.next().flatten();
                 let release_at = release.as_ref().and(evidence_at);
+                let status_at = evidence_at.filter(|_| feature.status != FeatureStatus::Unknown);
                 // A release by the name it shipped as (migration 0021): 9.0, not 8.5.
                 let id: i64 = tx
                     .query_one(
-                        "INSERT INTO features (slug, name, description, status, release, release_at, embedding,
-                                               created_by, model)
-                         VALUES ($1, $2, $3, $4, shipped_release($5), $6, $7, $8, $9) RETURNING id",
+                        "INSERT INTO features (slug, name, description, status, status_at, release, release_at,
+                                               embedding, created_by, model)
+                         VALUES ($1, $2, $3, $4, $5, shipped_release($6), $7, $8, $9, $10) RETURNING id",
                         &[&slug, &feature.name.trim(), &feature.description.trim(), &feature.status.as_str(),
-                          release, &release_at, &embedding, &session, &model],
+                          &status_at, release, &release_at, &embedding, &session, &model],
                     )
                     .await?
                     .get(0);
@@ -1418,8 +1600,8 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             }
             Action::Reuse => {
                 let id = feature.existing_id.expect("validated");
-                // A status only moves forward: a follow-up thread doesn't undo a
-                // commit. A release given replaces the feature's, whatever its
+                // Its status follows its threads' evidence (record_status, below).
+                // A release given replaces the feature's, whatever its
                 // evidence's date: the extractor judges it, and an older thread
                 // extracted later can correct a newer one's, as the backfill
                 // reads newest first. It's saved by the name it shipped as.
@@ -1427,14 +1609,13 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
                 // same release again only moves it later.
                 tx.execute(
                     "UPDATE features SET
-                         status = CASE WHEN pg_temp.status_rank($2) > pg_temp.status_rank(status) THEN $2 ELSE status END,
-                         release = CASE WHEN $3::text IS NOT NULL THEN shipped_release($3) ELSE release END,
-                         release_at = CASE WHEN $3::text IS NULL THEN release_at
-                                           WHEN shipped_release($3) IS DISTINCT FROM release THEN $4
-                                           ELSE greatest(release_at, $4) END,
+                         release = CASE WHEN $2::text IS NOT NULL THEN shipped_release($2) ELSE release END,
+                         release_at = CASE WHEN $2::text IS NULL THEN release_at
+                                           WHEN shipped_release($2) IS DISTINCT FROM release THEN $3
+                                           ELSE greatest(release_at, $3) END,
                          updated_at = now()
                      WHERE id = $1",
-                    &[&id, &feature.status.as_str(), release, &evidence_at],
+                    &[&id, release, &evidence_at],
                 )
                 .await?;
                 reused["features"]
@@ -1449,6 +1630,7 @@ pub async fn submit(indexer: &Indexer, args: SubmitArgs) -> Result<Value> {
             &[&id, &args.thread_id],
         )
         .await?;
+        record_status(&*tx, id, args.thread_id, feature.status, evidence_at).await?;
         for path in &feature.files {
             tx.execute(
                 "INSERT INTO feature_files (feature_id, path, thread_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
@@ -1877,6 +2059,10 @@ pub async fn merge_extracts(indexer: &Indexer, args: MergeExtractsArgs) -> Resul
         .await?);
     let moved = match args.kind {
         DraftKind::Feature => {
+            // Their statuses as evidence first, so that the merged feature's
+            // follows both, and undo_merge leaves each its own.
+            seed_status(&*tx, args.from_id).await?;
+            seed_status(&*tx, args.into_id).await?;
             let threads = ids(tx
                 .query(
                     "INSERT INTO feature_threads (feature_id, thread_id) SELECT $2, thread_id FROM feature_threads
@@ -1924,6 +2110,10 @@ pub async fn merge_extracts(indexer: &Indexer, args: MergeExtractsArgs) -> Resul
         &[&args.from_id, &args.into_id],
     )
     .await?;
+    if args.kind == DraftKind::Feature {
+        // The evidence of both: the merged feature's family includes from_id's.
+        recompute_status(&*tx, args.into_id).await?;
+    }
     let merge_id: i64 = tx
         .query_one(
             "INSERT INTO merge_log (kind, from_id, into_id, moved, reason, actor) VALUES ($1, $2, $3, $4, $5, 'crawler')
@@ -2161,6 +2351,9 @@ pub async fn undo_merge(indexer: &Indexer, args: UndoMergeArgs) -> Result<Value>
                     &[&from_id],
                 )
                 .await?;
+                // Each by its own evidence again.
+                recompute_status(&*tx, into_id).await?;
+                recompute_status(&*tx, from_id).await?;
             } else {
                 tx.execute(
                     "UPDATE positions SET decision_id = $1 WHERE id = ANY ($2)",

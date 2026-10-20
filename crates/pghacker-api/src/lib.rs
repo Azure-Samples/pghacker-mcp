@@ -29,8 +29,9 @@ pub mod descriptions {
         decisions (resolutions a thread \
         reached: outcome, alternatives, rationale and the feature each decides) and positions (an author's stance \
         on a feature or decision), by full text, semantic search or both (mode hybrid, the default). A feature's \
-        status is the most advanced any of its threads showed: proposed, in_progress, committed, reverted, \
-        rejected, returned (with feedback, in a CommitFest), withdrawn or unknown. Optional kind and author \
+        status is what its most recent thread showed (proposed or in_progress never replace committed): \
+        proposed, in_progress, committed, reverted, rejected, returned (with feedback, in a CommitFest), \
+        withdrawn or unknown. Optional kind and author \
         filters. Each result cites messages with verbatim quotes.";
     pub const AUTHOR_PERSPECTIVE: &str = "Summarizes an author's perspective on a topic: their extracted positions \
         (stance and summary on features and decisions) that match the topic through their own text or the feature or \

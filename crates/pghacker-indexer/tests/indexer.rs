@@ -1157,6 +1157,7 @@ async fn leases_show_commit_signals_and_reuse_never_downgrades_a_status() {
         .batch_execute(
             "UPDATE messages SET body_clean = body_clean || E'\\nPushed to master, thanks!' WHERE id = 102;
              UPDATE features SET status = 'committed';
+             UPDATE feature_threads SET status = 'committed';
              UPDATE threads SET content_version = 2 WHERE id = 10;",
         )
         .await

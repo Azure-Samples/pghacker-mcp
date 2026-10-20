@@ -584,7 +584,8 @@ async fn a_thread_glued_by_a_placeholder_goes_and_its_extracts_follow() {
              INSERT INTO drafts (lease_token, thread_id, kind, draft)
              SELECT '00000000-0000-0000-0000-000000000002', id, 'feature', '{}' FROM threads WHERE root_message_id = 'no.id';
              INSERT INTO features (id, slug, name, description, status) VALUES (800, 'initcap-digits', 'initcap', 'd', 'proposed');
-             INSERT INTO feature_threads (feature_id, thread_id) SELECT 800, id FROM threads WHERE root_message_id = 'no.id';
+             INSERT INTO feature_threads (feature_id, thread_id, status, status_at)
+             SELECT 800, id, 'committed', '2020-01-01' FROM threads WHERE root_message_id = 'no.id';
              INSERT INTO positions (id, author_id, thread_id, feature_id, stance, summary)
              SELECT 870, author_id, thread_id, 800, 'supports', 's' FROM messages WHERE message_id = 'q@example.org';
              INSERT INTO citations (extract_kind, extract_id, message_id, quote)
@@ -639,6 +640,18 @@ async fn a_thread_glued_by_a_placeholder_goes_and_its_extracts_follow() {
     assert_eq!(
         row("SELECT thread_id FROM feature_threads WHERE feature_id = 800").await,
         p
+    );
+    let evidence = client
+        .query_one(
+            "SELECT status, status_at::date::text FROM feature_threads WHERE feature_id = 800",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (evidence.get::<_, String>(0), evidence.get::<_, String>(1)),
+        ("committed".to_owned(), "2020-01-01".to_owned()),
+        "the link's status evidence moves with it"
     );
     assert_eq!(row("SELECT thread_id FROM drafts").await, p.min(r));
 }

@@ -759,6 +759,8 @@ async fn apply_extracts(
                     &[&link.feature, &id(to)],
                 )
                 .await?;
+            // The evidence for its status goes along, so its status stays.
+            crate::extraction::move_thread_status(client, link.feature, link.from, id(to)).await?;
         }
         if !link.keep {
             client
