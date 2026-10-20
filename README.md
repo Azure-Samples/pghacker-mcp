@@ -123,6 +123,12 @@ contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additio
 
 **Please do not report security vulnerabilities through public GitHub issues.** To report one, follow [SECURITY.md](SECURITY.md), which points to Microsoft's reporting guidance for its repositories at [https://aka.ms/SECURITY.md](https://aka.ms/SECURITY.md).
 
+## Disclaimers
+
+MCP is a new and developing standard. As with all new technology standards, you should review the security of any systems that integrate with MCP servers, such as MCP hosts, clients, agents, AI applications, and models and confirm that they comply with system requirements, standards, and expectations. You should follow Microsoft security guidance for MCP servers, including enabling Entra ID authentication, secure token management, and network isolation. Refer to [Microsoft Security Documentation](https://learn.microsoft.com/azure/api-management/secure-mcp-servers) for details.
+
+This MCP server may provide access to underlying resources, such as tools, services, and/or data. Your use of that underlying resource via this MCP server is governed by the underlying resource's license terms.
+
 ## Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft

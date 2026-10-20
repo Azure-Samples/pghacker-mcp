@@ -19,3 +19,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+MCP is a new and developing standard. As with all new technology standards,
+you should review the security of any systems that integrate with MCP servers,
+such as MCP hosts, clients, agents, AI applications, and models and confirm
+that they comply with system requirements, standards, and expectations. You
+should follow Microsoft security guidance for MCP servers, including enabling
+Entra ID authentication, secure token management, and network isolation. Refer
+to Microsoft Security Documentation
+(https://learn.microsoft.com/azure/api-management/secure-mcp-servers) for
+details.
+
+This MCP server may provide access to underlying resources, such as tools,
+services, and/or data. Your use of that underlying resource via this MCP server
+is governed by the underlying resource's license terms.
