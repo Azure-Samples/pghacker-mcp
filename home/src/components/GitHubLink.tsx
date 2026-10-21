@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-import { Star } from "lucide-react";
+import { MessageSquareText, Star } from "lucide-react";
 import { useState } from "react";
 import { formatStars, readRepository } from "../repository.ts";
 
@@ -43,6 +43,24 @@ export function GitHubLink() {
           {formatStars(stars)}
         </span>
       )}
+    </a>
+  );
+}
+
+/**
+ * The top bar's link to the repository's Discussions, where users share
+ * feedback. Like the GitHub link, it shows only when the page names the
+ * repository.
+ */
+export function FeedbackLink() {
+  const [repository] = useState(() =>
+    readRepository(document.querySelector<HTMLMetaElement>('meta[name="github-repo"]')),
+  );
+  if (!repository) return null;
+  return (
+    <a className="btn btn-ghost feedback-link" href={`${repository.url}/discussions`} aria-label="Share feedback in Discussions" title="Share feedback in Discussions">
+      <MessageSquareText aria-hidden="true" />
+      <span className="feedback-label">Feedback</span>
     </a>
   );
 }

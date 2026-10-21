@@ -8,7 +8,7 @@ import test from "node:test";
 import { APP_ROOT } from "../scripts/lib/config.mjs";
 import {
   HistoryProgress, QUICK_PATH, REPO_URL, graphCaughtUp, graphLabels, graphWaiting, historyArgs, historyLine, mailHeader,
-  mailLines, mailProgress, monthRange, parseHistoryLine, parseLoadArgs, parseSlices, planSteps, summaryLines,
+  FEEDBACK_LINE, mailLines, mailProgress, monthRange, parseHistoryLine, parseLoadArgs, parseSlices, planSteps, summaryLines,
 } from "../scripts/lib/load.mjs";
 
 test("npm run load's flags", () => {
@@ -244,4 +244,8 @@ test("with only one part loaded, the summary names the command for the other", (
   assert.equal(code.some((line) => line.includes("crawl")), false, "extraction needs the mail");
   assert.match(summaryLines({ loaded: { mail: false, code: false }, ms: 0 })[0], /^✖ Nothing is loaded/);
   assert.match(summaryLines({ loaded: { mail: true, code: true }, ms: null, toolCount: 17 })[0], /^✔ Already loaded\. All 17 tools/);
+});
+
+test("the summary's last line points to Discussions", () => {
+  assert.match(FEEDBACK_LINE, /^Tried it\? .*https:\/\/github\.com\/Azure-Samples\/pghacker-mcp\/discussions$/);
 });

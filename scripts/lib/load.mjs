@@ -438,6 +438,9 @@ export function graphWaiting(graph) {
   return `${formatNumber(pending)} changes waiting`;
 }
 
+/** The summary's last line: where to say how it went. */
+export const FEEDBACK_LINE = "Tried it? Share what worked, what didn't and what you'd like next: https://github.com/Azure-Samples/pghacker-mcp/discussions";
+
 /**
  * The summary: what works now, then the next step, extraction, which
  * needs a model. `ms` is how long loading took, or null if nothing needed

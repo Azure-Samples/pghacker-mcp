@@ -684,6 +684,11 @@
 }
 
 @media (max-width: 420px) {
+  /* The icon alone on a phone; its title still says what it is. */
+  .feedback-label {
+    display: none;
+  }
+
   .hero h1 {
     font-size: 26px;
   }

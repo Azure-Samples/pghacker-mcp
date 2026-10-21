@@ -10,7 +10,7 @@ import { LOCAL_HOST, portalEnvironment, readLocalConfig, serviceEnvironments, se
 import { latestLogLine, needsBuild, startInBackground, startLogPath, tailLines } from "./lib/background.mjs";
 import {
   HistoryProgress, INDENT, directorySize, graphCaughtUp, graphLabels, graphWaiting, historyArgs, historyGitDir,
-  historyLine, mailDone, mailHeader, mailKey, mailLines, mailProgress, parseHistoryLine, parseLoadArgs, parseSlices,
+  FEEDBACK_LINE, historyLine, mailDone, mailHeader, mailKey, mailLines, mailProgress, parseHistoryLine, parseLoadArgs, parseSlices,
   planSteps, stepLine, summaryLines,
 } from "./lib/load.mjs";
 import { runningPortal } from "./lib/processes.mjs";
@@ -375,6 +375,7 @@ async function main() {
     loaded, ms: worked ? Date.now() - started : null, toolCount, extraction: status.extraction,
     hasToken: Boolean(portalEnvironment(config).GITHUB_TOKEN),
   }));
+  progress.print("", FEEDBACK_LINE);
   if (failures.length) {
     progress.print("", `✖ Loading ${failures.join(" and ")} failed: npm run load tries again, and skips what's done.`);
     process.exitCode = 1;

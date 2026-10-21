@@ -48,7 +48,9 @@ tag, commit SHA or REL_17_STABLE@2024-06-01; default the newest release branch) 
 git show and git log, with the threads that discussed each commit. Cite Message-IDs, commit SHAs and file \
 paths with line numbers in answers. To review a patch, commit or design as a given author would (Tom Lane, \
 say), ",
-            $review
+            $review,
+            " Users can share feedback, or report a problem, at \
+https://github.com/Azure-Samples/pghacker-mcp/discussions."
         )
     };
 }
@@ -419,6 +421,13 @@ mod tests {
             assert!(code::HISTORY_NOTE.contains(needed), "{needed}");
             assert!(INSTRUCTIONS.contains(needed), "{needed}");
             assert!(EXTENSION_INSTRUCTIONS.contains(needed), "{needed}");
+        }
+        for instructions in [INSTRUCTIONS, EXTENSION_INSTRUCTIONS] {
+            assert!(
+                instructions
+                    .ends_with("https://github.com/Azure-Samples/pghacker-mcp/discussions."),
+                "{instructions}"
+            );
         }
         for tool in TOOLS {
             assert!(INSTRUCTIONS.contains(tool.name), "{}", tool.name);

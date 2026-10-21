@@ -176,6 +176,20 @@ main:focus {
   text-decoration: none;
 }
 
+.btn.feedback-link {
+  gap: 6px;
+  padding: 0 10px;
+}
+
+.feedback-link:hover {
+  text-decoration: none;
+}
+
+.btn.feedback-link svg {
+  width: 16px;
+  height: 16px;
+}
+
 .btn .github-mark {
   width: 18px;
   height: 18px;

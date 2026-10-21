@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { PRODUCT } from "../content.ts";
 import { readCopyright, readPrivacyUrl } from "../footer.ts";
-import { GitHubLink } from "./GitHubLink.tsx";
+import { FeedbackLink, GitHubLink } from "./GitHubLink.tsx";
 import { ThemeToggle } from "./ThemeToggle.tsx";
 
 /** The mark: a speech bubble with a quotation, for cited answers, on the brand colour. */
@@ -33,6 +33,7 @@ export function TopBar() {
           </span>
         </a>
         <div className="topbar-actions">
+          <FeedbackLink />
           <GitHubLink />
           <ThemeToggle />
         </div>
