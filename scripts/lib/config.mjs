@@ -261,6 +261,18 @@ export function codeHistoryEnvironment(config, inherited = process.env) {
   return { PGHACKER_CODE_HISTORY: schema };
 }
 
+/**
+ * PGHACKER_SOURCES, from .env or the shell: what add_source may add,
+ * test-slices (the indexer's default: config/test-slices.toml) or open (any
+ * list, months and seed threads, as in Azure). Unset, the indexer's default.
+ */
+export function sourcesEnvironment(config, inherited = process.env) {
+  const mode = String(config.values.PGHACKER_SOURCES ?? inherited.PGHACKER_SOURCES ?? "").trim();
+  if (!mode) return {};
+  if (!["test-slices", "open"].includes(mode)) throw new Error("PGHACKER_SOURCES must be test-slices or open.");
+  return { PGHACKER_SOURCES: mode };
+}
+
 const EXTRACTION_SETTINGS = {
   PGHACKER_EXTRACTION_ORDER: (v) => ["lanes", "largest"].includes(v) || "must be lanes or largest",
   PGHACKER_EXTRACTION_NEW_MAIL_SHARE: (v) => (Number(v) > 0 && Number(v) <= 1) || "must be a number above 0, up to 1",
@@ -318,6 +330,7 @@ export function serviceEnvironments(config, inherited = process.env) {
       ...embed,
       ...history,
       ...extraction,
+      ...sourcesEnvironment(config, inherited),
       PGHACKER_INDEXER_DATABASE_URL: indexerUrl,
       PGHACKER_INDEXER_ADDR: `${LOCAL_HOST}:${config.indexerPort}`,
       PGHACKER_SLICES: path.join(config.root, "config", "test-slices.toml"),

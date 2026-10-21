@@ -147,6 +147,20 @@
   color: var(--success);
 }
 
+.data-note {
+  margin-top: 16px;
+  padding: 10px 14px;
+  border-radius: calc(var(--radius) - 3px);
+  background: var(--warning-soft);
+  font-size: 13.5px;
+}
+
+.data-note code {
+  color: var(--warning-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .steps {
   display: grid;
   margin-top: 18px;

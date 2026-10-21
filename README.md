@@ -25,7 +25,10 @@ You need Node.js 24 or later, Rust (the toolchain in `rust-toolchain.toml`), and
 ```bash
 npm run setup   # download PilotSwarm, install dependencies, build, and create .env
 npm start       # start PostgreSQL, both services, PilotSwarm's worker and portal, and the home page
+npm run load    # load two months of pgsql-hackers and PostgreSQL's commit history
 ```
+
+`npm start` runs the app in the background and returns once it's ready; the first start builds the Rust services, which takes several minutes. Its log is `.runtime/logs/start.log`, beside the services' logs, and `npm start -- --foreground` keeps it in the terminal instead. `npm run stop` stops it all and keeps the data. Until the data is loaded, the tools answer, but with nothing: `npm start` and the home page say so. Then connect your agent: the home page gives the MCP URL and how to add it, and [Use it](#use-it) lists the tools.
 
 | What | Address |
 | --- | --- |
@@ -35,26 +38,32 @@ npm start       # start PostgreSQL, both services, PilotSwarm's worker and porta
 | pghacker-indexer, for the crawler agents | http://127.0.0.1:3101/mcp |
 | PostgreSQL 17 | 127.0.0.1:55433 |
 
-Everything listens on 127.0.0.1 only, and the portal has no sign-in, so **don't expose it**. `npm run stop` stops it all and keeps the data.
+Everything listens on 127.0.0.1 only, and the portal has no sign-in, so **don't expose it**.
 
-The agents need a language model: set `GITHUB_TOKEN` in your shell for GitHub Copilot's models, or add another provider in the portal's Admin Console. For semantic search, set the embedding settings, `HORIZON_EMBED_*`, in `.env` (`.env.example` shows them); without them, the mail searches use full text only. The [reference](docs/reference.md#configuration) lists every setting.
+The MCP tools need no language model. Only the portal's agents and extraction (`npm run crawl`) do: set `GITHUB_TOKEN` in `.env` or your shell for GitHub Copilot's models, or add another provider in the portal's Admin Console. For semantic search, set the embedding settings, `HORIZON_EMBED_*`, in `.env` (`.env.example` shows them); without them, the mail searches use full text only. The [reference](docs/reference.md#configuration) lists every setting.
 
 ## Load the data
 
-Locally, pghacker-mcp works on a slice of the data: two months of pgsql-hackers (June–July 2026), whole threads on SQL/PGQ and SQL/JSON, and PostgreSQL's commit history.
+Locally, pghacker-mcp works on a slice of the data. `npm run load` loads it, and starts the app first if it isn't running:
 
-1. **Mail.** In the portal, ask a **pghacker Crawler** session to add pgsql-hackers (locally, the slice above), or call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`. The indexer downloads the mail, embeds it and adds it to the graph; `ingest_status` shows its progress.
-2. **Code.** Build the commit history once, from a clone. It takes about 6 minutes; add `--path src/backend/parser` to keep only that folder.
+```bash
+npm run load              # the mail, then PostgreSQL's whole commit history
+npm run load -- --quick   # the mail, and the history of src/backend/parser only
+```
+
+It shows each step's progress, waits until the mail is embedded and the graph has caught up, and ends with what works and what to do next. The first load takes about 15 minutes: half for the mail, which the archive serves slowly, half for the history. Run it again at any time: it skips what's done, and retries what failed. `--mail-only` and `--code-only` load one part, and `--force` rebuilds a history that's installed.
+
+1. **Mail.** Two months of pgsql-hackers, June–July 2026 (about 5,500 messages), and 14 whole threads on SQL/PGQ and SQL/JSON, as `config/test-slices.toml` lists them. By hand, call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`, or ask a **pghacker Crawler** session in the portal to add pgsql-hackers. The indexer downloads the mail, embeds it and adds it to the graph; `ingest_status` shows its progress. To load other months, set `PGHACKER_SOURCES=open` in `.env`, restart the app, and give `add_source` the `months`, or a range with `from` and `to`, as in Azure.
+2. **Code.** PostgreSQL's commit history, every branch, tag and commit, cloned from git.postgresql.org and built into the database. The first build takes several minutes, and `--quick` keeps only `src/backend/parser`. By hand, it's one command, run as the database's administrator (add `--path src/backend/parser` to keep only that folder):
 
    ```bash
-   git clone --mirror https://git.postgresql.org/git/postgresql.git .runtime/postgres.git
-   export $(grep ^DATABASE_URL= .env)   # the build runs as the database's administrator
-   cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/postgres.git \
-       --url https://git.postgresql.org/git/postgresql.git --install
+   export $(grep ^DATABASE_URL= .env)
+   cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/git/postgres-history.git \
+       --url https://git.postgresql.org/git/postgresql.git --fetch --install
    ```
 
-   The running services read it at once, without a restart, and the indexer applies new commits every hour.
-3. **Extraction.** Crawler agents read the threads:
+   The running services read it at once, without a restart, and the indexer applies new commits every hour, from the same clone. `npm run load` keeps the build's log in `.runtime/logs/load-history.log`.
+3. **Extraction.** `search_extracts`, `author_perspective` and the graph's `Feature`, `Decision` and `Position` vertices stay empty until crawler agents read the threads. They run on a language model: give the app a token, such as `echo "GITHUB_TOKEN=$(gh auth token)" >> .env` (or any token with Copilot access), and restart it with `npm run stop && npm start`, or add a provider in the portal's Admin Console. Then:
 
    ```bash
    npm run crawl -- --pilot              # 10 threads in one session, to review first
@@ -80,7 +89,7 @@ It also serves a skill, [`review-as-author`](skills/review-as-author/SKILL.md): 
 npm test             # the launcher, configuration, readiness and evaluation helpers
 npm run rust:check   # rustfmt, clippy and the Rust tests
 npm run smoke        # with the app running: both servers and their skills, the portal, the worker and the agents
-npm run eval         # with the data loaded: 30 questions (eval/questions.json), into eval/RESULTS.md
+npm run eval         # with the data loaded (npm run load): 30 questions (eval/questions.json), into eval/RESULTS.md
 npm run eval -- --questions eval/reviews.json --skill skills/review-as-author/SKILL.md --results eval/RESULTS-reviews.md
 ```
 

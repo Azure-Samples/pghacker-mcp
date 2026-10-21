@@ -11,6 +11,7 @@
     "setup": "node scripts/setup.mjs",
     "start": "node scripts/start.mjs",
     "stop": "node scripts/stop.mjs",
+    "load": "node scripts/load.mjs",
     "smoke": "node scripts/smoke.mjs",
     "check:public": "node scripts/check-public.mjs",
     "license-headers": "node scripts/license-headers.mjs",

@@ -400,6 +400,11 @@ main:focus {
   color: var(--primary-text);
 }
 
+.pill-warning {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
 .dot {
   width: 7px;
   height: 7px;

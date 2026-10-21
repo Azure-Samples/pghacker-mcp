@@ -31,6 +31,7 @@ Before you open a pull request, run the checks for what you changed:
 | What changed | Checks |
 | --- | --- |
 | Anything | `npm test`: the launcher, configuration, routes and the home page's unit tests |
+| The launcher, the services or the agents | With the app running (`npm start`) and the data loaded (`npm run load`), so that the tools have something to find: `npm run smoke` |
 | Rust | `npm run rust:check`: rustfmt, clippy with warnings as errors, and the Rust tests, which need the local PostgreSQL that `npm start` runs |
 | The home page (`home/`) | `npm --prefix home test` and `npm --prefix home run build` |
 | Terraform (`deploy/terraform/`) | In `deploy/terraform`: `terraform init -backend=false -input=false -lockfile=readonly`, then `terraform fmt -recursive -check`, `terraform validate` and `terraform test` |

@@ -240,6 +240,17 @@ test("PGHACKER_CODE_HISTORY, from .env or the shell, reaches the indexer and pgh
   assert.throws(() => services("PGHACKER_CODE_HISTORY=pghacker.code\n"), /must name a schema/);
 });
 
+test("PGHACKER_SOURCES, from .env or the shell, reaches the indexer only", () => {
+  const services = (text, inherited = {}) => serviceEnvironments(parseLocalConfig(`${initialEnv(password)}${text}`), inherited);
+  for (const env of Object.values(services(""))) assert.equal("PGHACKER_SOURCES" in env, false);
+  const fromFile = services("PGHACKER_SOURCES=open\n", { PGHACKER_SOURCES: "test-slices" });
+  assert.equal(fromFile.indexer.PGHACKER_SOURCES, "open");
+  assert.equal("PGHACKER_SOURCES" in fromFile.mcp, false);
+  assert.equal("PGHACKER_SOURCES" in fromFile.bootstrap, false);
+  assert.equal(services("", { PGHACKER_SOURCES: "open" }).indexer.PGHACKER_SOURCES, "open");
+  assert.throws(() => services("PGHACKER_SOURCES=everything\n"), /PGHACKER_SOURCES must be test-slices or open/);
+});
+
 test("the extraction order's settings, from .env or the shell, reach the indexer only", () => {
   const services = (text, inherited = {}) => serviceEnvironments(parseLocalConfig(`${initialEnv(password)}${text}`), inherited);
   for (const env of Object.values(services(""))) {

@@ -5,13 +5,17 @@ import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { Check, ChevronRight, PlugZap } from "lucide-react";
 import { CLIENTS, configPrefix } from "../clients.ts";
 import { ENDPOINT_FACTS, FIRST_PROMPT } from "../content.ts";
+import { dataNotice, readDataStatus } from "../data-status.ts";
 import { CopyButton } from "./CopyButton.tsx";
 
 /**
  * The MCP server's panel: its status and facts, then three steps: copy the
- * endpoint, add it to your agent, ask.
+ * endpoint, add it to your agent, ask. Locally, while the database lacks
+ * the mail or the code, its status says so, with the command that loads it.
  */
 export function ConnectPanel({ url }: { url: string }) {
+  const [status] = useState(() => readDataStatus(document.querySelector<HTMLMetaElement>('meta[name="data-status"]')));
+  const notice = status && dataNotice(status);
   return (
     <section className="card connect" id="connect" aria-labelledby="connect-title">
       <header className="connect-head">
@@ -19,10 +23,17 @@ export function ConnectPanel({ url }: { url: string }) {
           <PlugZap aria-hidden="true" />
         </span>
         <h2 id="connect-title">MCP server</h2>
-        <span className="pill pill-success">
-          <span className="dot" aria-hidden="true" />
-          Available
-        </span>
+        {notice ? (
+          <span className="pill pill-warning">
+            <span className="dot" aria-hidden="true" />
+            {notice.pill}
+          </span>
+        ) : (
+          <span className="pill pill-success">
+            <span className="dot" aria-hidden="true" />
+            Available
+          </span>
+        )}
         <ul className="facts" aria-label="About the endpoint">
           {ENDPOINT_FACTS.map((fact) => (
             <li key={fact}>
@@ -32,6 +43,11 @@ export function ConnectPanel({ url }: { url: string }) {
           ))}
         </ul>
       </header>
+      {notice && (
+        <p className="data-note">
+          {notice.text} <code>{notice.command}</code>.
+        </p>
+      )}
       <ol className="steps">
         <li className="step">
           <span className="step-num" aria-hidden="true">

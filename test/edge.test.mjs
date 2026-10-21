@@ -12,8 +12,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { POWERED_BY } from "../home/src/content.ts";
 import {
-  CACHE, SECURITY_HEADERS, createEdgeServer, createHomeHandler, parseCopyright, parsePrivacyUrl, withCopyright, withPrivacy,
-  withStars,
+  CACHE, SECURITY_HEADERS, createEdgeServer, createHomeHandler, parseCopyright, parsePrivacyUrl, withCopyright, withDataStatus,
+  withPrivacy, withStars,
 } from "../scripts/lib/edge.mjs";
 
 const PAGE = '<!doctype html><meta name="application-name" content="pghacker-mcp"><script type="module" src="/static/index-abc.js"></script>';
@@ -312,6 +312,51 @@ test("the copyright tag goes before the end of the head, with its URL and text e
     assert.equal(withCopyright("<head></head>", none), "<head></head>", JSON.stringify(none));
   }
   assert.equal(withCopyright("<p>no head</p>", link), "<p>no head</p>");
+});
+
+test("given a data probe, as npm start gives it, the page says what's loaded when something is missing", async (t) => {
+  const root = distFixture(t);
+  const page = (head) => `<!doctype html><head><meta name="application-name" content="pghacker-mcp">${head}</head><body></body>`;
+  writeFileSync(path.join(root, "index.html"), page(""));
+  let status = "empty";
+  let probes = 0;
+  const dataStatus = async () => {
+    probes += 1;
+    return status;
+  };
+  const port = await listen(t, http.createServer(createHomeHandler({ root, dataStatus })));
+  const base = `http://127.0.0.1:${port}`;
+  const tagged = page('<meta name="data-status" content="empty" />');
+  assert.equal(await (await fetch(`${base}/`)).text(), tagged);
+  const head = await fetch(`${base}/`, { method: "HEAD" });
+  assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(tagged)));
+  // The answer is reused for a few seconds: one probe for both requests.
+  assert.equal(probes, 1);
+  // Not the page's files.
+  assert.equal(await (await fetch(`${base}/static/index-abc.js`)).text(), "console.log(1);\n");
+
+  // Everything loaded: the page as it was built, as in Azure, which has no probe.
+  status = "ready";
+  const ready = await listen(t, http.createServer(createHomeHandler({ root, dataStatus })));
+  assert.equal(await (await fetch(`http://127.0.0.1:${ready}/`)).text(), page(""));
+  const azure = await listen(t, http.createServer(createHomeHandler({ root })));
+  assert.equal(await (await fetch(`http://127.0.0.1:${azure}/`)).text(), page(""));
+
+  // A probe that fails adds nothing, and doesn't fail the page.
+  const failing = await listen(t, http.createServer(createHomeHandler({ root, dataStatus: async () => { throw new Error("down"); } })));
+  const response = await fetch(`http://127.0.0.1:${failing}/`);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), page(""));
+});
+
+test("the data-status tag says only empty, mail or code, before the end of the head", () => {
+  for (const status of ["empty", "mail", "code"]) {
+    assert.equal(withDataStatus("<head></head>", status), `<head><meta name="data-status" content="${status}" /></head>`);
+  }
+  for (const none of [undefined, null, "ready", "", '"><script>', "EMPTY"]) {
+    assert.equal(withDataStatus("<head></head>", none), "<head></head>", String(none));
+  }
+  assert.equal(withDataStatus("<p>no head</p>", "empty"), "<p>no head</p>");
 });
 
 test("fingerprinted files are kept a year, the page's other files an hour", async (t) => {

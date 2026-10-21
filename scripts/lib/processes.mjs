@@ -144,6 +144,24 @@ export async function execInDatabase(config, args, { stdout } = {}) {
   });
 }
 
+/** The command line `ps` shows for `pid`: a portal's is its title, the project's name. */
+function processCommand(pid) {
+  return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+/** The portal's record, if its process is alive and is this app's portal; otherwise null. */
+export function runningPortal(config) {
+  const record = readPortalRecord(config);
+  if (!record || !processIsAlive(record.pid)) return null;
+  try {
+    return processCommand(record.pid) === config.project ? record : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function stopPortal(config) {
   const record = readPortalRecord(config);
   if (!record) return false;
@@ -153,9 +171,7 @@ export async function stopPortal(config) {
   }
   let command;
   try {
-    command = execFileSync("ps", ["-p", String(record.pid), "-o", "command="], {
-      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    command = processCommand(record.pid);
   } catch (error) {
     if (!processIsAlive(record.pid)) {
       unlinkSync(recordPath(config));

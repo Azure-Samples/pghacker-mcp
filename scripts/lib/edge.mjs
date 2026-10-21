@@ -13,7 +13,9 @@
 // (scripts/lib/github-stars.mjs), it adds the GitHub repository's stars to
 // the page it serves, once GitHub shows them; and, given the deployment's
 // privacy statement and copyright link, the privacy-url and copyright-link
-// tags, which the footer shows. In Azure it serves alone behind oauth2-proxy
+// tags, which the footer shows. Locally, npm start also gives it a probe of
+// what the database has loaded, and it adds the data-status tag when the
+// mail or the code is missing. In Azure it serves alone behind oauth2-proxy
 // (scripts/home.mjs); locally, the edge puts it and the services on one origin
 // with the routes of scripts/lib/routes.mjs, as oauth2-proxy does in Azure,
 // without sign-in.
@@ -176,6 +178,23 @@ export function withCopyright(html, copyright) {
 }
 
 /**
+ * `html` with `status`, what the local database has loaded when it isn't
+ * everything (scripts/lib/data.mjs: "empty", "mail" for only the mail, or
+ * "code" for only the code), as a data-status meta tag at the end of its
+ * head, which the MCP server's panel reads (home/src/data-status.ts).
+ * Anything else, such as "ready", leaves `html` as it is.
+ */
+export function withDataStatus(html, status) {
+  if (!DATA_STATUSES.has(status)) return html;
+  return atHeadEnd(html, `<meta name="data-status" content="${status}" />`);
+}
+
+const DATA_STATUSES = new Set(["empty", "mail", "code"]);
+/** How long a data status is reused, and how long the page waits for one. */
+const DATA_STATUS_TTL_MS = 5000;
+const DATA_STATUS_WAIT_MS = 3000;
+
+/**
  * A request handler for the home page in `root`, a directory Vite built.
  * `portal` is the origin, such as https://name.azurefd.net, whose /portal/
  * the portal's share links go on to; without it, they stay on the request's
@@ -184,9 +203,12 @@ export function withCopyright(html, copyright) {
  * (parseCopyright); the footer shows each that is given, the privacy link
  * first, and has no such link without it. `onPage(request)` hears of each
  * page served to a GET, for usage telemetry. `stars`, from createStarCounts,
- * adds the repository's star count to the page.
+ * adds the repository's star count to the page. `dataStatus`, given only
+ * locally by npm start, is an async probe of what the database has loaded
+ * (withDataStatus); its answer is reused for a few seconds, and a probe that
+ * fails or takes too long adds nothing.
  */
-export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", copyright, onPage, stars } = {}) {
+export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", copyright, onPage, stars, dataStatus } = {}) {
   if (portal && URL.parse(portal)?.origin !== portal) {
     throw new Error(`The portal must be given as an origin, such as https://name.azurefd.net, not ${portal}.`);
   }
@@ -199,6 +221,33 @@ export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", 
       `The copyright link must be given as an https URL, such as https://example.com/, and its text, such as © 2026 Example, of at most ${MAX_COPYRIGHT_TEXT} characters without control characters.`,
     );
   }
+  let probed;
+  let probing;
+  /** The data status, from the cache or a new probe; undefined if the probe failed. */
+  function currentDataStatus() {
+    if (probed && Date.now() - probed.at < DATA_STATUS_TTL_MS) return Promise.resolve(probed.value);
+    probing ??= (async () => {
+      let timer;
+      let value;
+      try {
+        value = await Promise.race([
+          dataStatus(),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, DATA_STATUS_WAIT_MS);
+          }),
+        ]);
+      } catch {
+        value = undefined;
+      } finally {
+        clearTimeout(timer);
+      }
+      probed = { at: Date.now(), value };
+      probing = undefined;
+      return value;
+    })();
+    return probing;
+  }
+
   async function file(request, response, name, cacheControl) {
     const full = path.join(root, name);
     // Names are checked before they get here; this is a second guard.
@@ -210,9 +259,10 @@ export function createHomeHandler({ root = HOME_DIR, portal = "", privacy = "", 
       if (error.code === "ENOENT" || error.code === "EISDIR") return notFound(request, response);
       throw error;
     }
-    if (name === "index.html" && (stars || privacy || copyrightGiven)) {
+    if (name === "index.html" && (stars || privacy || copyrightGiven || dataStatus)) {
       const html = stars ? withStars(body.toString("utf8"), stars) : body.toString("utf8");
-      body = Buffer.from(withCopyright(withPrivacy(html, privacy), copyright));
+      const status = dataStatus ? await currentDataStatus() : undefined;
+      body = Buffer.from(withDataStatus(withCopyright(withPrivacy(html, privacy), copyright), status));
     }
     send(request, response, 200, {
       "content-type": TYPES[path.extname(name)] ?? "application/octet-stream",

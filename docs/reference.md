@@ -44,6 +44,7 @@ This MCP server may provide access to underlying resources, such as tools, servi
 | `PGHACKER_RATE_PER_MINUTE`, `PGHACKER_RATE_BURST` | pghacker-mcp's rate limit per client. Local agents all come from 127.0.0.1, so the launcher allows 3,000 requests a minute in bursts of 500; the server's default is 120 and 40 |
 | `PGHACKER_AGENT_MCP_URL`* | Another pghacker-mcp for the local agents, such as a deployment's, to evaluate it |
 | `PGHACKER_CODE_HISTORY`* | The schema of the [commit history](#commit-history) that the code tools read: `pghacker` by default |
+| `PGHACKER_SOURCES`* | What the indexer's `add_source` takes: `test-slices`, the default, the months and threads of `config/test-slices.toml`; or `open`, any list and months, as in Azure |
 | `PGHACKER_EXTRACTION_ORDER`, `PGHACKER_EXTRACTION_NEW_MAIL_SHARE`, `PGHACKER_EXTRACTION_NEW_MAIL_DAYS`* | [Extraction](#extraction)'s order, `lanes` (the default) or `largest`, and new mail's share (0.5) and window (7 days) |
 
 `config/test-slices.toml` chooses the months and threads that local runs retrieve.
@@ -66,7 +67,7 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 
 ## Running locally
 
-`npm run setup` downloads and verifies PilotSwarm's release, installs the dependencies, the home page's too, builds the services and the home page, and creates `.env`. `npm start` then:
+`npm run setup` downloads and verifies PilotSwarm's release, installs the dependencies, the home page's too, builds the services and the home page, and creates `.env`. `npm start` then, in the background:
 
 1. starts PostgreSQL 17, whose image (`db/Dockerfile`) adds AGE 1.7, pgvector 0.8 and pg_textsearch 1.5;
 2. rebuilds the services if needed, and builds the home page;
@@ -74,6 +75,10 @@ The launchers give each process only the settings it needs (`scripts/lib/config.
 4. starts both services, restarting either if it stops, with logs in `.runtime/logs`;
 5. starts PilotSwarm's worker and portal;
 6. serves them on one origin, `PORTAL_PORT` (3001), routed as oauth2-proxy routes them in Azure (`scripts/lib/routes.mjs`): the home page at `/`, the portal at `/portal/` and pghacker-mcp at `/mcp`.
+
+`npm start` runs `scripts/start.mjs --foreground` as a detached process, with its output in `.runtime/logs/start.log`, and returns once the portal answers, or prints the log's end and fails if the start does. It says so if the app is already running, and once ready, whether the database lacks the mail or the code; the home page then shows a "No data loaded" status in place of "Available", with the command that loads it. Only the local launcher probes the data: in Azure the page is as built. `npm start -- --foreground` runs the app in the terminal until Ctrl+C. Either way, `npm run stop` stops the app, then PostgreSQL, and keeps the data; the services' logs are in `.runtime/logs` too.
+
+`npm run load` loads the data, and starts the app the same way first if it isn't running: the mail of `config/test-slices.toml`, with the indexer's `add_source`, then PostgreSQL's whole commit history, with `pghacker-indexer history build --fetch --install` into the indexer's own clone (`.runtime/git/postgres-history.git`, which the hourly sync fetches into), its log in `.runtime/logs/load-history.log`. It waits while the mail is embedded and the graph catches up, showing each step's progress (on a terminal, live; otherwise a line every 10 seconds), and ends with what works and how to run extraction. A re-run skips what's done: the mail's jobs that are, and an installed history. `--quick` builds only `src/backend/parser`'s history, `--mail-only` and `--code-only` load one part, and `--force` rebuilds an installed history. Ctrl+C stops it; a history build stops with it, and the indexer goes on with the mail.
 
 PilotSwarm listens behind the site, on `PGHACKER_PORTAL_INTERNAL_PORT` (3002). Version 0.8.2 has no base path ([microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179)), so its page loads at `/portal/` but its files and API stay at `/assets/` and `/api/`, and its share links (`/?session=...`) are sent on to `/portal/`.
 
@@ -218,7 +223,7 @@ The commit history stores every line of every commit of every branch once, and i
 
 - `history build ... --path src/backend/parser` keeps only some folders (repeat `--path`), and `--fetch` fetches the clone from `--url` itself;
 - without `--install`, `history build` leaves the build in schema `pghacker_history`: set `PGHACKER_CODE_HISTORY=pghacker_history` and restart to read it;
-- `history verify --git-dir .runtime/postgres.git --schema pghacker --heads --sample 40` rebuilds every file of the branch heads and of 40 random commits, and compares them with git;
+- `history verify --git-dir .runtime/git/postgres-history.git --schema pghacker --heads --sample 40` rebuilds every file of the branch heads and of 40 random commits, and compares them with git;
 - `history sync` and `history regroup` do by hand what the hourly `code_history_sync` job does: apply new commits, and refresh the back-patch groups and the links from commits to threads.
 
 The `patch_lines` job indexes the mail's patches for `search_patches`, even before a history is installed. The history isn't a source: `sources` lists the mailing lists, and there is no version to add, since the history holds every branch, tag and commit. `list_sources.history`, `ingest_status.code.history` and `get_ontology.loaded.code` report its repository, head and last sync. In `crates/pghacker-replay/perf_tuning/`, `history_parity` compares `get_commit` and `blame` with git on random commits, and `profile_history` times one code-tool call.
