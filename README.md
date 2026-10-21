@@ -24,7 +24,7 @@ npm start       # start PostgreSQL, both services, PilotSwarm's worker and porta
 npm run load    # load two months of pgsql-hackers and PostgreSQL's commit history
 ```
 
-`npm start` runs the app in the background and returns once it's ready; the first start builds the Rust services, which takes several minutes. Its log is `.runtime/logs/start.log`, beside the services' logs, and `npm start -- --foreground` keeps it in the terminal instead. `npm run stop` stops it all and keeps the data. Until the data is loaded, the tools answer, but with nothing: `npm start` and the home page say so. Then connect your agent: the home page gives the MCP URL and how to add it, and [Use it](#use-it) lists the tools.
+`npm start` runs the app in the background (`--foreground` keeps it in the terminal), logging to `.runtime/logs/`; the first start builds the Rust services, which takes a few minutes. `npm run stop` stops it and keeps the data. `npm run load` loads the data (see [Load the data](#load-the-data)). Then add the MCP URL from the home page to your agent; [Use it](#use-it) lists the tools.
 
 | What | Address |
 | --- | --- |
@@ -47,19 +47,11 @@ npm run load              # the mail, then PostgreSQL's whole commit history
 npm run load -- --quick   # the mail, and the history of src/backend/parser only
 ```
 
-It shows each step's progress, waits until the mail is embedded and the graph has caught up, and ends with what works and what to do next. The first load takes about 15 minutes: half for the mail, which the archive serves slowly, half for the history. Run it again at any time: it skips what's done, and retries what failed. `--mail-only` and `--code-only` load one part, and `--force` rebuilds a history that's installed.
+It shows its progress and ends with what to do next. The first load takes about 15 minutes. Run it again at any time: it skips what's done. `--mail-only` and `--code-only` load one part, and `--force` rebuilds the history. The [reference](docs/reference.md#running-locally) shows how to do each step by hand.
 
-1. **Mail.** Two months of pgsql-hackers, June–July 2026 (about 5,500 messages), and 14 whole threads on SQL/PGQ and SQL/JSON, as `config/test-slices.toml` lists them. By hand, call the indexer's `add_source` with `{kind: mailing_list, name: pgsql-hackers}`, or ask a **pghacker Crawler** session in the portal to add pgsql-hackers. The indexer downloads the mail, embeds it and adds it to the graph; `ingest_status` shows its progress. To load other months, set `PGHACKER_SOURCES=open` in `.env`, restart the app, and give `add_source` the `months`, or a range with `from` and `to`, as in Azure.
-2. **Code.** PostgreSQL's commit history, every branch, tag and commit, cloned from git.postgresql.org and built into the database. The first build takes several minutes, and `--quick` keeps only `src/backend/parser`. By hand, it's one command, run as the database's administrator (add `--path src/backend/parser` to keep only that folder):
-
-   ```bash
-   export $(grep ^DATABASE_URL= .env)
-   cargo run --release -p pghacker-indexer -- history build --git-dir .runtime/git/postgres-history.git \
-       --url https://git.postgresql.org/git/postgresql.git --fetch --install
-   ```
-
-   The running services read it at once, without a restart, and the indexer applies new commits every hour, from the same clone. `npm run load` keeps the build's log in `.runtime/logs/load-history.log`.
-3. **Extraction.** `search_extracts`, `author_perspective` and the graph's `Feature`, `Decision` and `Position` vertices stay empty until crawler agents read the threads. They run on a language model: give the app a token, such as `echo "GITHUB_TOKEN=$(gh auth token)" >> .env` (or any token with Copilot access), and restart it with `npm run stop && npm start`, or add a provider in the portal's Admin Console. Then:
+1. **Mail.** Two months of pgsql-hackers, June–July 2026 (about 5,500 messages), and 14 whole threads on SQL/PGQ and SQL/JSON (`config/test-slices.toml`).
+2. **Code.** PostgreSQL's whole commit history, every branch, tag and commit, from git.postgresql.org. The indexer applies new commits every hour.
+3. **Extraction.** Features, decisions and authors' positions, which `search_extracts` and `author_perspective` read, come from crawler agents. They need a language model: add a token with `echo "GITHUB_TOKEN=$(gh auth token)" >> .env` and restart with `npm run stop && npm start` (or add a provider in the portal's Admin Console). Then:
 
    ```bash
    npm run crawl -- --pilot              # 10 threads in one session, to review first
@@ -105,6 +97,10 @@ A deployment made with this repository's Terraform records usage telemetry in it
 - [Design](docs/design.md): why pghacker-mcp exists, and its plan.
 - [Search design](docs/search-design.md): how the code tools read every commit.
 - [Deployment](deploy/README.md): Azure, upgrades and operations.
+
+## Feedback
+
+Tried it? We'd love to hear what worked, what didn't and what you'd like next: share your feedback, questions and ideas in [Discussions](https://github.com/Azure-Samples/pghacker-mcp/discussions). Report a bug in [Issues](https://github.com/Azure-Samples/pghacker-mcp/issues), and a security vulnerability as [SECURITY.md](SECURITY.md) says.
 
 ## Contributing
 
