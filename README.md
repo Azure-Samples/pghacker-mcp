@@ -12,11 +12,7 @@ pghacker-mcp answers questions about PostgreSQL's design history and source code
 
 The project is powered by PostgreSQL itself. The mail, the graph and PostgreSQL's full commit history, live in [Azure HorizonDB](https://azure.microsoft.com/products/horizondb) (PostgreSQL when run locally), and PostgreSQL indexes do the searching: trigram for code and text, vector for semantic search, BM25 for full-text search, and B-trees over the history's commit ranges, with Apache AGE for the graph. Typical searches across the whole commit history return in milliseconds.
 
-It is a [PilotSwarm](https://github.com/microsoft/PilotSwarm) 0.8.2 app in three parts:
-
-- **pghacker-mcp**: a public, read-only [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server, in Rust, that serves the mail and the code to agents.
-- **pghacker-indexer**: an internal Rust service that retrieves the mail and PostgreSQL's commit history, indexes them and projects them into a graph. Its MCP tools serve the crawler agents.
-- **Crawler agents**: PilotSwarm sessions that read the threads and record the features, decisions and authors' positions in them, with verbatim quotes.
+![How pghacker-mcp works: the crawler agents submit extracts through the indexer, which writes to one Azure HorizonDB database holding the mail, the code history and the knowledge graph; the public pghacker-mcp server reads it and answers your AI agent.](docs/assets/how-it-works.png)
 
 ## Quick start
 
