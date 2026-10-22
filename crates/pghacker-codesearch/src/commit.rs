@@ -102,12 +102,25 @@ async fn committed_patch(
     if threads.is_empty() {
         return Ok(None);
     }
-    let Ok(rows) = client
-        .query(
+    // The commit's added lines are the instances born at it, all in the
+    // lineages of the versions it made and alive past it: the scope index
+    // (lineage, hi, lo) finds them. The count and the matches come from the
+    // same lines.
+    let Ok(row) = client
+        .query_one(
             &format!(
-                "SELECT DISTINCT t.id FROM (SELECT DISTINCT line FROM {s}.code_line_instances \
-                     WHERE lo = $1 AND btrim(line) <> '' LIMIT {MAX_COMPARED_LINES}) l \
-                 JOIN patch_texts t ON t.kind = '+' AND md5(t.line) = md5(l.line) AND t.line = l.line"
+                "WITH added AS MATERIALIZED ( \
+                     SELECT DISTINCT l.line FROM {s}.code_line_instances l \
+                     WHERE l.lineage = ANY (ARRAY( \
+                               SELECT v.lineage FROM {s}.code_commit_files f \
+                               JOIN {s}.code_file_versions v ON v.id = f.version \
+                               WHERE f.addr = $1)) \
+                       AND l.hi > $1 AND l.lo = $1 AND btrim(l.line) <> '' \
+                     LIMIT {MAX_COMPARED_LINES}) \
+                 SELECT (SELECT count(*) FROM added), \
+                        ARRAY(SELECT DISTINCT t.id FROM added a \
+                              JOIN patch_texts t ON t.kind = '+' AND md5(t.line) = md5(a.line) \
+                                   AND t.line = a.line)"
             ),
             &[&addr],
         )
@@ -115,17 +128,8 @@ async fn committed_patch(
     else {
         return Ok(None);
     };
-    let ids: Vec<i32> = rows.iter().map(|r| r.get(0)).collect();
-    let added: i64 = client
-        .query_one(
-            &format!(
-                "SELECT count(*) FROM (SELECT DISTINCT line FROM {s}.code_line_instances \
-                 WHERE lo = $1 AND btrim(line) <> '' LIMIT {MAX_COMPARED_LINES}) l"
-            ),
-            &[&addr],
-        )
-        .await?
-        .get(0);
+    let added: i64 = row.get(0);
+    let ids: Vec<i32> = row.get(1);
     if ids.is_empty() || added == 0 {
         return Ok(None);
     }
