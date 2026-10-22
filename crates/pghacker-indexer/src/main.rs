@@ -341,9 +341,10 @@ async fn run(env: &Env) -> Result<()> {
     .cancel_on_disconnect();
     let app = router(server, indexer.settings.allowed_hosts.clone());
     let addr = indexer.settings.addr.clone();
-    let served = tokio::spawn(async move { serve(app, &addr).await });
-    tokio::select! {
-        () = shutdown_signal() => {}
+    let mut served = tokio::spawn(async move { serve(app, &addr).await });
+    let failed = tokio::select! {
+        biased;
+        () = shutdown_signal() => None,
         // The workers stop by themselves only when they fail or lose the
         // lead. Exiting stops whatever their jobs left running, and the
         // supervisor starts the indexer again, to wait for the lead.
@@ -356,8 +357,23 @@ async fn run(env: &Env) -> Result<()> {
             tracing::error!(%error, "the job workers stopped; exiting");
             std::process::exit(1);
         }
+        // The MCP server stops by itself only on a shutdown signal, or when
+        // it fails, as when it can't listen. Without it the indexer is no
+        // use to the crawlers, so it stops as on a shutdown and exits with
+        // the error, for the supervisor to start it again.
+        stopped = &mut served => match stopped {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(error) => Some(error.into()),
+        },
+    };
+    match &failed {
+        Some(error) => tracing::error!(
+            error = %format!("{error:#}"),
+            "the MCP server stopped; finishing running jobs and exiting"
+        ),
+        None => tracing::info!("shutting down; finishing running jobs"),
     }
-    tracing::info!("shutting down; finishing running jobs");
     shutdown.cancel();
     served.abort();
     match tokio::time::timeout(std::time::Duration::from_secs(20), workers).await {
@@ -366,5 +382,8 @@ async fn run(env: &Env) -> Result<()> {
             tracing::warn!("jobs still running after 20 s; they'll be requeued at the next start")
         }
     }
-    Ok(())
+    match failed {
+        Some(error) => Err(error.context("the MCP server stopped")),
+        None => Ok(()),
+    }
 }

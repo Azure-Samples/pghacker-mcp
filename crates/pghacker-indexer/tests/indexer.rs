@@ -1727,6 +1727,51 @@ async fn the_workers_stop_when_an_outcome_cannot_be_recorded() {
 }
 
 #[tokio::test]
+async fn the_indexer_exits_when_its_mcp_server_cannot_listen() {
+    use std::process::Stdio;
+    use std::time::Duration;
+    let db = TestDb::create().await.unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    // Something else listens on the indexer's address.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_pghacker-indexer"))
+        .arg("serve")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("PGHACKER_INDEXER_DATABASE_URL", &db.indexer_url)
+        .env("PGHACKER_INDEXER_ADDR", &addr)
+        .env(
+            "PGHACKER_SLICES",
+            pghacker_core::config::repo_root()
+                .unwrap()
+                .join("config/test-slices.toml"),
+        )
+        .env("PGHACKER_CACHE_DIR", cache.path())
+        .env("PGHACKER_GIT_DIR", cache.path())
+        .env("PGHACKER_WORKERS", "2")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    // It doesn't run its jobs on without the server: it stops them and
+    // exits with the error, for its supervisor to start it again.
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .expect("the indexer runs on without its MCP server")
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("cannot listen on {addr}")),
+        "{stderr}"
+    );
+    drop(taken);
+}
+
+#[tokio::test]
 async fn the_history_sync_fetches_and_applies_new_commits() {
     let src = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
