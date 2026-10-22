@@ -33,7 +33,8 @@ pub enum Checked {
 pub enum Fallback {
     /// sqlparser couldn't parse it: its error, which quotes the statement.
     Unparsed(String),
-    /// It nests deeper than the walk's 64 levels.
+    /// It nests deeper than the walk's 64 levels, or has more than 1,000
+    /// operators: such a statement isn't parsed.
     TooDeep,
 }
 
@@ -74,6 +75,9 @@ pub(super) fn check(sql: &str, max_bytes: usize) -> Result<Checked, String> {
         if let Token::Word(word) = token {
             check_session_sql(&identifier(&word.value, word.quote_style.is_some()))?;
         }
+    }
+    if operators(statement) > MAX_PARSED_OPERATORS {
+        return check_fallback(statement).map(|()| Checked::Tokens(Fallback::TooDeep));
     }
     match Parser::new(&PostgreSqlDialect {})
         .with_tokens(statement.to_vec())
@@ -214,6 +218,83 @@ fn check_head(mut tokens: &[Token]) -> Result<(), String> {
 }
 
 const MAX_VISIT_DEPTH: usize = 64;
+
+/// The most operators a statement may have for sqlparser to parse it; one
+/// with more is checked by its tokens, as one that nests deeper than the walk
+/// goes. Reads have far fewer.
+const MAX_PARSED_OPERATORS: usize = 1_000;
+
+/// The keywords that join operands, or queries, into a chain.
+const OPERATOR_KEYWORDS: &[Keyword] = &[
+    Keyword::AND,
+    Keyword::OR,
+    Keyword::XOR,
+    Keyword::NOT,
+    Keyword::IS,
+    Keyword::NOTNULL,
+    Keyword::IN,
+    Keyword::BETWEEN,
+    Keyword::OVERLAPS,
+    Keyword::LIKE,
+    Keyword::ILIKE,
+    Keyword::RLIKE,
+    Keyword::REGEXP,
+    Keyword::SIMILAR,
+    Keyword::GLOB,
+    Keyword::MATCH,
+    Keyword::MEMBER,
+    Keyword::OPERATOR,
+    Keyword::DIV,
+    Keyword::COLLATE,
+    Keyword::AT,
+    Keyword::UNION,
+    Keyword::INTERSECT,
+    Keyword::EXCEPT,
+    Keyword::MINUS,
+];
+
+/// How many of `tokens` are operators: every symbol but punctuation, and the
+/// keywords that join operands or queries.
+fn operators(tokens: &[Token]) -> usize {
+    tokens
+        .iter()
+        .filter(|token| match token {
+            Token::Word(word) => {
+                word.quote_style.is_none() && OPERATOR_KEYWORDS.contains(&word.keyword)
+            }
+            Token::EOF
+            | Token::Whitespace(_)
+            | Token::Number(..)
+            | Token::Char(_)
+            | Token::SingleQuotedString(_)
+            | Token::DoubleQuotedString(_)
+            | Token::TripleSingleQuotedString(_)
+            | Token::TripleDoubleQuotedString(_)
+            | Token::DollarQuotedString(_)
+            | Token::SingleQuotedByteStringLiteral(_)
+            | Token::DoubleQuotedByteStringLiteral(_)
+            | Token::TripleSingleQuotedByteStringLiteral(_)
+            | Token::TripleDoubleQuotedByteStringLiteral(_)
+            | Token::SingleQuotedRawStringLiteral(_)
+            | Token::DoubleQuotedRawStringLiteral(_)
+            | Token::TripleSingleQuotedRawStringLiteral(_)
+            | Token::TripleDoubleQuotedRawStringLiteral(_)
+            | Token::NationalStringLiteral(_)
+            | Token::QuoteDelimitedStringLiteral(_)
+            | Token::NationalQuoteDelimitedStringLiteral(_)
+            | Token::EscapedStringLiteral(_)
+            | Token::UnicodeStringLiteral(_)
+            | Token::HexStringLiteral(_)
+            | Token::Placeholder(_)
+            | Token::Comma
+            | Token::SemiColon
+            | Token::Period
+            | Token::LParen
+            | Token::RParen => false,
+            _ => true,
+        })
+        .count()
+}
 
 enum Stop {
     Refused(String),
@@ -656,6 +737,9 @@ fn check_fallback(tokens: &[Token]) -> Result<(), String> {
         if name == "cypher" && !is_alias_or_type(tokens, index) {
             let args = call_arguments(tokens, index + 1).ok_or_else(cypher_literal_refusal)?;
             let query = args.get(1).ok_or_else(cypher_literal_refusal)?;
+            if operators(query) > MAX_PARSED_OPERATORS {
+                return Err(cypher_literal_refusal());
+            }
             let mut parser = Parser::new(&PostgreSqlDialect {}).with_tokens(query.to_vec());
             let expr = parser.parse_expr().map_err(|_| cypher_literal_refusal())?;
             if parser.peek_token().token != Token::EOF {

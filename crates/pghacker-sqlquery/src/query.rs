@@ -48,6 +48,9 @@ use crate::policy::{Checked, Fallback};
 /// The longest SQL that query takes, in bytes.
 pub const MAX_SQL_BYTES: usize = 64 * 1024;
 
+/// The stack size of the threads that run [`check`].
+pub const STACK_BYTES: usize = 8 * 1024 * 1024;
+
 /// The rows that query returns when the agent doesn't say.
 pub const DEFAULT_MAX_ROWS: usize = 100;
 

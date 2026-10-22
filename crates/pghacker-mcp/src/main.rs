@@ -53,8 +53,18 @@ const CALL_TIMEOUT_SECONDS: u64 = 30;
 /// answered 503: the call's own error comes first.
 const REQUEST_MARGIN: Duration = Duration::from_secs(10);
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// The runtime's threads, which run the tool calls and query's checks, have
+/// query's stack size.
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(pghacker_sqlquery::STACK_BYTES)
+        .build()
+        .context("cannot start the async runtime")?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     telemetry::init();
     let env = Env::process();
     if std::env::args()

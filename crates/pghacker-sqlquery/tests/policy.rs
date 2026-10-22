@@ -327,6 +327,104 @@ fn deep_read_expressions_use_the_checked_fallback_without_exhausting_the_stack()
     );
 }
 
+/// `head`, then as many `repeated` as fit in the longest SQL query takes,
+/// then `tail` as many times as `repeated` was, then `end`.
+fn longest(head: &str, repeated: &str, tail: &str, end: &str) -> String {
+    let max = pghacker_sqlquery::MAX_SQL_BYTES;
+    let times = (max - head.len() - end.len()) / (repeated.len() + tail.len());
+    let sql = format!(
+        "{head}{}{}{end}",
+        repeated.repeat(times),
+        tail.repeat(times)
+    );
+    assert!(sql.len() <= max && sql.len() + repeated.len() + tail.len() > max);
+    sql
+}
+
+/// Checks `sql` on a thread with `stack` bytes of stack.
+fn check_on_a_stack(sql: String, stack: usize) -> Result<Checked, String> {
+    std::thread::Builder::new()
+        .stack_size(stack)
+        .spawn(move || check(&sql))
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// Tokio's default thread stack size.
+const TOKIO_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+#[test]
+fn the_longest_chains_are_checked_by_their_tokens() {
+    for (head, repeated) in [
+        ("SELECT 1", "+1"),
+        ("SELECT 1", " + 1"),
+        ("SELECT 1", "*1"),
+        ("SELECT 1", "::int"),
+        ("SELECT true", " AND true"),
+        ("SELECT true", " OR true"),
+        ("SELECT 'a'", "||'a'"),
+        ("SELECT 1", " IS NOT NULL"),
+        ("SELECT 1", " IS NULL"),
+        ("SELECT 1", " BETWEEN 1 AND 1"),
+        ("SELECT 1", " IN (1)"),
+        ("SELECT 'a'", " LIKE 'a'"),
+        ("SELECT 'a'", " COLLATE \"C\""),
+        ("SELECT now()", " AT TIME ZONE 'UTC'"),
+        ("SELECT '{}'::jsonb", "->'a'"),
+        ("SELECT '{}'::jsonb", "#>'{a}'"),
+        ("SELECT ARRAY[1]", "[1]"),
+        ("SELECT 1", " OPERATOR(pg_catalog.+) 1"),
+        ("SELECT 1", " UNION SELECT 1"),
+        ("SELECT 1", " INTERSECT SELECT 1"),
+        ("SELECT 1", " EXCEPT SELECT 1"),
+    ] {
+        let sql = longest(head, repeated, "", "");
+        assert_eq!(
+            check_on_a_stack(sql, TOKIO_STACK_BYTES),
+            Ok(Checked::Tokens(Fallback::TooDeep)),
+            "{head} {repeated}"
+        );
+    }
+    // cypher()'s query text, which the checks of tokens parse.
+    for repeated in ["::text", "||'a'"] {
+        let sql = longest(
+            "SELECT * FROM cypher('pghacker_graph', 'MATCH (n) RETURN n'",
+            repeated,
+            "",
+            ") AS (n agtype)",
+        );
+        let reason = check_on_a_stack(sql, TOKIO_STACK_BYTES).expect_err(repeated);
+        assert!(
+            reason.contains("literal query text"),
+            "{repeated}: {reason}"
+        );
+    }
+    // Short chains are still parsed and walked.
+    let sum = vec!["1"; 20].join(" + ");
+    assert_eq!(allowed(&format!("SELECT {sum}")), Checked::Parsed);
+}
+
+#[test]
+fn the_deepest_nestings_are_checked_by_their_tokens() {
+    for (repeated, end, tail) in [
+        ("- ", "1", ""),
+        ("NOT ", "true", ""),
+        ("(", "1", ")"),
+        ("abs(", "1", ")"),
+        ("ARRAY[", "1", "]"),
+        ("(SELECT ", "1", ")"),
+        ("CASE WHEN true THEN ", "1", " END"),
+    ] {
+        let sql = longest("SELECT ", repeated, tail, end);
+        let checked = check_on_a_stack(sql, pghacker_sqlquery::STACK_BYTES);
+        assert!(
+            matches!(checked, Ok(Checked::Tokens(_))),
+            "{repeated}: {checked:?}"
+        );
+    }
+}
+
 #[test]
 fn nested_writes_table_creation_and_row_locks_are_refused() {
     for (sql, reason) in [
