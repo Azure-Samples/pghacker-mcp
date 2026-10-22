@@ -68,6 +68,75 @@ async fn the_reader_reads_but_cannot_write_or_see_emails() {
     assert_eq!(timeout, "10s");
 }
 
+/// pgh_reader's grants, pinned: the tables of schema pghacker it can't read
+/// (it reads the others, and the graph's), and that it can write and create
+/// nothing. A new table is readable unless a migration revokes it: then it
+/// belongs in this list.
+#[tokio::test]
+async fn the_readers_grants_are_pinned() {
+    let db = TestDb::create().await.unwrap();
+    let admin = db.admin().await.unwrap();
+    let names = |sql: &'static str| {
+        let admin = &admin;
+        async move {
+            admin
+                .query(sql, &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>()
+        }
+    };
+    let unreadable = names(
+        "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname IN ('pghacker', 'pghacker_graph') AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+           AND NOT has_table_privilege('pgh_reader', c.oid, 'SELECT')
+         ORDER BY 1",
+    )
+    .await;
+    assert_eq!(
+        unreadable,
+        [
+            "author_emails",
+            "distinct_pairs",
+            "drafts",
+            "duplicate_candidates",
+            "duplicate_checks",
+            "extraction_leases",
+            "graph_changes",
+            "graph_committers",
+            "graph_edges",
+            "graph_nodes",
+            "graph_sync_runs",
+            "graph_sync_state",
+            "jobs",
+            "merge_log"
+        ]
+    );
+    let writable = names(
+        "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f') AND n.nspname !~ '^(pg_|information_schema$)'
+           AND has_table_privilege('pgh_reader', c.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+         ORDER BY 1",
+    )
+    .await;
+    assert!(writable.is_empty(), "{writable:?}");
+    let creatable = names(
+        "SELECT nspname::text FROM pg_namespace
+         WHERE has_schema_privilege('pgh_reader', oid, 'CREATE') ORDER BY 1",
+    )
+    .await;
+    assert!(creatable.is_empty(), "{creatable:?}");
+    let used = names(
+        "SELECT nspname::text FROM pg_namespace
+         WHERE has_schema_privilege('pgh_reader', oid, 'USAGE')
+           AND nspname !~ '^(pg_|information_schema$)' ORDER BY 1",
+    )
+    .await;
+    assert_eq!(used, ["ag_catalog", "pghacker", "pghacker_graph", "public"]);
+}
+
 #[tokio::test]
 async fn the_reader_cannot_see_other_schemas() {
     let db = TestDb::create().await.unwrap();
