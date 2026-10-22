@@ -739,11 +739,18 @@ async fn search_inner(
 
     // Coverage: the distinct query terms each file matches.
     let mut cover: HashMap<usize, u32> = HashMap::new();
+    let mut cover_exceeded = false;
     if !plan.terms.is_empty() {
         let terms: Vec<LineMatcher> = plan.terms.iter().map(|t| t.matcher.clone()).collect();
-        (hits, cover) = engine::off_runtime(move || {
+        let deadline = *budget;
+        (hits, cover, cover_exceeded) = engine::off_runtime(move || {
             let mut seen: HashMap<usize, HashSet<usize>> = HashMap::new();
+            let mut exceeded = false;
             for (file, _, line) in &hits {
+                if deadline.exceeded() {
+                    exceeded = true;
+                    break;
+                }
                 let set = seen.entry(*file).or_default();
                 for (t, term) in terms.iter().enumerate() {
                     if !set.contains(&t) && term.is_match(line) {
@@ -752,7 +759,7 @@ async fn search_inner(
                 }
             }
             let cover = seen.into_iter().map(|(f, s)| (f, s.len() as u32)).collect();
-            (hits, cover)
+            (hits, cover, exceeded)
         })
         .await?;
         per_file.sort_by_key(|(f, _)| (std::cmp::Reverse(cover.get(f).copied().unwrap_or(0)), *f));
@@ -774,8 +781,8 @@ async fn search_inner(
         offset: args.offset,
         returned: 0,
         cut: false,
-        budget_exceeded: found.timed_out,
-        complete: !found.timed_out && !found.capped,
+        budget_exceeded: found.timed_out || cover_exceeded,
+        complete: !found.timed_out && !found.capped && !cover_exceeded,
         lines: Vec::new(),
         files: Vec::new(),
         matches: Vec::new(),

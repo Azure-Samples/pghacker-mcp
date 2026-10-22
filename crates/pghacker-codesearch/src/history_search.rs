@@ -277,9 +277,15 @@ pub(crate) async fn search(
     let (rows, found) = matching(client, h, require, reject, scope, range.as_ref(), budget).await?;
     // Lines alive somewhere in the range, by path and text.
     let matchers = patterns.matchers();
-    let ordered = engine::off_runtime(move || {
+    let deadline = *budget;
+    let (ordered, exceeded) = engine::off_runtime(move || {
         let mut groups: HashMap<(String, String), Vec<Instance>> = HashMap::new();
+        let mut exceeded = false;
         for m in rows {
+            if deadline.exceeded() {
+                exceeded = true;
+                break;
+            }
             if !filter.allows("", &m.path) || !matchers.is_match(&m.line) {
                 continue;
             }
@@ -299,7 +305,7 @@ pub(crate) async fn search(
                 .then_with(|| a.1[0].lo.cmp(&b.1[0].lo))
                 .then_with(|| a.0.1.cmp(&b.0.1))
         });
-        ordered
+        (ordered, exceeded)
     })
     .await?;
     let total_files = {
@@ -426,8 +432,8 @@ pub(crate) async fn search(
         offset: args.offset,
         returned: hits.len() as u32,
         cut: offset + hits.len() < ordered.len(),
-        budget_exceeded: found.timed_out,
-        complete: !found.timed_out && !found.capped,
+        budget_exceeded: found.timed_out || exceeded,
+        complete: !found.timed_out && !found.capped && !exceeded,
         lines: Vec::new(),
         files: Vec::new(),
         matches: Vec::new(),

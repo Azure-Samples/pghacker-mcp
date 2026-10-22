@@ -291,6 +291,11 @@ async fn grep_paths_pipelines_and_errors() -> Result<()> {
         ("grep -rn x src; ls", "one grep pipeline"),
         ("grep -P '(' src", "unclosed group"),
         ("grep -E 'a{2,1}' -r src", "Invalid content"),
+        // Brace expansion has one budget for the whole command.
+        (
+            "grep -h x src {1..4000} | grep -e {1..4000} | grep -e {1..4000}",
+            "more than 10000 words",
+        ),
     ] {
         let error = run(&reader, s, command, Limits::default())
             .await

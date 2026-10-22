@@ -5,10 +5,12 @@
 //! budget, and the lines around matches.
 
 use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use futures_util::{TryStreamExt, pin_mut};
+use tokio::sync::Semaphore;
 use tokio_postgres::GenericClient;
 use tokio_postgres::error::SqlState;
 use tokio_postgres::types::ToSql;
@@ -134,18 +136,39 @@ pub async fn recover(client: &impl GenericClient) {
 }
 
 /// Runs CPU-bound work on the fetched rows, such as exact pattern matching,
-/// on Tokio's blocking threads, so it can't stall the async workers.
+/// on Tokio's blocking threads, so it can't stall the async workers. At most
+/// [`blocking_turns`] pieces run at once; others wait their turn without a
+/// thread. A piece keeps its turn until it ends, even when its call is
+/// abandoned, since a blocking thread can't be stopped: its loops stop at
+/// the call's budget instead.
 pub async fn off_runtime<T, F>(work: F) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::task::spawn_blocking(work).await {
+    let turn = Arc::clone(&BLOCKING_TURNS)
+        .acquire_owned()
+        .await
+        .context("code search's turns are closed")?;
+    match tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        work()
+    })
+    .await
+    {
         Ok(value) => Ok(value),
         Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
         Err(error) => Err(anyhow::anyhow!("code search work was cancelled: {error}")),
     }
 }
+
+/// The pieces of CPU-bound work that run at once: as many as the cores.
+pub fn blocking_turns() -> usize {
+    std::thread::available_parallelism().map_or(2, |cores| cores.get().max(2))
+}
+
+static BLOCKING_TURNS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(blocking_turns())));
 
 /// Whether `error` is a cancellation by statement_timeout.
 pub fn is_timeout(error: &tokio_postgres::Error) -> bool {
@@ -335,6 +358,24 @@ pub fn merge_ranges(mut ranges: Vec<(i32, i32, i32)>) -> Vec<(i32, i32, i32)> {
 mod tests {
     use super::*;
     use crate::pattern::{Cond, Op};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocking_work_runs_at_most_a_piece_per_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let turns = blocking_turns();
+        let (running, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let pieces = (0..turns * 3).map(|_| {
+            let (running, most) = (Arc::clone(&running), Arc::clone(&most));
+            off_runtime(move || {
+                most.fetch_max(running.fetch_add(1, SeqCst) + 1, SeqCst);
+                std::thread::sleep(Duration::from_millis(20));
+                running.fetch_sub(1, SeqCst);
+            })
+        });
+        futures_util::future::try_join_all(pieces).await.unwrap();
+        let most = most.load(SeqCst);
+        assert!((1..=turns).contains(&most), "{most} of {turns}");
+    }
 
     #[test]
     fn budgets_default_to_ten_seconds_and_clamp_to_fifteen() {

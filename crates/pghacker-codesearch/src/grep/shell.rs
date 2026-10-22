@@ -496,8 +496,14 @@ fn simple(tokens: &[Token]) -> Result<Vec<Command>, String> {
     if stages.iter().any(|s| s.words.is_empty()) {
         return Err("empty command in the pipeline".into());
     }
+    if stages.len() > MAX_STAGES {
+        return Err(format!("the pipeline has more than {MAX_STAGES} commands"));
+    }
     Ok(stages)
 }
+
+/// The most commands of a pipeline.
+pub const MAX_STAGES: usize = 16;
 
 /// The longest command line, in bytes.
 pub const MAX_COMMAND: usize = 8 * 1024;
@@ -826,5 +832,12 @@ mod tests {
         assert!(parse(&ok).is_ok());
         let err = parse(&format!("{ok}x")).unwrap_err();
         assert!(err.contains("longer than"), "{err}");
+        let pipeline = |stages: usize| format!("grep x{}", " | cat".repeat(stages - 1));
+        assert_eq!(
+            parse(&pipeline(MAX_STAGES)).unwrap().stages.len(),
+            MAX_STAGES
+        );
+        let err = parse(&pipeline(MAX_STAGES + 1)).unwrap_err();
+        assert!(err.contains("more than 16 commands"), "{err}");
     }
 }

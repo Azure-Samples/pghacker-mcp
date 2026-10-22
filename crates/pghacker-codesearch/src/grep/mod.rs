@@ -136,7 +136,14 @@ pub async fn select(
         let script = shell::parse(command).map_err(|e| anyhow!(e))?;
         let table = FileTable::view(client, revision, &mount_words(&script)).await?;
         let cwd = cwd_of(&script, &table, &revision.repo)?;
-        let words = expand(&script.stages[0].words, &table, &revision.repo, &cwd)?;
+        let mut room = shell::Room::default();
+        let words = expand(
+            &script.stages[0].words,
+            &mut room,
+            &table,
+            &revision.repo,
+            &cwd,
+        )?;
         check_program(&words)?;
         let mut opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
         opts.max_count = None;
@@ -209,12 +216,18 @@ fn cwd_of(script: &shell::Script, table: &FileTable, repo: &str) -> Result<Strin
         .ok_or_else(|| anyhow!("cd: {dir}: No such file or directory"))
 }
 
-/// Words after brace and wildcard expansion.
-fn expand(words: &[Word], table: &FileTable, repo: &str, cwd: &str) -> Result<Vec<String>> {
+/// Words after brace and wildcard expansion, within what `room` leaves of
+/// the command's expansion.
+fn expand(
+    words: &[Word],
+    room: &mut shell::Room,
+    table: &FileTable,
+    repo: &str,
+    cwd: &str,
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    let mut room = shell::Room::default();
     for word in words {
-        for w in shell::brace_expand(word, &mut room).map_err(|e| anyhow!(e))? {
+        for w in shell::brace_expand(word, room).map_err(|e| anyhow!(e))? {
             if w.has_wildcards() {
                 let matches = glob_paths(&w.glob_pattern(), table, repo, cwd);
                 if !matches.is_empty() {
@@ -698,14 +711,16 @@ async fn run_inner(
     let table = FileTable::view(client, revision, &mount_words(&script)).await?;
     let cwd = cwd_of(&script, &table, &revision.repo)?;
     let first = &script.stages[0];
-    let words = expand(&first.words, &table, &revision.repo, &cwd)?;
+    // One expansion budget for the whole command, every stage of it.
+    let mut room = shell::Room::default();
+    let words = expand(&first.words, &mut room, &table, &revision.repo, &cwd)?;
     check_program(&words)?;
     let opts = Options::parse(&words[1..]).map_err(|e| anyhow!("grep: {e}"))?;
     let compiled = compile(&opts)?;
     // Later stages are checked before the search runs.
     let mut later = Vec::new();
     for stage in &script.stages[1..] {
-        let words = expand(&stage.words, &table, &revision.repo, &cwd)?;
+        let words = expand(&stage.words, &mut room, &table, &revision.repo, &cwd)?;
         check_stage(&words)?;
         later.push(words);
     }
@@ -832,10 +847,9 @@ async fn run_inner(
         let deadline = *budget;
         let staged = engine::off_runtime(move || -> Result<Option<(Vec<u8>, i32)>> {
             for words in later {
-                if deadline.exceeded() {
+                let Some((out, code)) = run_stage(&words, &stdout, &deadline)? else {
                     return Ok(None);
-                }
-                let (out, code) = run_stage(&words, &stdout)?;
+                };
                 stdout = out;
                 status = code;
             }
@@ -853,7 +867,7 @@ async fn run_inner(
     if status != 0
         && let Some(fallback) = &script.fallback
     {
-        let words = expand(&fallback.words, &table, &revision.repo, &cwd)?;
+        let words = expand(&fallback.words, &mut room, &table, &revision.repo, &cwd)?;
         match words[0].as_str() {
             "true" | ":" => status = 0,
             "echo" => {
@@ -967,8 +981,12 @@ fn check_stage(words: &[String]) -> Result<()> {
     }
 }
 
-/// Runs one later stage on `input`: its output and exit status.
-fn run_stage(words: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
+/// Runs one later stage on `input`: its output and exit status, or none once
+/// `deadline` has passed.
+fn run_stage(words: &[String], input: &[u8], deadline: &Budget) -> Result<Option<(Vec<u8>, i32)>> {
+    if deadline.exceeded() {
+        return Ok(None);
+    }
     let name = words[0].rsplit('/').next().unwrap_or(&words[0]).to_owned();
     let args = &words[1..];
     let out = match name.as_str() {
@@ -979,13 +997,14 @@ fn run_stage(words: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
         "uniq" => stages::uniq(args, input),
         "cut" => stages::cut(args, input),
         "cat" => stages::cat(args, input),
-        _ => return grep_stage(args, input),
+        _ => return grep_stage(args, input, deadline),
     };
-    out.map(|o| (o, 0)).map_err(|e| anyhow!(e))
+    out.map(|o| Some((o, 0))).map_err(|e| anyhow!(e))
 }
 
-/// A grep after `|`: it reads the previous output.
-fn grep_stage(args: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
+/// A grep after `|`: it reads the previous output. None once `deadline` has
+/// passed.
+fn grep_stage(args: &[String], input: &[u8], deadline: &Budget) -> Result<Option<(Vec<u8>, i32)>> {
     let opts = Options::parse(args).map_err(|e| anyhow!("grep: {e}"))?;
     if opts.operands.iter().any(|o| o != "-") || opts.directories == Directories::Recurse {
         bail!("a grep after | reads the previous output; it cannot take files or -r");
@@ -996,12 +1015,15 @@ fn grep_stage(args: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
     if text.ends_with('\n') || text.is_empty() {
         lines.pop();
     }
-    let selected: Vec<i32> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| compiled.matcher.is_match(l) != opts.invert)
-        .map(|(k, _)| k as i32 + 1)
-        .collect();
+    let mut selected: Vec<i32> = Vec::new();
+    for (k, line) in lines.iter().enumerate() {
+        if deadline.exceeded() {
+            return Ok(None);
+        }
+        if compiled.matcher.is_match(line) != opts.invert {
+            selected.push(k as i32 + 1);
+        }
+    }
     let mut printer = Printer::new(&opts, &compiled.matcher, opts.with_filename == Some(true));
     let get = |n: i32| lines.get(n as usize - 1).map(|s| (*s).to_owned());
     printer.file(
@@ -1016,7 +1038,7 @@ fn grep_stage(args: &[String], input: &[u8]) -> Result<(Vec<u8>, i32)> {
     } else {
         i32::from(printer.selected == 0)
     };
-    Ok((printer.out, status))
+    Ok(Some((printer.out, status)))
 }
 
 #[cfg(test)]
@@ -1147,15 +1169,27 @@ mod tests {
     #[test]
     fn downstream_grep_and_stages() {
         let input = b"a.c:1:foo\nb.c:2:bar\nc.c:3:foo bar\n";
+        let budget = Budget::new(None);
         let words: Vec<String> = ["-v", "bar"].iter().map(|s| (*s).to_owned()).collect();
         assert_eq!(
-            grep_stage(&words, input).unwrap(),
-            (b"a.c:1:foo\n".to_vec(), 0)
+            grep_stage(&words, input, &budget).unwrap(),
+            Some((b"a.c:1:foo\n".to_vec(), 0))
         );
         let words: Vec<String> = ["-c", "foo"].iter().map(|s| (*s).to_owned()).collect();
-        assert_eq!(grep_stage(&words, input).unwrap().0, b"2\n".to_vec());
+        assert_eq!(
+            grep_stage(&words, input, &budget).unwrap().unwrap().0,
+            b"2\n".to_vec()
+        );
         assert!(check_stage(&["awk".to_owned()]).is_err());
         assert!(check_program(&["egrep".to_owned()]).is_err());
         assert!(check_program(&["/usr/bin/grep".to_owned()]).is_ok());
+        // Past the budget, stages stop.
+        let spent = Budget::new(Some(1));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(grep_stage(&words, input, &spent).unwrap(), None);
+        assert_eq!(
+            run_stage(&["sort".to_owned()], input, &spent).unwrap(),
+            None
+        );
     }
 }

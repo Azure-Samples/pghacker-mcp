@@ -116,12 +116,23 @@ pub(crate) async fn grep(
             return Ok(None);
         }
         let matcher = compiled.matcher.clone();
-        let rows: Vec<_> = crate::engine::off_runtime(move || {
-            rows.into_iter()
-                .filter(|m| matcher.is_match(&m.line))
-                .collect()
+        let deadline = *budget;
+        let rows: Option<Vec<_>> = crate::engine::off_runtime(move || {
+            let mut kept = Vec::new();
+            for m in rows {
+                if deadline.exceeded() {
+                    return None;
+                }
+                if matcher.is_match(&m.line) {
+                    kept.push(m);
+                }
+            }
+            Some(kept)
         })
         .await?;
+        let Some(rows) = rows else {
+            return Ok(None);
+        };
         // Each line at the first commit in the range that has it.
         let firsts: Vec<i64> = rows
             .iter()
