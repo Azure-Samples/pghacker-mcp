@@ -6,5 +6,5 @@ The software may collect information about you and your use of the software and 
 
 ## Turning telemetry off
 
-- **Deployed with this repository's Terraform (telemetry is on by default):** set `usage_enabled = false` in your `.tfvars` and run `terraform apply`. No Application Insights resource is created and the app gets no connection string, so nothing is sent.
+- **Deployed with this repository's Terraform:** telemetry is off unless your `.tfvars` sets `usage_enabled = true`. To turn it off, set `usage_enabled = false`, or remove the line, and run `terraform apply`. No Application Insights resource is created and the app gets no connection string, so nothing is sent.
 - **Run any other way:** `npm start` never sends telemetry, and the binaries on their own send none unless `PGHACKER_USAGE_ENDPOINT` is set.

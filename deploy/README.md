@@ -32,12 +32,12 @@ flowchart LR
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door and the ingress pass a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design; the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
-- **Usage telemetry** goes to Application Insights on the logs' workspace.
+- **Usage telemetry**, with `usage_enabled = true`, goes to Application Insights on the logs' workspace. It's off by default: set `privacy_url` to your privacy statement before you turn it on.
   - It records an event for each request to `/mcp`: the tool, its arguments' names, its outcome and the shape of its answer, and the client. It also records each view of the home page.
   - `usage_details_enabled = true` also records what users type into tools: arguments' values, error messages and sqlparser's errors. Off by default, a call keeps only the values of its fixed-choice arguments (enums and booleans) and, for `query`, PostgreSQL's SQLSTATE.
   - Application Insights derives a country, region and city from each client's address, then discards the address.
   - Now and then, as an interactive client's user starts a new question, `/mcp` asks through the client's own form whether the last answer helped, and records the choice ([feedback](../docs/reference.md#feedback)): `feedback_rate_per_hour` (0.1) sets how often, and 0 turns it off.
-  - `usage_enabled = false` turns it all off ([PRIVACY.md](../PRIVACY.md)).
+  - `usage_enabled = false`, the default, turns it all off ([PRIVACY.md](../PRIVACY.md)).
 - **Production mode**:
   - `add_source` takes any list of the postgresql.org archive (chosen months, a range, or the whole archive, plus seed threads).
     - A list added without months, `follow` included, queues the whole archive.
@@ -186,6 +186,8 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 ## Updates
 
 Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap: the old revision serves until the new one has applied its migrations and is ready ([Schema upgrades](#schema-upgrades)). The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped. Only the indexer that holds a session advisory lock runs jobs; it checks the lock's connection every 2 s. If that connection is lost, the lock goes with it, so the indexer drops its running jobs and exits, and the supervisor starts it again to wait for its turn. An indexer that takes the lock and finds jobs left running waits 30 s, until the one that ran them has stopped them, before it queues them again. A worker that can't record a job's outcome, as when the database drops its connection, tries again for 30 s; then the indexer drops its running jobs and exits the same way. If the indexer's MCP server stops, as when it can't listen, the indexer finishes its running jobs, as on a shutdown, and exits with the error for the supervisor to start it again.
+
+Usage telemetry is off unless `usage_enabled = true`; it used to be on by default. A deployment that relied on that default must set `usage_enabled = true`, and `privacy_url`, before its next apply. Otherwise the apply deletes its Application Insights resource and the users' key, `usage-id-key`: `AppEvents` keeps the events it holds until their retention ends, but if telemetry is turned on again, clients get new IDs.
 
 ### Schema upgrades
 

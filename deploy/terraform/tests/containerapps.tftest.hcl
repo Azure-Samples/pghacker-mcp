@@ -22,6 +22,9 @@ variables {
   github_org          = "contoso"
   github_team         = "pghacker-operators"
   deployer_object_ids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+  # The app's whole contract, usage telemetry's settings among them; it's off
+  # by default (usage.tftest.hcl).
+  usage_enabled = true
 }
 
 mock_provider "azurerm" {

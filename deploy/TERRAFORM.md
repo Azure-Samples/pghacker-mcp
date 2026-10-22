@@ -88,7 +88,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `key_vault_name` | required | Vault name, globally unique |
 | `key_vault_purge_protection_enabled` | `false` | Purge protection; irreversible |
 | `log_retention_days` | `30` | Log Analytics retention, 30 to 730 |
-| `usage_enabled` | `true` | Usage telemetry ([PRIVACY.md](../PRIVACY.md)): Application Insights on the logs' workspace, `usage-id-key`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` for the app; false creates none of them, and the app records nothing. `AppEvents` keeps the events it already holds until their retention ends |
+| `usage_enabled` | `false` | Usage telemetry ([PRIVACY.md](../PRIVACY.md)): Application Insights on the logs' workspace, `usage-id-key`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` for the app; false creates none of them, and the app records nothing. `AppEvents` keeps the events it already holds until their retention ends. Set `privacy_url` before turning it on |
 | `usage_daily_cap_gb` | `5` | The most usage telemetry Application Insights takes a day; it drops the rest of the day's events |
 | `usage_retention_days`, `usage_total_retention_days` | `730`, `1095` | How long usage events stay queryable (30 to 730) and are kept (up to 4383) in the `AppEvents` table |
 | `usage_details_enabled` | `false` | Whether usage telemetry records what users type into tools: arguments' values, error messages and sqlparser's errors (`PGHACKER_USAGE_DETAILS`). Without it, a call keeps its tool, its arguments' names and size, the values of its fixed-choice arguments (enums and booleans), its outcome and, for `query`, PostgreSQL's SQLSTATE; its events say `common.details` `off`. Feedback comments follow `feedback_comments_enabled` alone |

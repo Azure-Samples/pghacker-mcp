@@ -4,8 +4,8 @@
 # Usage telemetry: Application Insights on the logs' workspace, which only
 # the app's identity may send to, the retention of its AppEvents table, the
 # key of the users' keyed hashes, and what the app gets, feedback's settings
-# among them; and none of it with usage_enabled = false. Every provider is
-# mocked.
+# among them, with usage_enabled = true; and none of it by default. Every
+# provider is mocked.
 
 variables {
   subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -48,7 +48,33 @@ override_resource {
   values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/usage-id-key" }
 }
 
-run "usage_is_recorded_by_default" {
+run "usage_is_off_by_default" {
+  assert {
+    condition = (
+      length(azurerm_application_insights.usage) == 0
+      && length(azurerm_role_assignment.app_usage_publisher) == 0
+      && length(azapi_resource_action.usage_table) == 0
+      && length(azurerm_key_vault_secret.usage_id_key) == 0
+      && output.usage_app_insights_name == null
+      && output.usage_app_id == null
+    )
+    error_message = "Without usage_enabled = true, none of the usage telemetry must be created."
+  }
+
+  assert {
+    condition = (
+      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
+      && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
+    )
+    error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."
+  }
+}
+
+run "usage_is_recorded_when_enabled" {
+  variables {
+    usage_enabled = true
+  }
+
   assert {
     condition = (
       length(azurerm_application_insights.usage) == 1
@@ -132,7 +158,7 @@ run "usage_is_recorded_by_default" {
         ]
       ]))
     )
-    error_message = "By default the app, and not the jobs, must ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments or debug mode."
+    error_message = "With usage, the app, and not the jobs, must by default ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments or debug mode."
   }
 
   assert {
@@ -146,12 +172,13 @@ run "usage_is_recorded_by_default" {
         ]
       ]))
     )
-    error_message = "By default the app must record usage without details, what users type into tools; the jobs record no usage."
+    error_message = "With usage, the app must by default record it without details, what users type into tools; the jobs record no usage."
   }
 }
 
 run "usage_details_are_set_with_their_variable" {
   variables {
+    usage_enabled         = true
     usage_details_enabled = true
   }
 
@@ -165,6 +192,7 @@ run "usage_details_are_set_with_their_variable" {
 
 run "feedback_is_set_with_its_variables" {
   variables {
+    usage_enabled                 = true
     feedback_rate_per_hour        = 0
     feedback_comments_enabled     = true
     feedback_question_gap_seconds = 120

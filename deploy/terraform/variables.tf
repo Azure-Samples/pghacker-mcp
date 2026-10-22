@@ -728,9 +728,9 @@ variable "copyright_text" {
 # --- Usage telemetry --------------------------------------------------------------
 
 variable "usage_enabled" {
-  description = "Record usage telemetry (PRIVACY.md): an Application Insights resource on the logs' workspace, the retention of its AppEvents table, the key of the users' keyed hashes in Key Vault (usage-id-key) and APPLICATIONINSIGHTS_CONNECTION_STRING for the app. False creates none of these, and the app records nothing."
+  description = "Record usage telemetry (PRIVACY.md): an Application Insights resource on the logs' workspace, the retention of its AppEvents table, the key of the users' keyed hashes in Key Vault (usage-id-key) and APPLICATIONINSIGHTS_CONNECTION_STRING for the app. False, the default, creates none of these, and the app records nothing. Before turning it on, set privacy_url to your privacy statement, so that the home page's visitors can read what it records."
   type        = bool
-  default     = true
+  default     = false
   nullable    = false
 }
 
