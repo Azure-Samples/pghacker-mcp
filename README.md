@@ -89,7 +89,12 @@ The last reviews 14 patches as their actual reviewers would have (10 they object
 
 ## Privacy and telemetry
 
-A deployment made with this repository's Terraform records usage telemetry in its own Application Insights: for each request to `/mcp`, the tool, its arguments' names and the shape of its answer (or the skill file read), the client, and an approximate location; and each view of the home page. What you type into tools, such as SQL and search terms, is recorded only if the deployment sets `usage_details_enabled = true`. The service's own logs, which go to the deployment's Log Analytics, keep a call's tool, duration and outcome and, for a failed `query`, PostgreSQL's error code and the first line of its message, with anything in double quotes elided; SQL and other arguments are logged only if `RUST_LOG` turns on debug logging. Now and then, as you start a new question in an interactive client such as GitHub Copilot, it also asks through the client's own form whether the last answer helped, and records your choice: the one thing pghacker-mcp writes, and only to telemetry, never to the data it serves. Your request runs whatever you choose. Add `?feedback=off` to the MCP URL never to be asked. To turn feedback off, set `feedback_rate_per_hour = 0`, or to turn off all telemetry, `usage_enabled = false`, and run `terraform apply`. [PRIVACY.md](PRIVACY.md) has the notice.
+The software may collect information about you and your use of the software and send it to Microsoft. Microsoft may use this information to provide services and improve our products and services. You may turn off the telemetry as described in the repository. There are also some features in the software that may enable you and Microsoft to collect data from users of your applications. If you use these features, you must comply with applicable law, including providing appropriate notices to users of your applications together with a copy of Microsoft's privacy statement. Our privacy statement is located at https://go.microsoft.com/fwlink/?LinkID=824704. You can learn more about data collection and use in the help documentation and our privacy statement. Your use of the software operates as your consent to these practices.
+
+### Turning telemetry off
+
+- **Deployed with this repository's Terraform (telemetry is on by default):** set `usage_enabled = false` in your `.tfvars` and run `terraform apply`. No Application Insights resource is created and the app gets no connection string, so nothing is sent.
+- **Run any other way:** `npm start` never sends telemetry, and the binaries on their own send none unless `PGHACKER_USAGE_ENDPOINT` is set.
 
 ## Learn more
 
