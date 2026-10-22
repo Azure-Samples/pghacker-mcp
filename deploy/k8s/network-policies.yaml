@@ -1,0 +1,348 @@
+# The pods' network: nothing in or out but the paths below, which Cilium
+# enforces. Agents (pghacker.io/role: agent: the PilotSwarm worker, and the
+# egress check that tests its lockdown) reach only the indexer,
+# pghacker-mcp's internal listener, the token proxy and their database. No
+# pod but the edge's takes traffic from outside the cluster, and no pod but
+# those of the services pool goes out to the internet, where Azure Firewall
+# admits only its named hosts (deploy/terraform/firewall.tf).
+#
+# ${INTERNET} is 0.0.0.0/0 less the private, link-local and Azure platform
+# ranges: the VNet, the pods and Services, the node's metadata endpoint.
+
+# Everything denied, in and out, unless a policy below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: ${NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Name resolution, for every pod, at the cluster's DNS alone.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dns
+  namespace: ${NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# oauth2-proxy: Front Door's requests, through the Private Link Service,
+# whose NAT addresses are in the edge subnet; out to its upstreams and to
+# GitHub, for sign-in and team membership.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: ${EDGE_CIDR}
+      ports:
+        - { protocol: TCP, port: 8080 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - { protocol: TCP, port: 3102 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: portal
+      ports:
+        - { protocol: TCP, port: 3001 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: home
+      ports:
+        - { protocol: TCP, port: 3104 }
+    - to:
+        - ipBlock: ${INTERNET}
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# The home page: from oauth2-proxy; out to GitHub's API, for the
+# repository's stars, and to the token proxy, for usage telemetry.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: home
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: home
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+      ports:
+        - { protocol: TCP, port: 3104 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3111 }
+    - to:
+        - ipBlock: ${INTERNET}
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# pghacker-mcp: its public listener from oauth2-proxy alone, its internal
+# one from the agents alone; out to its database and the token proxy
+# (embeddings, usage telemetry).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+      ports:
+        - { protocol: TCP, port: 3102 }
+    - from:
+        - podSelector:
+            matchLabels:
+              pghacker.io/role: agent
+      ports:
+        - { protocol: TCP, port: 3103 }
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3110 }
+        - { protocol: TCP, port: 3111 }
+---
+# pghacker-indexer: its tools from the agents alone; out to its database, the
+# token proxy (embeddings), and the mail archive and PostgreSQL's git, which
+# the firewall admits.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: indexer
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: indexer
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              pghacker.io/role: agent
+      ports:
+        - { protocol: TCP, port: 3101 }
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3110 }
+    - to:
+        - ipBlock: ${INTERNET}
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# The token proxy: model requests from the agents, the portal, the indexer,
+# pghacker-mcp and the ops jobs; usage telemetry from pghacker-mcp and the
+# home page. Out to Foundry's private endpoint, and to Entra ID and
+# Application Insights' ingestion, which the firewall admits.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: token-proxy
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: token-proxy
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              pghacker.io/role: agent
+        - podSelector:
+            matchLabels:
+              pghacker.io/role: ops
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: portal
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: indexer
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - { protocol: TCP, port: 3110 }
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: home
+      ports:
+        - { protocol: TCP, port: 3111 }
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 443 }
+    - to:
+        - ipBlock: ${INTERNET}
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+# The PilotSwarm portal: from oauth2-proxy alone, since it trusts the
+# identity headers that oauth2-proxy sets; out to its database and the token
+# proxy. It runs no agent.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: portal
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: portal
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+      ports:
+        - { protocol: TCP, port: 3001 }
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3110 }
+---
+# The agents: the PilotSwarm worker, whose sessions read mail that anyone can
+# post and run shell commands. Nothing comes in. Out, only the indexer's
+# tools, pghacker-mcp's internal listener, the token proxy and their
+# database: no internet, no other component, no metadata endpoint, no
+# Kubernetes API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      pghacker.io/role: agent
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: indexer
+      ports:
+        - { protocol: TCP, port: 3101 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp
+      ports:
+        - { protocol: TCP, port: 3103 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3110 }
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# The ops jobs (bootstrap, probe, restore, history): out to the database, the
+# token proxy, and the internet hosts that the firewall admits (the probe's
+# checks, the history's git fetch). Nothing comes in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ops
+  namespace: ${NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      pghacker.io/role: ops
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: ${PRIVATE_ENDPOINTS_CIDR}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      ports:
+        - { protocol: TCP, port: 3110 }
+    - to:
+        - ipBlock: ${INTERNET}
+      ports:
+        - { protocol: TCP, port: 443 }

@@ -1,0 +1,86 @@
+# pghacker-mcp, as pgh_reader: its public listener (3102), which oauth2-proxy
+# sends /mcp to, rate-limited per client and checked for this Front Door
+# profile; and its internal listener (3103) for the agents, which they reach
+# by the Service's name, with a rate limit of its own that they share.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: mcp
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp
+        app.kubernetes.io/part-of: pghacker-mcp
+    spec:
+      serviceAccountName: mcp
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mcp
+          image: ${IMAGE}
+          args: [/usr/local/bin/pghacker-mcp]
+          env: ${ENV_MCP}
+          ports:
+            - { name: public, containerPort: 3102 }
+            - { name: internal, containerPort: 3103 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: public }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: public }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: mcp }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: mcp
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: mcp
+  ports:
+    - { name: public, port: 3102, targetPort: public, protocol: TCP }
+    - { name: internal, port: 3103, targetPort: internal, protocol: TCP }

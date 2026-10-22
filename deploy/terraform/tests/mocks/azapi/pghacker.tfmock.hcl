@@ -15,8 +15,9 @@ mock_resource "azapi_resource" {
 }
 
 # Reads of the cluster (its replicas and connections), of the Foundry account
-# (its connections) and of the GitHub secrets (exists). Both private
-# endpoints, whose IDs the tests fix, are approved.
+# (its connections) and of the edge's Private Link Service (its connections,
+# from Front Door). Both private endpoints, whose IDs the tests fix, are
+# approved, and so is every connection to the edge.
 mock_data "azapi_resource" {
   defaults = {
     exists = true

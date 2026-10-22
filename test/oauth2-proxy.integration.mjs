@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-// The routes through the real oauth2-proxy, as the container runs it: its
+// The routes through the real oauth2-proxy, as the edge runs it: its
 // release binary for this machine (checked against the release's checksums,
-// the Linux ones the Dockerfile's), with the container's flags from
+// the Linux ones the Dockerfile's), with the edge's flags from
 // scripts/lib/azure.mjs, in front of stand-ins for pghacker-mcp, the portal
 // and the home page. Nobody signs in: this checks what passes without it.
 //   npm run test:routes
@@ -153,7 +153,7 @@ async function reach(route, { method = "GET", headers = {} } = {}) {
   return response.status;
 }
 
-test("oauth2-proxy routes the site as the container runs it", async () => {
+test("oauth2-proxy routes the site as the edge runs it", async () => {
   const expected = [
     ["/", "home"],
     ["/?session=abc&view=canvas", "home"],

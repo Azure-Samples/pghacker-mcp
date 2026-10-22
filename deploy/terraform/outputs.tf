@@ -44,9 +44,14 @@ output "front_door_custom_domain_validation" {
   }
 }
 
-output "app_fqdn" {
-  description = "The container app's own host name, Front Door's origin, which changes when the environment is replaced. With restrict_origin_to_front_door, only Front Door can reach it."
-  value       = local.app_fqdn
+output "edge" {
+  description = "The edge, Front Door's origin: the internal load balancer's address and its Private Link Service, which AKS creates in the node resource group for the edge Service, and whose connection from Front Door ../scripts/aks.mjs approve-edge approves."
+  value = {
+    ip                       = local.edge_ip
+    private_link_service     = local.edge_pls_name
+    private_link_service_id  = local.edge_pls_id
+    node_resource_group_name = local.aks_node_resource_group
+  }
 }
 
 # --- Resources for operator commands -------------------------------------------------
@@ -72,7 +77,7 @@ output "acr_login_server" {
 }
 
 output "key_vault_name" {
-  description = "The Key Vault's name, where the operator stores github-client-id and github-client-secret."
+  description = "The Key Vault's name, where the operator stores github-client-id and github-client-secret over Terraform's placeholders."
   value       = azurerm_key_vault.this.name
 }
 
@@ -111,38 +116,71 @@ output "foundry_endpoint" {
   value       = local.foundry_endpoint
 }
 
-output "container_app_environment_name" {
-  description = "The Container Apps environment's name."
-  value       = azurerm_container_app_environment.this.name
+output "aks_cluster_name" {
+  description = "The AKS cluster's name, for az aks get-credentials (../scripts/aks.mjs credentials)."
+  value       = azurerm_kubernetes_cluster.this.name
 }
 
-output "container_app_environment_default_domain" {
-  description = "The Container Apps environment's default domain, which the app's host name ends with."
-  value       = azurerm_container_app_environment.this.default_domain
+output "aks_node_resource_group" {
+  description = "The resource group where AKS keeps the nodes, the load balancers and the edge's Private Link Service."
+  value       = local.aks_node_resource_group
 }
 
-output "app_name" {
-  description = "The container app's name. It exists only with create_app."
-  value       = var.app_name
+output "firewall_public_ip" {
+  description = "Azure Firewall's public address, from which the cluster's allowed outbound traffic leaves: allow it where the app's outside services filter by address."
+  value       = azurerm_public_ip.firewall.ip_address
 }
 
-output "probe_job_name" {
-  description = "The probe job's name, for az containerapp job start."
-  value       = azurerm_container_app_job.this["probe"].name
-}
+output "kubernetes" {
+  description = "What ../scripts/aks.mjs renders the manifests from: the cluster, the namespace, the images, each workload identity's client ID, service account and vault secrets, the networks the NetworkPolicies name, the edge, and the app's settings, which hold no secret."
+  value = {
+    subscription_id     = var.subscription_id
+    tenant_id           = data.azurerm_client_config.current.tenant_id
+    resource_group_name = local.rg_name
+    cluster_name        = azurerm_kubernetes_cluster.this.name
+    node_resource_group = local.aks_node_resource_group
+    namespace           = local.k8s_namespace
+    key_vault_name      = azurerm_key_vault.this.name
+    image               = var.image
+    seed_image          = var.seed_image
+    pool_label          = local.pool_label
+    swarm_taint         = local.swarm_taint
+    identities = {
+      for name, workload in local.workloads : name => {
+        client_id       = azurerm_user_assigned_identity.workload[name].client_id
+        service_account = workload.service_account
+        secrets         = workload.secrets
+      }
+    }
+    networks = {
+      vnet              = var.vnet_address_space
+      pod               = var.pod_cidr
+      service           = var.service_cidr
+      edge              = var.subnet_prefixes.edge
+      private_endpoints = var.subnet_prefixes.private_endpoints
+    }
+    edge = {
+      subnet               = azurerm_subnet.edge.name
+      ip                   = local.edge_ip
+      private_link_service = local.edge_pls_name
+      request_message      = local.edge_request_message
+    }
+    app_settings = local.app_settings
+  }
 
-output "restore_job_name" {
-  description = "The restore job's name, or null without seed_image."
-  value       = try(azurerm_container_app_job.this["restore"].name, null)
-}
-
-output "managed_identity_client_id" {
-  description = "The client ID of the app's and jobs' user-assigned managed identity."
-  value       = azurerm_user_assigned_identity.app.client_id
+  # The private paths to the database and the models, approved, before
+  # anything is deployed on them.
+  depends_on = [
+    data.azapi_resource.horizondb_private_endpoint_connection,
+    data.azapi_resource.foundry_private_endpoint_connection,
+    azurerm_private_dns_zone_virtual_network_link.horizondb,
+    azurerm_private_dns_zone_virtual_network_link.foundry,
+    azapi_resource_action.attach_parameter_group,
+  ]
 }
 
 output "log_analytics_workspace_id" {
-  description = "The Log Analytics workspace's customer ID, for az monitor log-analytics query, which reads the jobs' reports."
+  description = "The Log Analytics workspace's customer ID, for az monitor log-analytics query: the containers' logs (ContainerLogV2) and the firewall's (AZFWApplicationRule, AZFWNetworkRule)."
   value       = azurerm_log_analytics_workspace.this.workspace_id
 }
 

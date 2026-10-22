@@ -1,0 +1,301 @@
+# The ops jobs, which deploy/scripts/aks.mjs runs one at a time (aks.mjs job
+# <name>): each prints a one-line JSON report. They run as the ops identity,
+# the only one that reads the database administrator's password, on the
+# services pool, except the egress check, which runs as an agent on the
+# PilotSwarm pool to test its lockdown. ${JOB_ARGS} adds the operator's
+# arguments, such as restore's --replace.
+#   bootstrap     creates the database, the roles, the extensions, the schema
+#                 and the graph, and applies the migrations; aks.mjs apply
+#                 runs it before rolling out a new image
+#   probe         checks the database, the models through the token proxy,
+#                 and the firewall's allow-list (scripts/probe.mjs)
+#   restore       loads a corpus dump from the seed image
+#                 (scripts/corpus-restore.mjs)
+#   history       builds PostgreSQL's commit history (scripts/history-build.mjs)
+#   egress-check  checks what the agents can and can't reach
+#                 (scripts/egress-check.mjs)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: bootstrap
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootstrap
+        app.kubernetes.io/part-of: pghacker-mcp
+        pghacker.io/role: ops
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ops
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bootstrap
+          image: ${IMAGE}
+          args: ${JOB_ARGS}
+          env: ${ENV_OPS}
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: ops }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: probe
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: probe
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: probe
+        app.kubernetes.io/part-of: pghacker-mcp
+        pghacker.io/role: ops
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ops
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: probe
+          image: ${IMAGE}
+          args: ${JOB_ARGS}
+          env: ${ENV_OPS}
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: ops }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: restore
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: restore
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: restore
+        app.kubernetes.io/part-of: pghacker-mcp
+        pghacker.io/role: ops
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ops
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: restore
+          image: ${SEED_IMAGE}
+          args: ${JOB_ARGS}
+          env: ${ENV_OPS}
+          resources:
+            requests: { cpu: "1", memory: 2Gi }
+            limits: { memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: ops }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+# The history's bare clone of every branch and tag, in /tmp, takes about a
+# gigabyte; the history-build's deadline is this job's.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: history
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: history
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: history
+        app.kubernetes.io/part-of: pghacker-mcp
+        pghacker.io/role: ops
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ops
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: history
+          image: ${IMAGE}
+          args: ${JOB_ARGS}
+          env: ${ENV_OPS}
+          resources:
+            requests: { cpu: "2", memory: 6Gi }
+            limits: { cpu: "4", memory: 8Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: ops }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: { sizeLimit: 16Gi }
+---
+# As an agent, on the PilotSwarm pool, with the worker's service account,
+# labels and secrets: what it can reach, the worker can.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: egress-check
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: egress-check
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: egress-check
+        app.kubernetes.io/part-of: pghacker-mcp
+        pghacker.io/role: agent
+    spec:
+      restartPolicy: Never
+      serviceAccountName: swarm
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: swarm
+      tolerations:
+        - { key: pghacker.io/pool, operator: Equal, value: swarm, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: egress-check
+          image: ${IMAGE}
+          args: ${JOB_ARGS}
+          env: ${ENV_EGRESS_CHECK}
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: swarm }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

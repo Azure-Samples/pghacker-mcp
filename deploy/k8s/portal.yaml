@@ -1,0 +1,102 @@
+# The PilotSwarm portal (scripts/portal.mjs), on the PilotSwarm pool: the web
+# server alone, with no worker and no agent. It trusts the identity headers
+# that oauth2-proxy sets (PORTAL_AUTH_PROVIDER=proxy), so its NetworkPolicy
+# admits oauth2-proxy alone. Like the worker, it reads only pgh_swarm's
+# password and holds no Azure or Kubernetes token.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: portal
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: portal
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: portal
+        app.kubernetes.io/part-of: pghacker-mcp
+    spec:
+      serviceAccountName: swarm
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: swarm
+      tolerations:
+        - { key: pghacker.io/pool, operator: Equal, value: swarm, effect: NoSchedule }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: portal
+          image: ${IMAGE}
+          args: [node, scripts/portal.mjs]
+          env: ${ENV_PORTAL}
+          ports:
+            - { name: http, containerPort: 3001 }
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: catalog, mountPath: /etc/pghacker, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: swarm }
+        - name: catalog
+          configMap: { name: model-catalog }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: portal
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: portal
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: portal
+  ports:
+    - { name: http, port: 3001, targetPort: http, protocol: TCP }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: portal
+  namespace: ${NAMESPACE}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: portal

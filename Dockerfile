@@ -2,10 +2,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# pghacker-mcp for Azure Container Apps (deploy/README.md): the Rust
+# pghacker-mcp for Azure Kubernetes Service (deploy/README.md): the Rust
 # services, PilotSwarm 0.8.2 with the app's agents, the home page,
-# oauth2-proxy, and the supervisor that runs each as its own user
-# (scripts/container.mjs).
+# oauth2-proxy and the token proxy. One image for every component: each pod
+# (deploy/k8s) runs its own command, as its own user, under tini.
 #   docker build -t pghacker-mcp .                                    (local check)
 #   az acr run --registry <acr> --file deploy/acr-build.yaml --set TAG=<tag> .
 # ACR Tasks' classic `az acr build` can't use the cache mounts: use the task.
@@ -75,7 +75,8 @@ FROM ${NODE_IMAGE}
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini git ca-certificates postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
-# The services' users: agents and PilotSwarm, the Rust services, the proxy,
+# The users the pods run as (scripts/lib/azure.mjs, USERS): PilotSwarm and
+# its agents; the Rust services, the token proxy and the jobs; oauth2-proxy;
 # the home page.
 RUN set -eu; \
     for spec in pgh-agent:10001 pgh-svc:10002 pgh-proxy:10003 pgh-home:10004; do \
@@ -93,6 +94,6 @@ COPY --from=home /build/dist home/dist
 COPY --from=rust /out/ /usr/local/bin/
 COPY --from=oauth2-proxy /out/oauth2-proxy /usr/local/bin/oauth2-proxy
 ENV NODE_ENV=production
-EXPOSE 8080 8081
+# No default command: each pod's manifest names its own, as args, so tini
+# stays PID 1, forwarding signals and reaping the agents' shells' children.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "scripts/container.mjs"]

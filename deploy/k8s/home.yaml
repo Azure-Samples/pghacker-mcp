@@ -1,0 +1,82 @@
+# The public home page's server (scripts/home.mjs), behind oauth2-proxy. Its
+# one secret, with usage telemetry, is the users' key (usage-id-key).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: home
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: home
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: home
+        app.kubernetes.io/part-of: pghacker-mcp
+    spec:
+      serviceAccountName: home
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10004
+        runAsGroup: 10004
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: home
+          image: ${IMAGE}
+          args: [node, scripts/home.mjs]
+          env: ${ENV_HOME}
+          ports:
+            - { name: http, containerPort: 3104 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: data, mountPath: /var/lib/pghacker }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: home }
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: home
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: home
+  ports:
+    - { name: http, port: 3104, targetPort: http, protocol: TCP }

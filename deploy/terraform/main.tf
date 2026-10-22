@@ -18,7 +18,7 @@ resource "azurerm_resource_group" "this" {
   tags     = var.tags
 }
 
-# The app's and the jobs' console and system logs.
+# The containers' and the jobs' logs (Container Insights), and the firewall's.
 resource "azurerm_log_analytics_workspace" "this" {
   name                = local.law_name
   resource_group_name = local.rg_name
@@ -28,24 +28,18 @@ resource "azurerm_log_analytics_workspace" "this" {
   tags                = var.tags
 }
 
-# Holds the app and seed images. The managed identity pulls (AcrPull); the
-# operator pushes with Entra ID through ACR Tasks, so the admin user stays off.
+# Holds the app and seed images. The cluster's kubelet pulls (AcrPull,
+# aks.tf); the operator pushes with Entra ID through ACR Tasks, so the admin
+# user stays off. Premium's dedicated data endpoint lets the firewall admit
+# this registry's storage alone.
 resource "azurerm_container_registry" "this" {
-  name                = var.acr_name
-  resource_group_name = local.rg_name
-  location            = var.location
-  sku                 = var.acr_sku
-  admin_enabled       = false
-  tags                = var.tags
-}
-
-# The identity of the app and the jobs, used only by the platform: it pulls
-# the image and resolves the Key Vault references in the apps' secrets.
-resource "azurerm_user_assigned_identity" "app" {
-  name                = local.identity_name
-  resource_group_name = local.rg_name
-  location            = var.location
-  tags                = var.tags
+  name                  = var.acr_name
+  resource_group_name   = local.rg_name
+  location              = var.location
+  sku                   = var.acr_sku
+  admin_enabled         = false
+  data_endpoint_enabled = true
+  tags                  = var.tags
 }
 
 # Access is by Azure RBAC, not access policies.
@@ -73,35 +67,29 @@ resource "azurerm_role_assignment" "deployer_kv_secrets_officer" {
   principal_id         = each.value
 }
 
-# Resolving the apps' Key Vault references.
-resource "azurerm_role_assignment" "app_kv_secrets_user" {
-  scope                            = azurerm_key_vault.this.id
-  role_definition_name             = "Key Vault Secrets User"
-  principal_id                     = azurerm_user_assigned_identity.app.principal_id
-  principal_type                   = "ServicePrincipal"
-  skip_service_principal_aad_check = true
-}
-
-resource "azurerm_role_assignment" "app_acr_pull" {
-  scope                            = azurerm_container_registry.this.id
-  role_definition_name             = "AcrPull"
-  principal_id                     = azurerm_user_assigned_identity.app.principal_id
-  principal_type                   = "ServicePrincipal"
-  skip_service_principal_aad_check = true
-}
-
-# New role assignments take a minute or so to reach Key Vault, the registry,
-# Foundry and Application Insights. Writing secrets and creating the apps
-# wait for this, rather than fail with 403s.
+# New role assignments take a minute or so to reach Key Vault, Foundry and
+# Application Insights. Writing secrets waits for this, rather than fail with
+# 403s, as the cluster waits for its own (aks_rbac_propagation).
 resource "time_sleep" "rbac_propagation" {
   create_duration = "60s"
 
   triggers = {
-    deployer_kv = join(",", [for assignment in azurerm_role_assignment.deployer_kv_secrets_officer : assignment.id])
-    app_kv      = azurerm_role_assignment.app_kv_secrets_user.id
-    app_acr     = azurerm_role_assignment.app_acr_pull.id
-    app_foundry = azurerm_role_assignment.app_foundry_openai_user.id
-    app_usage   = join(",", azurerm_role_assignment.app_usage_publisher[*].id)
+    deployer_kv   = join(",", [for assignment in azurerm_role_assignment.deployer_kv_secrets_officer : assignment.id])
+    proxy_foundry = azurerm_role_assignment.proxy_foundry_openai_user.id
+    proxy_usage   = join(",", azurerm_role_assignment.proxy_usage_publisher[*].id)
+  }
+}
+
+# The control plane's roles on the network and the kubelet's identity, and
+# the kubelet's pull, before the cluster uses them.
+resource "time_sleep" "aks_rbac_propagation" {
+  create_duration = "60s"
+
+  triggers = {
+    network          = azurerm_role_assignment.aks_network.id
+    route_table      = azurerm_role_assignment.aks_route_table.id
+    kubelet_operator = azurerm_role_assignment.aks_kubelet_operator.id
+    kubelet_pull     = azurerm_role_assignment.kubelet_acr_pull.id
   }
 }
 
@@ -175,4 +163,26 @@ resource "azurerm_key_vault_secret" "oauth2_cookie" {
   tags         = var.tags
 
   depends_on = [time_sleep.rbac_propagation]
+}
+
+# The GitHub OAuth App's credentials, which the operator stores (../TERRAFORM.md,
+# "Key Vault secrets"). Terraform creates each with a placeholder, tagged
+# placeholder = true, so that the edge's identity can be granted it before
+# its value exists; `az keyvault secret set` adds the real version, without
+# the tag, and Terraform keeps out of it from then on. ../scripts/aks.mjs
+# refuses to deploy while a placeholder is current.
+resource "azurerm_key_vault_secret" "github" {
+  for_each = toset(local.github_secrets)
+
+  name         = each.key
+  key_vault_id = azurerm_key_vault.this.id
+  value        = "unset"
+  content_type = "text/plain"
+  tags         = merge(var.tags, { placeholder = "true" })
+
+  depends_on = [time_sleep.rbac_propagation]
+
+  lifecycle {
+    ignore_changes = [value, tags, content_type, not_before_date, expiration_date]
+  }
 }

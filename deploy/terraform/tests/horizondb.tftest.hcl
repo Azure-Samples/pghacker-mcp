@@ -10,7 +10,6 @@ variables {
   location            = "westus3"
   resource_group_name = "pghacker-example"
   name_prefix         = "pghacker-example"
-  app_name            = "pghacker-example"
   acr_name            = "examplepghacr12345"
   key_vault_name      = "pghacker-example-kv"
   image               = "examplepghacr12345.azurecr.io/pghacker-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -29,6 +28,12 @@ mock_provider "random" {
   source = "./tests/mocks/random"
 }
 mock_provider "time" {}
+
+# Azure Firewall takes only a subnet named AzureFirewallSubnet.
+override_resource {
+  target = azurerm_subnet.firewall
+  values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/AzureFirewallSubnet" }
+}
 
 override_resource {
   target = azurerm_subnet.private_endpoints
@@ -104,11 +109,12 @@ run "parameters_and_private_path" {
     condition = (
       azurerm_subnet.private_endpoints.address_prefixes == tolist(["10.66.1.0/27"])
       && azurerm_subnet.private_endpoints.private_endpoint_network_policies == "NetworkSecurityGroupEnabled"
-      && azurerm_subnet.container_apps.address_prefixes == tolist(["10.66.0.0/24"])
-      && azurerm_subnet.container_apps.delegation[0].service_delegation[0].name == "Microsoft.App/environments"
+      && azurerm_subnet_network_security_group_association.private_endpoints.subnet_id == azurerm_subnet.private_endpoints.id
+      && toset(azurerm_network_security_rule.database.source_address_prefixes) == toset([azurerm_subnet.nodes["services"].address_prefixes[0], azurerm_subnet.nodes["swarm"].address_prefixes[0]])
+      && azurerm_network_security_rule.database.destination_port_range == "5432"
       && toset(azurerm_virtual_network.this.address_space) == toset(["10.66.0.0/22"])
     )
-    error_message = "The VNet must be 10.66.0.0/22 with the delegated Container Apps subnet and the private endpoints' subnet."
+    error_message = "The VNet must be 10.66.0.0/22 with the private endpoints' subnet, which takes the database's connections from the services and PilotSwarm pools alone."
   }
 
   assert {

@@ -10,10 +10,9 @@
 
 subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" # Replace with your subscription ID.
 tenant_id           = null                                   # Uses the Azure CLI's signed-in tenant.
-location            = "westus3"                              # Check HorizonDB and model availability.
+location            = "westus3"                              # Check HorizonDB, AKS and model availability.
 resource_group_name = "pghacker-example"
 name_prefix         = "pghacker-example"
-app_name            = "pghacker-example"
 
 # Replace both names with globally unique values you own.
 acr_name       = "examplepghacr12345"
@@ -23,21 +22,39 @@ key_vault_name = "pghacker-example-kv"
 # The image's registry prefix must match acr_name.
 image = "examplepghacr12345.azurecr.io/pghacker-mcp:bootstrap"
 
-# Optional: an image containing a corpus dump. Null creates no restore job.
+# Optional: an image containing a corpus dump, for the restore job.
 seed_image = null
 
-# Keep false during the first apply. Once GitHub OAuth credentials are stored
-# in Key Vault, set true and apply. Do not set false again: that destroys the app.
-create_app = false
+# Keep false until deploy/scripts/aks.mjs apply has created the edge's Private
+# Link Service; then set true, apply, and approve Front Door's connection
+# (deploy/scripts/aks.mjs approve-edge). See deploy/README.md.
+create_origin = false
 
-# Empty grants the applying identity access to Key Vault. If multiple identities
-# apply, list all their object IDs; an apply revokes access for anyone omitted.
+# Empty grants the applying identity access to Key Vault and the cluster. If
+# multiple identities apply, list all their object IDs; an apply revokes
+# access for anyone omitted.
 deployer_object_ids = []
 
-# Choose nonoverlapping ranges for your own network.
-vnet_address_space             = "10.80.0.0/22"
-container_apps_subnet_prefix   = "10.80.0.0/24"
-private_endpoint_subnet_prefix = "10.80.1.0/27"
+# Choose nonoverlapping ranges for your own network. The pods' overlay and the
+# Services' ranges (pod_cidr, service_cidr) must stay apart from the VNet's.
+vnet_address_space = "10.80.0.0/22"
+subnet_prefixes = {
+  firewall          = "10.80.0.0/26"
+  system            = "10.80.0.64/27"
+  services          = "10.80.0.96/27"
+  swarm             = "10.80.0.128/27"
+  edge              = "10.80.0.160/28"
+  private_endpoints = "10.80.1.0/27"
+}
+
+# The cluster. The API server is open to any address unless you list yours;
+# Entra ID authorizes every request either way.
+api_server_authorized_ip_ranges = []
+system_pool                     = { vm_size = "Standard_D2ds_v5", min_count = 1, max_count = 3 }
+services_pool                   = { vm_size = "Standard_D4ds_v5", node_count = 2 }
+swarm_pool                      = { vm_size = "Standard_D4ds_v5", node_count = 1 }
+# Who the alert on denied egress from the PilotSwarm pool emails.
+alert_emails = []
 
 horizondb_vcores        = 4
 horizondb_replica_count = 1
@@ -56,20 +73,17 @@ foundry_sol_deployment       = "gpt-6.1-sol"
 foundry_luna_deployment      = "gpt-6-luna"
 foundry_embedding_deployment = "text-embedding-3-small"
 
-cpu        = 4
-memory     = "8Gi"
-job_cpu    = 2
-job_memory = "4Gi"
-
 front_door_endpoint_name = "pghacker-example"
 # Optional: your own hostname, such as "mcp.example.com" or "example.com".
 # Null keeps the default azurefd.net URL. See deploy/README.md, "Custom domains".
-front_door_custom_domain      = null
-restrict_origin_to_front_door = true
-mcp_rate_per_minute           = 60
-mcp_rate_burst                = 30
-crawl_start_sessions          = 2
-crawl_max_sessions            = 4
+front_door_custom_domain = null
+mcp_rate_per_minute      = 60
+mcp_rate_burst           = 30
+# The agents' own limit on pghacker-mcp's internal listener, which they share.
+mcp_internal_rate_per_minute = 300
+mcp_internal_rate_burst      = 60
+crawl_start_sessions         = 2
+crawl_max_sessions           = 4
 
 # The privacy statement that the home page's footer links to, as "Privacy": an
 # https URL of your own. Unset, the page has no privacy link.

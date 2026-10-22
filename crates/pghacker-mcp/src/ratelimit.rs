@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Per-client rate limiting for the public endpoint: a token bucket per
-//! client (`pghacker_core::clients`: an IP address, an IPv6 client's /64),
-//! refilled continuously; and the check that requests came through the
-//! deployment's Front Door.
+//! Per-client rate limiting for both listeners: a token bucket per client
+//! (`pghacker_core::clients`: an IP address, an IPv6 client's /64), refilled
+//! continuously; and the check that requests came through the deployment's
+//! Front Door, for the public one.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};

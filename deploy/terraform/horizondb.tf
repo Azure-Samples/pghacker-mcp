@@ -51,7 +51,7 @@ resource "azapi_resource" "pg_parameters" {
   body = {
     properties = {
       pgVersion   = 17
-      description = "pghacker-mcp (${var.app_name})"
+      description = "pghacker-mcp (${var.name_prefix})"
       parameters  = local.pg_parameters
     }
   }
@@ -252,7 +252,7 @@ resource "azurerm_private_endpoint" "horizondb" {
 # An endpoint carries nothing until the cluster approves its connection. An
 # applier who may approve connections to the cluster (its resource group's
 # owners and contributors) is approved automatically; otherwise this stops
-# the apply before the app and jobs are created.
+# the apply, before the kubernetes output that the deployment reads.
 data "azapi_resource" "horizondb_private_endpoint_connection" {
   type                   = azapi_resource.horizondb.type
   resource_id            = azapi_resource.horizondb.id

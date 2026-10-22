@@ -14,17 +14,6 @@ mock_data "azurerm_client_config" {
   }
 }
 
-# A few of the AzureFrontDoor.Backend tag's ranges, out of order; the real tag
-# has about 157 IPv4 and 92 IPv6 ranges.
-mock_data "azurerm_network_service_tags" {
-  defaults = {
-    name             = "AzureFrontDoor.Backend"
-    address_prefixes = ["147.243.0.0/16", "13.73.248.16/29", "20.21.37.40/29", "2603:1000:4::5e0/123", "20.36.120.104/29", "2a01:111:2050::/44", "13.107.208.0/24"]
-    ipv4_cidrs       = ["147.243.0.0/16", "13.73.248.16/29", "20.21.37.40/29", "20.36.120.104/29", "13.107.208.0/24"]
-    ipv6_cidrs       = ["2603:1000:4::5e0/123", "2a01:111:2050::/44"]
-  }
-}
-
 mock_resource "azurerm_resource_group" {
   defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example" }
 }
@@ -63,7 +52,7 @@ mock_resource "azurerm_virtual_network" {
 }
 
 mock_resource "azurerm_subnet" {
-  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/container-apps" }
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/nodes-services" }
 }
 
 mock_resource "azurerm_private_dns_zone" {
@@ -91,18 +80,57 @@ mock_resource "azurerm_cognitive_account" {
   }
 }
 
-mock_resource "azurerm_container_app_environment" {
+# The cluster's OIDC issuer, which the workload identities' federated
+# credentials name.
+mock_resource "azurerm_kubernetes_cluster" {
   defaults = {
-    id             = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.App/managedEnvironments/pghacker-example-env"
-    default_domain = "mock-1a2b3c4d.westus3.azurecontainerapps.io"
+    id              = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ContainerService/managedClusters/pghacker-example-aks"
+    oidc_issuer_url = "https://westus3.oic.prod-aks.azure.com/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/dddddddd-dddd-4ddd-8ddd-dddddddddddd/"
   }
 }
 
-mock_resource "azurerm_container_app" {
+mock_resource "azurerm_kubernetes_cluster_node_pool" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ContainerService/managedClusters/pghacker-example-aks/agentPools/services" }
+}
+
+mock_resource "azurerm_public_ip" {
   defaults = {
-    id      = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.App/containerApps/pghacker-example"
-    ingress = { fqdn = "pghacker-example.mock-1a2b3c4d.westus3.azurecontainerapps.io" }
+    id         = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/publicIPAddresses/pghacker-example-fw-ip"
+    ip_address = "20.14.0.10"
   }
+}
+
+mock_resource "azurerm_firewall_policy" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/firewallPolicies/pghacker-example-fw-policy" }
+}
+
+mock_resource "azurerm_firewall_policy_rule_collection_group" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/firewallPolicies/pghacker-example-fw-policy/ruleCollectionGroups/egress" }
+}
+
+# The firewall's private address, the first usable one in AzureFirewallSubnet,
+# which the node subnets' route sends everything to.
+mock_resource "azurerm_firewall" {
+  defaults = {
+    id               = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/azureFirewalls/pghacker-example-fw"
+    ip_configuration = { private_ip_address = "10.66.0.4" }
+  }
+}
+
+mock_resource "azurerm_route_table" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/routeTables/pghacker-example-egress" }
+}
+
+mock_resource "azurerm_network_security_group" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/networkSecurityGroups/pghacker-example-private-endpoints" }
+}
+
+mock_resource "azurerm_federated_identity_credential" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ManagedIdentity/userAssignedIdentities/pghacker-example-id/federatedIdentityCredentials/pghacker-mock" }
+}
+
+mock_resource "azurerm_monitor_action_group" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Insights/actionGroups/pghacker-example-egress" }
 }
 
 mock_resource "azurerm_cdn_frontdoor_origin_group" {

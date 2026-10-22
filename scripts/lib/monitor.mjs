@@ -2,11 +2,11 @@
 // Licensed under the MIT license.
 
 // Usage telemetry's way to Application Insights. The resource takes only
-// Entra-authenticated telemetry (local authentication is off), so the
-// supervisor runs a second token proxy (scripts/lib/foundry.mjs) on loopback:
+// Entra-authenticated telemetry (local authentication is off), so the token
+// proxy (scripts/token-proxy.mjs) runs a second proxy (scripts/lib/foundry.mjs):
 // it forwards the events of pghacker-mcp and the home page to the resource's
-// ingestion endpoint with the managed identity's token for Azure Monitor.
-// Neither process gets the identity's endpoint, or anything but this path.
+// ingestion endpoint with its workload identity's token for Azure Monitor.
+// Neither of them gets an identity, or anything but this path.
 
 import { startTokenProxy } from "./foundry.mjs";
 

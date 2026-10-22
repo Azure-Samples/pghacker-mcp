@@ -28,7 +28,7 @@ variable "tenant_id" {
 }
 
 variable "location" {
-  description = "The region for every resource, such as westus3. It must offer HorizonDB, Container Apps and GlobalStandard deployments of the Foundry models."
+  description = "The region for every resource, such as westus3. It must offer HorizonDB, AKS, Azure Firewall, Front Door Premium's Private Link origins and GlobalStandard deployments of the Foundry models."
   type        = string
 
   validation {
@@ -48,25 +48,13 @@ variable "resource_group_name" {
 }
 
 variable "name_prefix" {
-  description = "The prefix of the derived names: <name_prefix>-logs, -env, -id, -vnet, -hdb (HorizonDB), -pg17-<hash> (its parameter groups), -foundry (unless foundry_account_name is set) and -afd (Front Door)."
+  description = "The prefix of the derived names: <name_prefix>-logs, -aks (with its identities, -aks-id and -aks-kubelet-id), -fw, -vnet, -egress (the route table), -hdb (HorizonDB), -pg17-<hash> (its parameter groups), -foundry (unless foundry_account_name is set), -afd (Front Door), -edge-pls and -usage, and the workload identities, <name_prefix>-<component>-id. AKS's node resource group is <resource_group_name>-nodes."
   type        = string
   default     = "pghacker"
 
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{1,18}[a-z0-9]$", var.name_prefix)) && !strcontains(var.name_prefix, "--")
     error_message = "name_prefix must be 3 to 20 lowercase letters, digits and single hyphens, starting with a letter and ending with a letter or digit."
-  }
-}
-
-variable "app_name" {
-  description = "The container app's name, which also begins its host name, <app_name>.<environment's default domain>. The jobs are <app_name>-probe and <app_name>-restore."
-  type        = string
-  default     = "pghacker"
-
-  validation {
-    # Job names, at most 8 characters longer, are limited to 32.
-    condition     = can(regex("^[a-z][a-z0-9-]{0,22}[a-z0-9]$", var.app_name)) && !strcontains(var.app_name, "--")
-    error_message = "app_name must be 2 to 24 lowercase letters, digits and single hyphens, starting with a letter and ending with a letter or digit."
   }
 }
 
@@ -90,18 +78,18 @@ variable "acr_name" {
 }
 
 variable "acr_sku" {
-  description = "The registry's SKU."
+  description = "The registry's SKU. Premium gives it a dedicated data endpoint, <acr_name>.<location>.data.azurecr.io, so the firewall lets the nodes pull from this registry alone rather than from all of Azure Storage."
   type        = string
-  default     = "Basic"
+  default     = "Premium"
 
   validation {
-    condition     = contains(["Basic", "Standard", "Premium"], var.acr_sku)
-    error_message = "acr_sku must be Basic, Standard or Premium."
+    condition     = var.acr_sku == "Premium"
+    error_message = "acr_sku must be Premium: the firewall admits the registry's dedicated data endpoint only, which Premium has."
   }
 }
 
 variable "image" {
-  description = "The app's image, built from the repository's Dockerfile by ../acr-build.yaml, which the app and the probe job run: <acr_name>.azurecr.io/pghacker-mcp@sha256:<digest>, or a tag used for one build only. Container Apps makes a new revision only when this reference changes."
+  description = "The app's image, built from the repository's Dockerfile by ../acr-build.yaml, which every component and job runs (../scripts/aks.mjs apply): <acr_name>.azurecr.io/pghacker-mcp@sha256:<digest>, or a tag used for one build only."
   type        = string
 
   validation {
@@ -111,12 +99,12 @@ variable "image" {
 
   validation {
     condition     = startswith(lower(var.image), "${lower(var.acr_name)}.azurecr.io/")
-    error_message = "image must be in acr_name's registry (<acr_name>.azurecr.io/...), the only one the managed identity can pull from."
+    error_message = "image must be in acr_name's registry (<acr_name>.azurecr.io/...), the only one the nodes can pull from."
   }
 }
 
 variable "seed_image" {
-  description = "The corpus seed image, the app's image plus the corpus dump, which the restore job runs; in acr_name's registry too. Null creates no restore job."
+  description = "The corpus seed image, the app's image plus the corpus dump, which the restore job runs (../scripts/aks.mjs job restore); in acr_name's registry too. Null leaves the restore job out."
   type        = string
   default     = null
 
@@ -127,7 +115,7 @@ variable "seed_image" {
 
   validation {
     condition     = var.seed_image == null || try(startswith(lower(var.seed_image), "${lower(var.acr_name)}.azurecr.io/"), false)
-    error_message = "seed_image must be in acr_name's registry (<acr_name>.azurecr.io/...), the only one the managed identity can pull from."
+    error_message = "seed_image must be in acr_name's registry (<acr_name>.azurecr.io/...), the only one the nodes can pull from."
   }
 }
 
@@ -151,7 +139,7 @@ variable "key_vault_purge_protection_enabled" {
 }
 
 variable "log_retention_days" {
-  description = "How many days Log Analytics keeps the app's and the jobs' logs."
+  description = "How many days Log Analytics keeps the containers', the jobs' and the firewall's logs."
   type        = number
   default     = 30
 
@@ -164,7 +152,7 @@ variable "log_retention_days" {
 # --- Who applies --------------------------------------------------------------
 
 variable "deployer_object_ids" {
-  description = "Object IDs of the users and pipeline identities that apply. Each gets Key Vault Secrets Officer on the vault: terraform plan reads the secrets it generated, and the operator stores the GitHub OAuth App's. Empty means whoever is applying; list everyone once a second identity applies, since an apply removes the role from anyone left out."
+  description = "Object IDs of the users and pipeline identities that apply and deploy. Each gets Key Vault Secrets Officer on the vault (terraform plan reads the secrets it generated, and the operator stores the GitHub OAuth App's) and Azure Kubernetes Service RBAC Cluster Admin on the cluster (../scripts/aks.mjs applies the manifests). Empty means whoever is applying; list everyone once a second identity applies, since an apply removes the roles from anyone left out."
   type        = list(string)
   default     = []
   nullable    = false
@@ -178,7 +166,7 @@ variable "deployer_object_ids" {
 # --- Network ------------------------------------------------------------------
 
 variable "vnet_address_space" {
-  description = "The VNet's IPv4 address space, holding the Container Apps subnet and the private endpoints' subnet. It mustn't overlap networks it may be peered with."
+  description = "The VNet's IPv4 address space, holding the firewall's, the node pools', the edge's and the private endpoints' subnets (subnet_prefixes). It mustn't overlap pod_cidr, service_cidr, or networks it may be peered with."
   type        = string
   default     = "10.66.0.0/22"
 
@@ -186,64 +174,92 @@ variable "vnet_address_space" {
     condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.vnet_address_space)) && try(cidrsubnet(var.vnet_address_space, 0, 0) == var.vnet_address_space, false)
     error_message = "vnet_address_space must be an IPv4 network in CIDR notation, such as 10.66.0.0/22."
   }
+}
+
+variable "subnet_prefixes" {
+  description = "The VNet's subnets, inside vnet_address_space and apart from each other: firewall (AzureFirewallSubnet, /26 or larger), the node pools' system, services and swarm (/28 or larger; with Azure CNI Overlay they hold the nodes alone), edge (the internal load balancer and its Private Link Service, /28 or larger) and private_endpoints (HorizonDB's and Foundry's, /28 or larger). The firewall's rules and the private endpoints' NSG tell the pools apart by these."
+  type = object({
+    firewall          = string
+    system            = string
+    services          = string
+    swarm             = string
+    edge              = string
+    private_endpoints = string
+  })
+  default = {
+    firewall          = "10.66.0.0/26"
+    system            = "10.66.0.64/27"
+    services          = "10.66.0.96/27"
+    swarm             = "10.66.0.128/27"
+    edge              = "10.66.0.160/28"
+    private_endpoints = "10.66.1.0/27"
+  }
+  nullable = false
+
+  validation {
+    condition = alltrue([
+      for prefix in values(var.subnet_prefixes) :
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", prefix)) && try(cidrsubnet(prefix, 0, 0) == prefix && tonumber(split("/", prefix)[1]) <= 28, false)
+    ])
+    error_message = "subnet_prefixes must be IPv4 networks in CIDR notation, /28 or larger, such as 10.66.0.64/27."
+  }
+
+  validation {
+    condition     = try(tonumber(split("/", var.subnet_prefixes.firewall)[1]) <= 26, false)
+    error_message = "subnet_prefixes.firewall must be /26 or larger, as Azure Firewall requires."
+  }
+
+  validation {
+    condition = try(alltrue([
+      for prefix in values(var.subnet_prefixes) :
+      tonumber(split("/", prefix)[1]) >= tonumber(split("/", var.vnet_address_space)[1])
+      && cidrsubnet("${cidrhost(prefix, 0)}/${split("/", var.vnet_address_space)[1]}", 0, 0) == cidrsubnet(var.vnet_address_space, 0, 0)
+    ]), true)
+    error_message = "subnet_prefixes must lie inside vnet_address_space."
+  }
 
   validation {
     # Two networks overlap when they agree on the shorter of their prefixes.
-    condition = try(alltrue([
-      for reserved in ["100.100.0.0/16", "169.254.0.0/16", "172.30.0.0/15", "192.0.2.0/24"] :
-      cidrsubnet("${cidrhost(var.vnet_address_space, 0)}/${min(tonumber(split("/", var.vnet_address_space)[1]), tonumber(split("/", reserved)[1]))}", 0, 0)
-      != cidrsubnet("${cidrhost(reserved, 0)}/${min(tonumber(split("/", var.vnet_address_space)[1]), tonumber(split("/", reserved)[1]))}", 0, 0)
+    # Each pair once, by position (>= compares numbers only).
+    condition = try(alltrue(flatten([
+      for i, x in values(var.subnet_prefixes) : [
+        for j, y in values(var.subnet_prefixes) : i >= j || (
+          cidrsubnet("${cidrhost(x, 0)}/${min(tonumber(split("/", x)[1]), tonumber(split("/", y)[1]))}", 0, 0)
+          != cidrsubnet("${cidrhost(y, 0)}/${min(tonumber(split("/", x)[1]), tonumber(split("/", y)[1]))}", 0, 0)
+        )
+      ]
+    ])), true)
+    error_message = "subnet_prefixes must not overlap each other."
+  }
+}
+
+variable "pod_cidr" {
+  description = "The pods' overlay addresses (Azure CNI Overlay), outside vnet_address_space: they never appear on the VNet, where a pod's traffic leaves with its node's address."
+  type        = string
+  default     = "10.244.0.0/16"
+
+  validation {
+    condition = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.pod_cidr)) && try(cidrsubnet(var.pod_cidr, 0, 0) == var.pod_cidr, false) && try(
+      cidrsubnet("${cidrhost(var.pod_cidr, 0)}/${min(tonumber(split("/", var.pod_cidr)[1]), tonumber(split("/", var.vnet_address_space)[1]))}", 0, 0)
+      != cidrsubnet("${cidrhost(var.vnet_address_space, 0)}/${min(tonumber(split("/", var.pod_cidr)[1]), tonumber(split("/", var.vnet_address_space)[1]))}", 0, 0),
+      true
+    )
+    error_message = "pod_cidr must be an IPv4 network in CIDR notation, such as 10.244.0.0/16, apart from vnet_address_space."
+  }
+}
+
+variable "service_cidr" {
+  description = "The Kubernetes Services' addresses, outside vnet_address_space and pod_cidr. The cluster's DNS service takes its tenth address."
+  type        = string
+  default     = "10.0.0.0/16"
+
+  validation {
+    condition = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.service_cidr)) && try(cidrsubnet(var.service_cidr, 0, 0) == var.service_cidr, false) && try(alltrue([
+      for other in [var.vnet_address_space, var.pod_cidr] :
+      cidrsubnet("${cidrhost(var.service_cidr, 0)}/${min(tonumber(split("/", var.service_cidr)[1]), tonumber(split("/", other)[1]))}", 0, 0)
+      != cidrsubnet("${cidrhost(other, 0)}/${min(tonumber(split("/", var.service_cidr)[1]), tonumber(split("/", other)[1]))}", 0, 0)
     ]), true)
-    error_message = "vnet_address_space must not overlap the ranges Container Apps reserves: 100.100.0.0/16, 169.254.0.0/16, 172.30.0.0/15 and 192.0.2.0/24."
-  }
-}
-
-variable "container_apps_subnet_prefix" {
-  description = "The Container Apps environment's subnet, inside vnet_address_space: /27 or larger. It can't change once the environment exists."
-  type        = string
-  default     = "10.66.0.0/24"
-
-  validation {
-    condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.container_apps_subnet_prefix)) && try(cidrsubnet(var.container_apps_subnet_prefix, 0, 0) == var.container_apps_subnet_prefix && tonumber(split("/", var.container_apps_subnet_prefix)[1]) <= 27, false)
-    error_message = "container_apps_subnet_prefix must be an IPv4 network in CIDR notation, /27 or larger, such as 10.66.0.0/24."
-  }
-
-  validation {
-    condition = try(
-      tonumber(split("/", var.container_apps_subnet_prefix)[1]) >= tonumber(split("/", var.vnet_address_space)[1])
-      && cidrsubnet("${cidrhost(var.container_apps_subnet_prefix, 0)}/${split("/", var.vnet_address_space)[1]}", 0, 0) == cidrsubnet(var.vnet_address_space, 0, 0),
-      true
-    )
-    error_message = "container_apps_subnet_prefix must lie inside vnet_address_space."
-  }
-}
-
-variable "private_endpoint_subnet_prefix" {
-  description = "The subnet of HorizonDB's and Foundry's private endpoints, inside vnet_address_space and apart from container_apps_subnet_prefix: /28 or larger."
-  type        = string
-  default     = "10.66.1.0/27"
-
-  validation {
-    condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", var.private_endpoint_subnet_prefix)) && try(cidrsubnet(var.private_endpoint_subnet_prefix, 0, 0) == var.private_endpoint_subnet_prefix && tonumber(split("/", var.private_endpoint_subnet_prefix)[1]) <= 28, false)
-    error_message = "private_endpoint_subnet_prefix must be an IPv4 network in CIDR notation, /28 or larger, such as 10.66.1.0/27."
-  }
-
-  validation {
-    condition = try(
-      tonumber(split("/", var.private_endpoint_subnet_prefix)[1]) >= tonumber(split("/", var.vnet_address_space)[1])
-      && cidrsubnet("${cidrhost(var.private_endpoint_subnet_prefix, 0)}/${split("/", var.vnet_address_space)[1]}", 0, 0) == cidrsubnet(var.vnet_address_space, 0, 0),
-      true
-    )
-    error_message = "private_endpoint_subnet_prefix must lie inside vnet_address_space."
-  }
-
-  validation {
-    condition = try(
-      cidrsubnet("${cidrhost(var.private_endpoint_subnet_prefix, 0)}/${min(tonumber(split("/", var.private_endpoint_subnet_prefix)[1]), tonumber(split("/", var.container_apps_subnet_prefix)[1]))}", 0, 0)
-      != cidrsubnet("${cidrhost(var.container_apps_subnet_prefix, 0)}/${min(tonumber(split("/", var.private_endpoint_subnet_prefix)[1]), tonumber(split("/", var.container_apps_subnet_prefix)[1]))}", 0, 0),
-      true
-    )
-    error_message = "private_endpoint_subnet_prefix must not overlap container_apps_subnet_prefix."
+    error_message = "service_cidr must be an IPv4 network in CIDR notation, such as 10.0.0.0/16, apart from vnet_address_space and pod_cidr."
   }
 }
 
@@ -410,63 +426,99 @@ variable "foundry_embedding_deployment" {
   }
 }
 
-# --- Container Apps -------------------------------------------------------------
+# --- AKS --------------------------------------------------------------------------
 
-variable "create_app" {
-  description = "Create the container app. False, the default, deploys everything else: the probe job can check the database, and the operator can store the GitHub OAuth App's credentials, whose callback is on Front Door's host name. Once the app exists, false destroys it."
+variable "kubernetes_version" {
+  description = "The cluster's Kubernetes version, such as 1.34. Null takes AKS's default; the cluster then follows patch releases (automatic_upgrade_channel = patch)."
+  type        = string
+  default     = null
+}
+
+variable "aks_sku_tier" {
+  description = "The cluster's tier: Standard, with the API server's uptime SLA, or Free."
+  type        = string
+  default     = "Standard"
+
+  validation {
+    condition     = contains(["Free", "Standard", "Premium"], var.aks_sku_tier)
+    error_message = "aks_sku_tier must be Free, Standard or Premium."
+  }
+}
+
+variable "api_server_authorized_ip_ranges" {
+  description = "IPv4 ranges allowed to reach the cluster's API server, such as the operators' addresses. Empty allows any address; Entra ID authorizes every request either way."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for range in var.api_server_authorized_ip_ranges : can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", range)) && try(cidrsubnet(range, 0, 0) == range, false)])
+    error_message = "api_server_authorized_ip_ranges must hold IPv4 networks in CIDR notation, such as 203.0.113.0/24."
+  }
+}
+
+variable "system_pool" {
+  description = "The system node pool, which runs only the cluster's own add-ons (CriticalAddonsOnly): its VM size and autoscaling bounds."
+  type = object({
+    vm_size   = optional(string, "Standard_D2ds_v5")
+    min_count = optional(number, 1)
+    max_count = optional(number, 3)
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = var.system_pool.min_count >= 1 && var.system_pool.max_count >= var.system_pool.min_count && floor(var.system_pool.min_count) == var.system_pool.min_count && floor(var.system_pool.max_count) == var.system_pool.max_count
+    error_message = "system_pool's min_count must be a whole number of at least 1, and max_count at least min_count."
+  }
+}
+
+variable "services_pool" {
+  description = "The services node pool, which runs oauth2-proxy, the home page, pghacker-mcp, pghacker-indexer, the token proxy and the ops jobs: its VM size and node count."
+  type = object({
+    vm_size    = optional(string, "Standard_D4ds_v5")
+    node_count = optional(number, 2)
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = var.services_pool.node_count >= 1 && floor(var.services_pool.node_count) == var.services_pool.node_count
+    error_message = "services_pool.node_count must be a whole number of at least 1."
+  }
+}
+
+variable "swarm_pool" {
+  description = "The PilotSwarm node pool, tainted for PilotSwarm alone: the portal and the worker, which runs every agent session and the crawl scheduler. Its subnet gets no internet through the firewall. Its VM size and node count; the worker holds up to crawl_max_sessions Copilot CLI sessions."
+  type = object({
+    vm_size    = optional(string, "Standard_D4ds_v5")
+    node_count = optional(number, 1)
+  })
+  default  = {}
+  nullable = false
+
+  validation {
+    condition     = var.swarm_pool.node_count >= 1 && floor(var.swarm_pool.node_count) == var.swarm_pool.node_count
+    error_message = "swarm_pool.node_count must be a whole number of at least 1."
+  }
+}
+
+variable "alert_emails" {
+  description = "Addresses that the denied-egress alert emails: it fires when the firewall denies a connection from the PilotSwarm pool. Empty creates the alert without an action group; it shows in Azure Monitor."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition     = alltrue([for email in var.alert_emails : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", email))])
+    error_message = "alert_emails must hold email addresses."
+  }
+}
+
+variable "create_origin" {
+  description = "Connect Front Door to the cluster: its origin, over Private Link to the edge's Private Link Service, and its routes. False, the default, for the applies before ../scripts/aks.mjs apply has created that service; then true, and approve the connection (../scripts/aks.mjs approve-edge)."
   type        = bool
   default     = false
-  nullable    = false
-}
-
-variable "cpu" {
-  description = "vCPUs for the app's container."
-  type        = number
-  default     = 4
-
-  validation {
-    condition     = var.cpu >= 0.25 && var.cpu <= 4 && floor(var.cpu * 4) == var.cpu * 4
-    error_message = "cpu must be a multiple of 0.25 from 0.25 to 4."
-  }
-}
-
-variable "memory" {
-  description = "Memory for the app's container: twice cpu, in Gi, as the Consumption profile requires."
-  type        = string
-  default     = "8Gi"
-
-  validation {
-    condition     = endswith(var.memory, "Gi") && try(tonumber(trimsuffix(var.memory, "Gi")) == var.cpu * 2, false)
-    error_message = "memory must be twice cpu, in Gi: 8Gi for 4 vCPUs, 4Gi for 2 and so on."
-  }
-}
-
-variable "job_cpu" {
-  description = "vCPUs for the probe and restore jobs' containers."
-  type        = number
-  default     = 2
-
-  validation {
-    condition     = var.job_cpu >= 0.25 && var.job_cpu <= 4 && floor(var.job_cpu * 4) == var.job_cpu * 4
-    error_message = "job_cpu must be a multiple of 0.25 from 0.25 to 4."
-  }
-}
-
-variable "job_memory" {
-  description = "Memory for the jobs' containers: twice job_cpu, in Gi."
-  type        = string
-  default     = "4Gi"
-
-  validation {
-    condition     = endswith(var.job_memory, "Gi") && try(tonumber(trimsuffix(var.job_memory, "Gi")) == var.job_cpu * 2, false)
-    error_message = "job_memory must be twice job_cpu, in Gi: 4Gi for 2 vCPUs, 8Gi for 4 and so on."
-  }
-}
-
-variable "restrict_origin_to_front_door" {
-  description = "Admit only Front Door's backend addresses to the app's own host name: one ingress allow rule per IPv4 range of the AzureFrontDoor.Backend service tag, read while planning (Container Apps takes neither service tags nor IPv6). Apply again now and then to follow changes to the ranges. False lets anyone reach the app directly, bypassing Front Door."
-  type        = bool
-  default     = true
   nullable    = false
 }
 
@@ -491,6 +543,28 @@ variable "mcp_rate_burst" {
   validation {
     condition     = var.mcp_rate_burst >= 1 && var.mcp_rate_burst <= 1000000 && floor(var.mcp_rate_burst) == var.mcp_rate_burst
     error_message = "mcp_rate_burst must be a whole number from 1 to 1000000."
+  }
+}
+
+variable "mcp_internal_rate_per_minute" {
+  description = "Requests per minute that the deployment's agents may make to pghacker-mcp's internal listener, all of them together: they connect from one address (PGHACKER_INTERNAL_RATE_PER_MINUTE)."
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.mcp_internal_rate_per_minute >= 1 && var.mcp_internal_rate_per_minute <= 1000000 && floor(var.mcp_internal_rate_per_minute) == var.mcp_internal_rate_per_minute
+    error_message = "mcp_internal_rate_per_minute must be a whole number from 1 to 1000000."
+  }
+}
+
+variable "mcp_internal_rate_burst" {
+  description = "Requests the agents may make at once to pghacker-mcp's internal listener before mcp_internal_rate_per_minute applies (PGHACKER_INTERNAL_RATE_BURST)."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.mcp_internal_rate_burst >= 1 && var.mcp_internal_rate_burst <= 1000000 && floor(var.mcp_internal_rate_burst) == var.mcp_internal_rate_burst
+    error_message = "mcp_internal_rate_burst must be a whole number from 1 to 1000000."
   }
 }
 
@@ -528,7 +602,7 @@ variable "crawl_start_sessions" {
 }
 
 variable "crawl_max_sessions" {
-  description = "The most extraction sessions the crawler runs at once, sized to the app's memory (PGHACKER_CRAWL_MAX_SESSIONS). The app accepts up to 64."
+  description = "The most extraction sessions the crawler runs at once, sized to the worker's memory on the PilotSwarm pool (PGHACKER_CRAWL_MAX_SESSIONS). The app accepts up to 64."
   type        = number
   default     = 16
 
@@ -594,7 +668,7 @@ variable "portal_role" {
 }
 
 variable "app_env" {
-  description = "More environment variables for the app (not the jobs), such as RUST_LOG, merged after the ones this configuration sets. It can't replace those, nor set oauth2-proxy's own (OAUTH2_PROXY_*)."
+  description = "More app settings, such as RUST_LOG or PGHACKER_CRAWL = \"off\", merged after the ones this configuration sets (the kubernetes output's app_settings). Each component gets only those it uses (scripts/lib/azure.mjs). It can't replace the derived ones, nor set oauth2-proxy's own (OAUTH2_PROXY_*)."
   type        = map(string)
   default     = {}
   nullable    = false
@@ -637,6 +711,8 @@ variable "app_env" {
       "PGHACKER_GITHUB_ORG",
       "PGHACKER_GITHUB_TEAM",
       "PGHACKER_GITHUB_USERS",
+      "PGHACKER_INTERNAL_RATE_BURST",
+      "PGHACKER_INTERNAL_RATE_PER_MINUTE",
       "PGHACKER_PORTAL_ROLE",
       "PGHACKER_PORTAL_URL",
       "PGHACKER_PRIVACY_URL",

@@ -7,8 +7,8 @@
 //!
 //! Events wait in a bounded queue and leave in gzipped batches every few
 //! seconds, so recording never waits on the network. In Azure the endpoint
-//! is the supervisor's proxy, which adds the managed identity's token
-//! (scripts/lib/monitor.mjs).
+//! is the token proxy (scripts/token-proxy.mjs), which adds its workload
+//! identity's token (scripts/lib/monitor.mjs).
 //!
 //! An event carries the client's address only in its `ai.location.ip` tag,
 //! from which Application Insights derives a country, region and city before

@@ -11,7 +11,6 @@ variables {
   location            = "westus3"
   resource_group_name = "pghacker-example"
   name_prefix         = "pghacker-example"
-  app_name            = "pghacker-example"
   acr_name            = "examplepghacr12345"
   key_vault_name      = "pghacker-example-kv"
   image               = "examplepghacr12345.azurecr.io/pghacker-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -31,6 +30,12 @@ mock_provider "random" {
 }
 mock_provider "time" {}
 
+# Azure Firewall takes only a subnet named AzureFirewallSubnet.
+override_resource {
+  target = azurerm_subnet.firewall
+  values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/AzureFirewallSubnet" }
+}
+
 override_resource {
   target = azurerm_subnet.private_endpoints
   values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/private-endpoints" }
@@ -44,6 +49,16 @@ override_resource {
 override_resource {
   target = azurerm_private_endpoint.foundry
   values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/privateEndpoints/pghacker-example-foundry-pe" }
+}
+
+# The token proxy's identity, apart from the others.
+override_resource {
+  target = azurerm_user_assigned_identity.workload["proxy"]
+  values = {
+    id           = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ManagedIdentity/userAssignedIdentities/pghacker-example-proxy-id"
+    client_id    = "11111111-0000-4000-8000-000000000001"
+    principal_id = "22222222-0000-4000-8000-000000000001"
+  }
 }
 
 # Distinct zone IDs, so that the zone group's IDs can be told apart.
@@ -79,6 +94,14 @@ run "foundry_is_private" {
       && azurerm_cognitive_account.foundry.network_acls[0].bypass == "None"
     )
     error_message = "The account must refuse public network access and deny by default, and refuse keys, as the subscription's policy requires."
+  }
+
+  assert {
+    condition = (
+      azurerm_cognitive_account.foundry.outbound_network_access_restricted
+      && length(coalesce(azurerm_cognitive_account.foundry.fqdns, [])) == 0
+    )
+    error_message = "The account must reach no outside host for a caller (data loss prevention): no image or file by URL, no On Your Data source, no remote MCP server."
   }
 
   assert {
@@ -139,21 +162,21 @@ run "foundry_is_private" {
 
   assert {
     condition = (
-      azurerm_role_assignment.app_foundry_openai_user.scope == azurerm_cognitive_account.foundry.id
-      && azurerm_role_assignment.app_foundry_openai_user.role_definition_name == "Cognitive Services OpenAI User"
-      && azurerm_role_assignment.app_foundry_openai_user.principal_id == azurerm_user_assigned_identity.app.principal_id
+      azurerm_role_assignment.proxy_foundry_openai_user.scope == azurerm_cognitive_account.foundry.id
+      && azurerm_role_assignment.proxy_foundry_openai_user.role_definition_name == "Cognitive Services OpenAI User"
+      && azurerm_role_assignment.proxy_foundry_openai_user.principal_id == "22222222-0000-4000-8000-000000000001"
     )
-    error_message = "The app's identity must be a Cognitive Services OpenAI User of the account, which its tokens need."
+    error_message = "The token proxy's identity must be a Cognitive Services OpenAI User of the account, which its tokens need."
   }
 
   assert {
     condition = (
       output.foundry_endpoint == "https://pghacker-example-foundry.openai.azure.com"
       && output.foundry_account_name == "pghacker-example-foundry"
-      && local.job_env.PGHACKER_FOUNDRY_ENDPOINT == output.foundry_endpoint
-      && local.job_env.PGHACKER_FOUNDRY_SOL == "gpt-6.1-sol"
-      && local.job_env.PGHACKER_FOUNDRY_LUNA == "gpt-6-luna"
-      && local.job_env.PGHACKER_FOUNDRY_EMBEDDING == "text-embedding-3-small"
+      && local.app_settings.PGHACKER_FOUNDRY_ENDPOINT == output.foundry_endpoint
+      && local.app_settings.PGHACKER_FOUNDRY_SOL == "gpt-6.1-sol"
+      && local.app_settings.PGHACKER_FOUNDRY_LUNA == "gpt-6-luna"
+      && local.app_settings.PGHACKER_FOUNDRY_EMBEDDING == "text-embedding-3-small"
     )
     error_message = "The app must get the account's Azure OpenAI endpoint, without a trailing slash, and the deployments playing each role."
   }
@@ -197,10 +220,10 @@ run "roles_follow_other_deployments" {
 
   assert {
     condition = (
-      local.job_env.PGHACKER_FOUNDRY_SOL == "chat"
-      && local.job_env.PGHACKER_FOUNDRY_LUNA == "crawl"
-      && local.job_env.PGHACKER_FOUNDRY_EMBEDDING == "embed"
-      && local.job_env.PGHACKER_FOUNDRY_ENDPOINT == "https://pghacker-models.openai.azure.com"
+      local.app_settings.PGHACKER_FOUNDRY_SOL == "chat"
+      && local.app_settings.PGHACKER_FOUNDRY_LUNA == "crawl"
+      && local.app_settings.PGHACKER_FOUNDRY_EMBEDDING == "embed"
+      && local.app_settings.PGHACKER_FOUNDRY_ENDPOINT == "https://pghacker-models.openai.azure.com"
       && azurerm_cognitive_account.foundry.custom_subdomain_name == "pghacker-models"
       && azurerm_private_endpoint.foundry.name == "pghacker-models-pe"
     )

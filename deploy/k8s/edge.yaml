@@ -1,0 +1,119 @@
+# The edge: oauth2-proxy, the only component that takes traffic from outside
+# the cluster. Front Door reaches it over Private Link: the Service below is
+# an internal load balancer at a fixed address in the edge subnet, and AKS
+# creates the Private Link Service in front of it, whose connection from
+# Front Door the operator approves (deploy/scripts/aks.mjs approve-edge). It
+# routes /mcp to pghacker-mcp and / to the home page without sign-in, and
+# /portal (with the portal's /api and /assets), after GitHub sign-in, to the
+# portal (scripts/lib/routes.mjs). Its GitHub OAuth App's credentials and
+# cookie secret come from Key Vault through its SecretProviderClass.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: edge
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: edge
+        app.kubernetes.io/part-of: pghacker-mcp
+    spec:
+      serviceAccountName: edge
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10003
+        runAsGroup: 10003
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: oauth2-proxy
+          image: ${IMAGE}
+          args: ${EDGE_ARGS}
+          env: ${ENV_EDGE}
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: secrets, mountPath: /mnt/secrets, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes: { secretProviderClass: edge }
+        - name: tmp
+          emptyDir: {}
+---
+# The internal load balancer, and the Private Link Service that Front Door's
+# origin connects to (deploy/terraform/frontdoor.tf). Local traffic policy
+# keeps the Private Link Service's NAT address as the source, which the edge's
+# NetworkPolicy admits.
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: edge
+    app.kubernetes.io/part-of: pghacker-mcp
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: ${EDGE_SUBNET}
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: ${EDGE_IP}
+    service.beta.kubernetes.io/azure-pls-create: "true"
+    service.beta.kubernetes.io/azure-pls-name: ${EDGE_PLS_NAME}
+    service.beta.kubernetes.io/azure-pls-ip-configuration-subnet: ${EDGE_SUBNET}
+    service.beta.kubernetes.io/azure-pls-ip-configuration-ip-address-count: "1"
+    service.beta.kubernetes.io/azure-pls-proxy-protocol: "false"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: edge
+  ports:
+    - { name: http, port: 80, targetPort: http, protocol: TCP }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: edge
+  namespace: ${NAMESPACE}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge

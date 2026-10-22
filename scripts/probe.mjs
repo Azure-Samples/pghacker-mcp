@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-import { FOUNDRY_PROXY, PORTS, databaseUrls, embedEnvironment, processEnvironments, readAzureConfig } from "./lib/azure.mjs";
-import { PLACEHOLDER_KEY, managedIdentityTokens, startFoundryProxy } from "./lib/foundry.mjs";
+import { databaseUrls, embedEnvironment, readAzureConfig } from "./lib/azure.mjs";
+import { PLACEHOLDER_KEY } from "./lib/foundry.mjs";
 import { psqlJson, run } from "./lib/psql.mjs";
 
 // Checks the Azure deployment from inside its network: the probe job runs
-// this before the app exists (deploy/README.md, "First deployment"). It
-// bootstraps the database as the app would (TLS verified, roles, extensions,
-// schema, graph, migrations), then reports in one JSON line: the server,
-// its extensions and the roles; whether BM25, vector and graph queries run
-// as pgh_reader; the managed identity's token and each Foundry deployment,
-// through the same proxy as the app's; and the outside services the app
-// reaches. Exits 1 when anything the app needs failed.
+// this on the services pool once the bootstrap job has prepared the database
+// (deploy/README.md, "First deployment"). It reports in one JSON line: the
+// server, its extensions and the roles; whether BM25, vector and graph
+// queries run as pgh_reader; each Foundry deployment, through the token proxy,
+// whose workload identity signs the requests; the outside services the
+// services pool reaches through the firewall's allow-list; and that the
+// firewall refuses another host. Exits 1 when anything failed.
 const started = Date.now();
 const report = { ok: false };
 const failures = [];
@@ -44,19 +44,22 @@ async function get(url) {
   return { status: response.status };
 }
 
+/** Whether `url` is refused: no answer, or Azure Firewall's own 470. */
+async function refused(url) {
+  const at = Date.now();
+  try {
+    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(15_000) });
+    await response.arrayBuffer();
+    const ms = Date.now() - at;
+    return response.status === 470 ? { ok: true, status: 470, ms } : { ok: false, error: `HTTP ${response.status}: reachable`, ms };
+  } catch (error) {
+    return { ok: true, refused: String(error.cause?.code ?? error.message).slice(0, 200), ms: Date.now() - at };
+  }
+}
+
 try {
   const config = readAzureConfig(process.env, { serve: false });
   const urls = databaseUrls(config);
-
-  report.bootstrap = await timed(async () => {
-    const result = await run("/usr/local/bin/pghacker-indexer", ["bootstrap"], {
-      env: processEnvironments(config).bootstrap,
-      timeoutMs: 15 * 60_000,
-    });
-    if (result.code !== 0) throw new Error(result.stderr.trim().split("\n").slice(-8).join(" | "));
-    return {};
-  });
-  if (!report.bootstrap.ok) failures.push("bootstrap");
 
   report.database = await timed(async () => psqlJson(urls.admin, `SELECT json_build_object(
       'server_version', current_setting('server_version'),
@@ -82,23 +85,14 @@ try {
       'graph', (SELECT count(*) FROM ag_catalog.cypher('pghacker_graph', $$ MATCH (n) RETURN n LIMIT 1 $$) AS (n ag_catalog.agtype)))`));
   if (!report.queries.ok) failures.push("queries");
 
+  // Through the token proxy, as the app's requests go: its workload identity
+  // signs them, and nothing here holds a credential.
   const foundry = config.foundry;
-  const token = managedIdentityTokens({
-    endpoint: process.env.IDENTITY_ENDPOINT,
-    header: process.env.IDENTITY_HEADER,
-    clientId: foundry.clientId,
-  });
-  report.identity = await timed(async () => {
-    await token();
-    return { client_id: foundry.clientId };
-  });
-  if (!report.identity.ok) failures.push("identity");
-  const proxy = await startFoundryProxy({ upstream: foundry.endpoint, token, port: PORTS.foundry });
   const key = { "api-key": PLACEHOLDER_KEY };
   report.foundry = {};
   for (const deployment of [foundry.sol, foundry.luna]) {
     report.foundry[deployment] = await timed(async () => {
-      const { json } = await post(`${FOUNDRY_PROXY}/openai/v1/responses`, key,
+      const { json } = await post(`${foundry.proxy}/openai/v1/responses`, key,
         { model: deployment, input: "Reply with OK.", max_output_tokens: 64 });
       return { model: json.model, status: json.status };
     });
@@ -111,7 +105,6 @@ try {
     return { dimensions };
   });
   for (const [name, result] of Object.entries(report.foundry)) if (!result.ok) failures.push(`foundry ${name}`);
-  proxy.close();
 
   report.network = {
     archive: await timed(async () => {
@@ -131,6 +124,10 @@ try {
     github_api: await timed(async () => get("https://api.github.com/zen")),
   };
   for (const [name, result] of Object.entries(report.network)) if (!result.ok) failures.push(`network ${name}`);
+
+  // A host off the allow-list: the firewall must refuse it.
+  report.blocked = { example: await refused("https://example.com/") };
+  if (!report.blocked.example.ok) failures.push("the firewall let example.com through");
 } catch (error) {
   failures.push(error.message);
 }
@@ -138,5 +135,4 @@ report.ok = failures.length === 0;
 report.failures = failures;
 report.seconds = Math.round((Date.now() - started) / 1000);
 console.log(JSON.stringify(report));
-// The proxy's keep-alive connections would keep the job running.
 process.exit(report.ok ? 0 : 1);

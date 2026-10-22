@@ -85,7 +85,7 @@ The last reviews 14 patches as their actual reviewers would have (10 they object
 
 ## Deploy to Azure
 
-[deploy/README.md](deploy/README.md) deploys the app to Azure Container Apps with Terraform, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/` on Front Door's own host name, requires GitHub sign-in, and the indexer takes whatever sources its users ask for.
+[deploy/README.md](deploy/README.md) deploys the app to Azure Kubernetes Service with Terraform and Kubernetes manifests, starting from the local corpus. There, the home page and `/mcp` are public, the portal, at `/portal/` on Front Door's own host name, requires GitHub sign-in, and the indexer takes whatever sources its users ask for. PilotSwarm's agents, which read mail that anyone can post and run shell commands, run on a node pool of their own that has no internet: they reach only the indexer's tools, pghacker-mcp, the model proxy and their database.
 
 ## Privacy and telemetry
 

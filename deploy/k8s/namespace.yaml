@@ -1,0 +1,14 @@
+# The app's namespace. Pod Security's restricted profile is enforced: no pod
+# runs as root, escalates its privileges, keeps a Linux capability, uses the
+# host's namespaces or mounts its paths. Rendered by scripts/lib/aks.mjs, which
+# replaces each ${NAME} with its value (deploy/README.md, "The cluster").
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: pghacker-mcp
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

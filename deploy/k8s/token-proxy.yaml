@@ -1,0 +1,99 @@
+# The token proxy (scripts/token-proxy.mjs): the deployment's only pod with an
+# Azure identity. The workload identity webhook gives it its identity's
+# client ID and a federated token; it signs the requests of every other
+# component to Foundry (3110) and Application Insights (3111) with Entra
+# tokens, so no other pod holds a credential for either.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-proxy
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: token-proxy
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: token-proxy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: token-proxy
+        app.kubernetes.io/part-of: pghacker-mcp
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: token-proxy
+      automountServiceAccountToken: false
+      nodeSelector:
+        pghacker.io/pool: services
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: token-proxy
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: token-proxy
+          image: ${IMAGE}
+          args: [node, scripts/token-proxy.mjs]
+          env: ${ENV_TOKEN_PROXY}
+          ports:
+            - { name: foundry, containerPort: 3110 }
+            - { name: monitor, containerPort: 3111 }
+            - { name: health, containerPort: 8081 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: health }
+            periodSeconds: 15
+            timeoutSeconds: 12
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: token-proxy
+  namespace: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/name: token-proxy
+    app.kubernetes.io/part-of: pghacker-mcp
+spec:
+  selector:
+    app.kubernetes.io/name: token-proxy
+  ports:
+    - { name: foundry, port: 3110, targetPort: foundry, protocol: TCP }
+    - { name: monitor, port: 3111, targetPort: monitor, protocol: TCP }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: token-proxy
+  namespace: ${NAMESPACE}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: token-proxy

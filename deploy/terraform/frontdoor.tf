@@ -1,13 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-# The public entry: an Azure Front Door Standard endpoint in front of the app,
-# which keeps the host name, <name>-<hash>.<zone>.azurefd.net, when the
-# Container Apps environment is replaced. That host name serves every path,
-# and oauth2-proxy routes it: /mcp to the anonymous MCP endpoint, / to the
-# public home page, /portal to the GitHub-gated portal. An optional custom
-# domain gets only the public paths, so the portal and its sign-in stay on
-# one host, whose callback is fixed.
+# The public entry: an Azure Front Door Premium endpoint, whose host name,
+# <name>-<hash>.<zone>.azurefd.net, serves every path, and which reaches the
+# cluster over Private Link alone: its origin is the edge's internal load
+# balancer, through the Private Link Service that AKS creates for the edge
+# Service (deploy/k8s), so the cluster has no public address for Front Door
+# or anyone else. oauth2-proxy, behind it, routes: /mcp to the anonymous MCP
+# endpoint, / to the public home page, /portal to the GitHub-gated portal. An
+# optional custom domain gets only the public paths, so the portal and its
+# sign-in stay on one host, whose callback is fixed.
+#
+# The origin and the routes wait for create_origin: the Private Link Service
+# exists only once ../scripts/aks.mjs has applied the edge Service. Front
+# Door's connection to it then waits for approval (aks.mjs approve-edge),
+# which a check reports.
 
 locals {
   # The endpoint's ID from known values: azurerm checks the route's reference
@@ -22,11 +29,12 @@ locals {
 
 # Front Door waits up to 240 s, its longest, for the app's response. The
 # profile's resource_guid is the X-Azure-FDID header Front Door adds to every
-# request, which the app can check (PGHACKER_FRONT_DOOR_ID).
+# request, which the app checks too (PGHACKER_FRONT_DOOR_ID). Premium has
+# Private Link origins.
 resource "azurerm_cdn_frontdoor_profile" "this" {
   name                     = local.front_door_profile_name
   resource_group_name      = local.rg_name
-  sku_name                 = "Standard_AzureFrontDoor"
+  sku_name                 = "Premium_AzureFrontDoor"
   response_timeout_seconds = 240
   tags                     = var.tags
 }
@@ -68,7 +76,7 @@ resource "azurerm_cdn_frontdoor_custom_domain" "this" {
 
 # A single origin, so no health probes, which Front Door allows only then: a
 # failed probe would have nowhere else to send requests. No session affinity
-# either, with one replica behind it.
+# either: oauth2-proxy's replicas keep their sessions in its cookie.
 resource "azurerm_cdn_frontdoor_origin_group" "this" {
   name                     = "app"
   cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.this.id
@@ -77,36 +85,45 @@ resource "azurerm_cdn_frontdoor_origin_group" "this" {
   load_balancing {}
 }
 
-# The app at its own host name, which Container Apps routes by and its
-# certificate is issued for. It's known from the environment, so the origin
-# exists before the app does, and follows a replaced environment in the same
-# apply.
+# The edge's internal load balancer, over Private Link: HTTP, since the
+# traffic never leaves Microsoft's network, so the cluster needs no
+# certificate. No origin host header: the request's own host reaches
+# oauth2-proxy and pghacker-mcp, which check it (PGHACKER_PUBLIC_HOSTS).
 resource "azurerm_cdn_frontdoor_origin" "this" {
-  name                           = "app"
+  count = var.create_origin ? 1 : 0
+
+  name                           = "edge"
   cdn_frontdoor_origin_group_id  = azurerm_cdn_frontdoor_origin_group.this.id
-  host_name                      = local.app_fqdn
-  origin_host_header             = local.app_fqdn
+  host_name                      = local.edge_ip
   certificate_name_check_enabled = true
   http_port                      = 80
   https_port                     = 443
   priority                       = 1
   weight                         = 1000
+
+  private_link {
+    request_message        = local.edge_request_message
+    location               = var.location
+    private_link_target_id = local.edge_pls_id
+  }
 }
 
-# Every path on Front Door's own host name, HTTPS only at the edge and to the
-# app. No cache block means no caching and no compression, so MCP responses
-# and streams and the portal's WebSockets pass through untouched. It waits
-# for the custom domain's route, so that the domain, which it served before,
-# always has one while an apply moves it.
+# Every path on Front Door's own host name, HTTPS only at the edge and HTTP
+# to the origin, inside Private Link. No cache block means no caching and no
+# compression, so MCP responses and streams and the portal's WebSockets pass
+# through untouched. It waits for the custom domain's route, so that the
+# domain, which it served before, always has one while an apply moves it.
 resource "azurerm_cdn_frontdoor_route" "this" {
+  count = var.create_origin ? 1 : 0
+
   name                          = "app"
   cdn_frontdoor_endpoint_id     = local.front_door_endpoint_id
   cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.this.id
-  cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.this.id]
+  cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.this[0].id]
   patterns_to_match             = ["/*"]
   supported_protocols           = ["Https"]
   https_redirect_enabled        = false
-  forwarding_protocol           = "HttpsOnly"
+  forwarding_protocol           = "HttpOnly"
   link_to_default_domain        = true
 
   depends_on = [azapi_resource.front_door_endpoint, azurerm_cdn_frontdoor_route.public]
@@ -115,18 +132,39 @@ resource "azurerm_cdn_frontdoor_route" "this" {
 # The custom domain's public paths, to the same origin, as uncached as the
 # rest.
 resource "azurerm_cdn_frontdoor_route" "public" {
-  count = var.front_door_custom_domain == null ? 0 : 1
+  count = var.create_origin && var.front_door_custom_domain != null ? 1 : 0
 
   name                            = "public"
   cdn_frontdoor_endpoint_id       = local.front_door_endpoint_id
   cdn_frontdoor_origin_group_id   = azurerm_cdn_frontdoor_origin_group.this.id
-  cdn_frontdoor_origin_ids        = [azurerm_cdn_frontdoor_origin.this.id]
+  cdn_frontdoor_origin_ids        = [azurerm_cdn_frontdoor_origin.this[0].id]
   cdn_frontdoor_custom_domain_ids = [azurerm_cdn_frontdoor_custom_domain.this[0].id]
   patterns_to_match               = local.public_paths
   supported_protocols             = ["Https"]
   https_redirect_enabled          = false
-  forwarding_protocol             = "HttpsOnly"
+  forwarding_protocol             = "HttpOnly"
   link_to_default_domain          = false
 
   depends_on = [azapi_resource.front_door_endpoint]
+}
+
+# Front Door's private endpoint reaches the edge only once the Private Link
+# Service's owner approves its connection (../scripts/aks.mjs approve-edge).
+# A warning, not an error: the first apply with create_origin creates the
+# connection that needs the approval.
+check "edge_private_link_approved" {
+  data "azapi_resource" "edge_private_link_service" {
+    type                   = "Microsoft.Network/privateLinkServices@2024-05-01"
+    resource_id            = local.edge_pls_id
+    ignore_not_found       = true
+    response_export_values = { connections = "properties.privateEndpointConnections" }
+  }
+
+  assert {
+    condition = !var.create_origin || try(anytrue([
+      for connection in data.azapi_resource.edge_private_link_service.output.connections :
+      try(connection.properties.privateLinkServiceConnectionState.status, "") == "Approved"
+    ]), false)
+    error_message = "Front Door's connection to the Private Link Service ${local.edge_pls_name} isn't approved, so Front Door can't reach the cluster. Run deploy/scripts/aks.mjs approve-edge, then apply again."
+  }
 }

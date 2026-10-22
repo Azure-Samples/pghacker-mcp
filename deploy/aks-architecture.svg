@@ -1,0 +1,215 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 940" preserveAspectRatio="xMidYMin meet" font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#24292f"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d1242f"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/>
+    </marker>
+    <style>
+      .title { font-size: 20px; font-weight: 700; fill: #24292f; }
+      .h { font-size: 12.5px; font-weight: 700; fill: #24292f; }
+      .b { font-size: 13px; font-weight: 700; fill: #24292f; }
+      .t { font-size: 11px; fill: #3d444d; }
+      .s { font-size: 10.5px; fill: #59636e; }
+      .lbl { font-size: 10.5px; font-weight: 600; fill: #24292f; }
+      .red { fill: #d1242f; }
+      .green { fill: #1a7f37; }
+      .box { fill: #ffffff; stroke: #57606a; stroke-width: 1.2; }
+      .ext { fill: #ffffff; stroke: #8c959f; stroke-width: 1.2; stroke-dasharray: 4 3; }
+      .flow { fill: none; stroke: #24292f; stroke-width: 1.6; }
+      .deny { fill: none; stroke: #d1242f; stroke-width: 1.8; stroke-dasharray: 6 4; }
+      .allow { fill: none; stroke: #1a7f37; stroke-width: 1.8; }
+      .pe { fill: none; stroke: #8c959f; stroke-width: 1.6; stroke-dasharray: 2 3; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="940" fill="#ffffff"/>
+  <text x="20" y="34" class="title">pghacker-mcp on AKS: trust boundaries and allowed paths</text>
+
+  <!-- Left column: entry -->
+  <rect x="20" y="95" width="180" height="55" rx="8" class="ext"/>
+  <text x="110" y="118" text-anchor="middle" class="b">MCP clients</text>
+  <text x="110" y="137" text-anchor="middle" class="t">and browsers</text>
+
+  <rect x="20" y="185" width="180" height="80" rx="8" fill="#efe8fb" stroke="#8a63d2" stroke-width="1.4"/>
+  <text x="110" y="209" text-anchor="middle" class="b">Front Door Premium</text>
+  <text x="110" y="228" text-anchor="middle" class="t">/   /mcp   /portal</text>
+  <text x="110" y="245" text-anchor="middle" class="t">X-Azure-FDID checked</text>
+  <text x="20" y="289" class="lbl" fill="#8a63d2">Private Link (HTTP)</text>
+  <text x="20" y="305" class="s">no public ingress IP on the cluster</text>
+
+  <!-- VNet -->
+  <rect x="230" y="60" width="920" height="780" rx="10" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="245" y="83" class="h">VNet · AKS (Entra RBAC, OIDC + workload identity) · Azure CNI Overlay + Cilium NetworkPolicy, default deny</text>
+
+  <!-- Edge subnet -->
+  <rect x="250" y="135" width="150" height="80" rx="8" fill="#efe8fb" stroke="#8a63d2" stroke-width="1.4"/>
+  <text x="325" y="153" text-anchor="middle" class="s">edge subnet</text>
+  <text x="325" y="173" text-anchor="middle" class="h">Internal LB</text>
+  <text x="325" y="189" text-anchor="middle" class="h">+ Private Link</text>
+  <text x="325" y="205" text-anchor="middle" class="h">Service</text>
+
+  <!-- System pool -->
+  <rect x="250" y="420" width="150" height="112" rx="8" fill="#eef0f2" stroke="#8c959f" stroke-width="1.2"/>
+  <text x="325" y="444" text-anchor="middle" class="h">system pool</text>
+  <text x="325" y="463" text-anchor="middle" class="t">CriticalAddonsOnly</text>
+  <text x="325" y="480" text-anchor="middle" class="t">CoreDNS · Cilium</text>
+  <text x="325" y="497" text-anchor="middle" class="t">CSI secrets driver</text>
+  <text x="325" y="514" text-anchor="middle" class="t">WI webhook</text>
+
+  <!-- Services pool -->
+  <rect x="420" y="95" width="710" height="265" rx="8" fill="#e8f1fb" stroke="#4a90d9" stroke-width="1.5"/>
+  <text x="435" y="117" class="h" fill="#1f5fa8">services pool · subnet services · egress via firewall allow-list</text>
+
+  <rect x="440" y="135" width="160" height="70" rx="6" class="box"/>
+  <text x="520" y="158" text-anchor="middle" class="b">oauth2-proxy ×2</text>
+  <text x="520" y="177" text-anchor="middle" class="t">GitHub sign-in · routes</text>
+  <text x="520" y="193" text-anchor="middle" class="t">behind the internal LB</text>
+
+  <rect x="620" y="135" width="140" height="70" rx="6" class="box"/>
+  <text x="690" y="164" text-anchor="middle" class="b">home page</text>
+  <text x="690" y="183" text-anchor="middle" class="t">public, no sign-in</text>
+
+  <rect x="900" y="135" width="210" height="70" rx="6" class="box"/>
+  <text x="1005" y="157" text-anchor="middle" class="b">token-proxy ×2</text>
+  <text x="1005" y="176" text-anchor="middle" class="t">Entra tokens for Foundry</text>
+  <text x="1005" y="193" text-anchor="middle" class="t">+ App Insights · only WI pod</text>
+
+  <rect x="440" y="255" width="210" height="80" rx="6" class="box"/>
+  <text x="545" y="279" text-anchor="middle" class="b">pghacker-mcp</text>
+  <text x="545" y="298" text-anchor="middle" class="t">:3102 public · rate-limited</text>
+  <text x="545" y="315" text-anchor="middle" class="t">:3103 agents · own rate limit</text>
+
+  <rect x="680" y="255" width="200" height="80" rx="6" class="box"/>
+  <text x="780" y="279" text-anchor="middle" class="b">pghacker-indexer</text>
+  <text x="780" y="298" text-anchor="middle" class="t">MCP tools :3101</text>
+  <text x="780" y="315" text-anchor="middle" class="t">mail + git sync (internet)</text>
+
+  <rect x="900" y="255" width="210" height="80" rx="6" class="box"/>
+  <text x="1005" y="275" text-anchor="middle" class="b">Jobs · ops identity</text>
+  <text x="1005" y="293" text-anchor="middle" class="t">bootstrap · probe</text>
+  <text x="1005" y="309" text-anchor="middle" class="t">restore · history</text>
+  <text x="1005" y="325" text-anchor="middle" class="s">only holder of the admin password</text>
+
+  <!-- PilotSwarm pool -->
+  <rect x="420" y="395" width="460" height="255" rx="8" fill="#fff1e0" stroke="#e08a1e" stroke-width="2"/>
+  <text x="435" y="640" class="h" fill="#9a5b0c">PilotSwarm pool · subnet swarm · tainted · NO internet</text>
+
+  <rect x="440" y="440" width="160" height="90" rx="6" class="box"/>
+  <text x="520" y="464" text-anchor="middle" class="b">PilotSwarm portal ×2</text>
+  <text x="520" y="484" text-anchor="middle" class="t">only from oauth2-proxy</text>
+  <text x="520" y="501" text-anchor="middle" class="t">DB: pgh_swarm</text>
+  <text x="520" y="518" text-anchor="middle" class="t">runs no agents</text>
+  <text x="440" y="560" class="s">egress-check Job runs here</text>
+  <text x="440" y="575" class="s">to verify the lockdown</text>
+
+  <rect x="620" y="430" width="240" height="185" rx="6" class="box" stroke="#e08a1e" stroke-width="1.6"/>
+  <text x="740" y="452" text-anchor="middle" class="b">PilotSwarm worker</text>
+  <text x="740" y="472" text-anchor="middle" class="t">every session: the crawl's</text>
+  <text x="740" y="488" text-anchor="middle" class="t">extract/dedup and the portal's</text>
+  <text x="740" y="504" text-anchor="middle" class="t">+ crawl scheduler (child process)</text>
+  <text x="740" y="524" text-anchor="middle" class="t">non-root · read-only FS</text>
+  <text x="740" y="540" text-anchor="middle" class="t">no Azure identity · no k8s token</text>
+  <text x="740" y="556" text-anchor="middle" class="t">secret: pgh_swarm password only</text>
+  <text x="740" y="577" text-anchor="middle" class="s">reaches only: indexer, mcp :3103,</text>
+  <text x="740" y="592" text-anchor="middle" class="s">token-proxy, HorizonDB, DNS</text>
+
+  <!-- Private endpoints subnet -->
+  <rect x="910" y="395" width="220" height="255" rx="8" fill="#e9f7ef" stroke="#3a9d5d" stroke-width="1.5"/>
+  <rect x="925" y="440" width="190" height="50" rx="6" class="box"/>
+  <text x="1020" y="470" text-anchor="middle" class="b">Foundry PE :443</text>
+  <rect x="925" y="510" width="190" height="50" rx="6" class="box"/>
+  <text x="1020" y="540" text-anchor="middle" class="b">HorizonDB PE :5432</text>
+  <text x="1020" y="617" text-anchor="middle" class="h" fill="#1a6b3c">private-endpoints subnet</text>
+  <text x="1020" y="634" text-anchor="middle" class="s">NSG: allowed source subnets only</text>
+
+  <!-- Firewall subnet -->
+  <rect x="250" y="680" width="880" height="140" rx="8" fill="#fdecec" stroke="#d64545" stroke-width="1.5"/>
+  <text x="1115" y="698" text-anchor="end" class="h" fill="#a12626">AzureFirewallSubnet</text>
+  <rect x="270" y="710" width="330" height="90" rx="6" class="box" stroke="#d64545"/>
+  <text x="435" y="735" text-anchor="middle" class="b">Azure Firewall Standard + Policy</text>
+  <text x="435" y="755" text-anchor="middle" class="t">UDR 0.0.0.0/0 from every node subnet</text>
+  <text x="435" y="773" text-anchor="middle" class="t">logs to Log Analytics · denied-flow alert</text>
+  <text x="630" y="728" class="h">Rules by source subnet</text>
+  <text x="630" y="748" class="t"><tspan font-weight="700">services:</tspan> www.postgresql.org, git.postgresql.org, github.com,</text>
+  <text x="630" y="764" class="t">api.github.com, Entra ID, App Insights ingestion, + AKS platform</text>
+  <text x="630" y="784" class="t"><tspan font-weight="700">swarm, system:</tspan> AKS platform endpoints only (kubelet, ACR, Key Vault)</text>
+  <text x="630" y="804" class="t"><tspan font-weight="700">anything else:</tspan> denied and logged</text>
+
+  <!-- Right column: Azure services -->
+  <rect x="1170" y="95" width="250" height="55" rx="8" class="ext"/>
+  <text x="1295" y="117" text-anchor="middle" class="b">Key Vault</text>
+  <text x="1295" y="136" text-anchor="middle" class="t">per-secret RBAC, read by CSI</text>
+
+  <rect x="1170" y="165" width="250" height="50" rx="8" class="ext"/>
+  <text x="1295" y="186" text-anchor="middle" class="b">Container Registry</text>
+  <text x="1295" y="204" text-anchor="middle" class="t">kubelet AcrPull</text>
+
+  <rect x="1170" y="235" width="250" height="55" rx="8" class="ext"/>
+  <text x="1295" y="257" text-anchor="middle" class="b">Log Analytics + App Insights</text>
+  <text x="1295" y="276" text-anchor="middle" class="t">container + firewall logs, usage</text>
+
+  <rect x="1170" y="305" width="250" height="50" rx="8" class="ext"/>
+  <text x="1295" y="326" text-anchor="middle" class="b">Entra ID</text>
+  <text x="1295" y="344" text-anchor="middle" class="t">workload identity federation</text>
+
+  <rect x="1170" y="440" width="250" height="50" rx="8" class="ext"/>
+  <text x="1295" y="461" text-anchor="middle" class="b">Azure AI Foundry</text>
+  <text x="1295" y="479" text-anchor="middle" class="t">public access off · no keys</text>
+
+  <rect x="1170" y="510" width="250" height="50" rx="8" class="ext"/>
+  <text x="1295" y="531" text-anchor="middle" class="b">HorizonDB (PostgreSQL 17)</text>
+  <text x="1295" y="549" text-anchor="middle" class="t">public access off</text>
+
+  <text x="1170" y="590" class="s">Azure services: reached through private</text>
+  <text x="1170" y="605" class="s">endpoints, or the firewall's platform rules</text>
+
+  <!-- Internet -->
+  <rect x="270" y="868" width="330" height="55" rx="8" class="ext"/>
+  <text x="435" y="890" text-anchor="middle" class="b">Internet</text>
+  <text x="435" y="910" text-anchor="middle" class="t">only the services allow-list gets out</text>
+
+  <!-- Flows -->
+  <path d="M110,150 V183" class="flow" marker-end="url(#arrow)"/>
+  <path d="M200,225 H225 V175 H248" class="flow" marker-end="url(#arrow)"/>
+  <path d="M400,175 H438" class="flow" marker-end="url(#arrow)"/>
+  <path d="M600,170 H618" class="flow" marker-end="url(#arrow)"/>
+  <path d="M520,205 V253" class="flow" marker-end="url(#arrow)"/>
+  <text x="526" y="234" class="lbl">:3102</text>
+  <path d="M440,195 H430 V485 H438" class="flow" marker-end="url(#arrow)"/>
+  <text x="434" y="382" class="lbl">/portal</text>
+
+  <path d="M640,430 V337" class="flow" marker-end="url(#arrow)"/>
+  <text x="646" y="385" class="lbl">:3103 tools</text>
+  <path d="M780,430 V337" class="flow" marker-end="url(#arrow)"/>
+  <text x="786" y="385" class="lbl">:3101 tools</text>
+  <path d="M860,450 H892 V170 H898" class="flow" marker-end="url(#arrow)"/>
+  <text x="886" y="234" text-anchor="end" class="lbl">:3110 models</text>
+  <path d="M860,535 H923" class="flow" marker-end="url(#arrow)"/>
+  <text x="866" y="528" class="lbl">:5432</text>
+  <path d="M1110,170 H1122 V424 H1020 V438" class="flow" marker-end="url(#arrow)"/>
+  <text x="1118" y="384" text-anchor="end" class="lbl">:443</text>
+
+  <path d="M1115,465 H1168" class="pe"/>
+  <path d="M1115,535 H1168" class="pe"/>
+
+  <path d="M420,345 H410 V708" class="allow" marker-end="url(#arrow-green)"/>
+  <text x="404" y="668" text-anchor="end" class="lbl green">services: allow-list</text>
+  <path d="M560,650 V708" class="deny" marker-end="url(#arrow-red)"/>
+  <text x="568" y="671" class="lbl red">✗ internet · AKS platform rules only</text>
+  <path d="M435,800 V866" class="allow" marker-end="url(#arrow-green)"/>
+  <text x="443" y="857" class="lbl green">SNAT to the firewall's public IP</text>
+
+  <!-- Legend -->
+  <path d="M650,882 H690" class="flow" marker-end="url(#arrow)"/>
+  <text x="700" y="886" class="t">allowed path (NetworkPolicy allow)</text>
+  <path d="M650,906 H690" class="deny" marker-end="url(#arrow-red)"/>
+  <text x="700" y="910" class="t">denied by firewall and NetworkPolicy</text>
+  <path d="M930,882 H970" class="pe"/>
+  <text x="980" y="886" class="t">private endpoint</text>
+  <text x="930" y="910" class="t">all pods: default deny, non-root, PSA restricted</text>
+</svg>

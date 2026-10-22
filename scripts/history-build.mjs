@@ -4,12 +4,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { processEnvironments, readAzureConfig } from "./lib/azure.mjs";
+import { bootstrapEnvironment, readAzureConfig } from "./lib/azure.mjs";
 import { run } from "./lib/psql.mjs";
 
 // Builds the commit history in the Azure deployment (deploy/README.md,
-// "Commit history"), as a one-off execution of the probe job at 4 vCPU and
-// 8 GiB, once an image with migration 0011 is live. It fetches every branch
+// "Commit history"): the history job runs it at 4 vCPU and 8 GiB, once an
+// image with migration 0011 is live. It fetches every branch
 // and tag of PostgreSQL's repository into a bare clone, builds the history
 // into a schema of its own and swaps it into pghacker, then rebuilds every
 // file of the branch heads and of random commits and compares them with git.
@@ -17,9 +17,9 @@ import { run } from "./lib/psql.mjs";
 // Arguments: --sample N (random commits to check, default 40).
 const REPO = "https://git.postgresql.org/git/postgresql.git";
 const INDEXER = "/usr/local/bin/pghacker-indexer";
-// The probe job's replica timeout (deploy/terraform/containerapps.tf). The
-// check gets what the build leaves of it, less a margin for the container's
-// start, the cleanup and the report.
+// The history job's deadline (deploy/k8s/jobs.yaml, activeDeadlineSeconds).
+// The check gets what the build leaves of it, less a margin for the
+// container's start, the cleanup and the report.
 const JOB_MS = 3600_000;
 const MARGIN_MS = 5 * 60_000;
 const started = Date.now();
@@ -45,7 +45,7 @@ let dir;
 try {
   if (!Number.isInteger(sample) || sample < 0 || sample > 1000) throw new Error("--sample must be 0 to 1000");
   const config = readAzureConfig(process.env, { serve: false });
-  const env = processEnvironments(config).bootstrap;
+  const env = bootstrapEnvironment(config);
   dir = await mkdtemp(path.join(os.tmpdir(), "postgres-history-"));
   const git = path.join(dir, "postgres.git");
   let step = Date.now();

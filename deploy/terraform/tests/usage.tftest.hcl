@@ -2,10 +2,12 @@
 # Licensed under the MIT license.
 
 # Usage telemetry: Application Insights on the logs' workspace, which only
-# the app's identity may send to, the retention of its AppEvents table, the
-# key of the users' keyed hashes, and what the app gets, feedback's settings
-# among them, with usage_enabled = true; and none of it by default. Every
-# provider is mocked.
+# the token proxy's identity may send to, the retention of its AppEvents
+# table, the key of the users' keyed hashes, which only pghacker-mcp's and
+# the home page's identities read, and the app's settings, feedback's among
+# them, with usage_enabled = true; and none of it by default. Which
+# components get which setting is scripts/lib/azure.mjs's
+# (test/azure.test.mjs). Every provider is mocked.
 
 variables {
   subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -13,14 +15,12 @@ variables {
   location            = "westus3"
   resource_group_name = "pghacker-example"
   name_prefix         = "pghacker-example"
-  app_name            = "pghacker-example"
   acr_name            = "examplepghacr12345"
   key_vault_name      = "pghacker-example-kv"
   image               = "examplepghacr12345.azurecr.io/pghacker-mcp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   github_org          = "contoso"
   github_team         = "pghacker-operators"
   deployer_object_ids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
-  create_app          = true
 }
 
 mock_provider "azurerm" {
@@ -34,6 +34,12 @@ mock_provider "random" {
 }
 mock_provider "time" {}
 
+# Azure Firewall takes only a subnet named AzureFirewallSubnet.
+override_resource {
+  target = azurerm_subnet.firewall
+  values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/virtualNetworks/pghacker-example-vnet/subnets/AzureFirewallSubnet" }
+}
+
 # The IDs that the mocked endpoint connections approve.
 override_resource {
   target = azurerm_private_endpoint.horizondb
@@ -45,14 +51,27 @@ override_resource {
 }
 override_resource {
   target = azurerm_key_vault_secret.usage_id_key[0]
-  values = { versionless_id = "https://pghacker-example-kv.vault.azure.net/secrets/usage-id-key" }
+  values = {
+    versionless_id          = "https://pghacker-example-kv.vault.azure.net/secrets/usage-id-key"
+    resource_versionless_id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.KeyVault/vaults/pghacker-example-kv/secrets/usage-id-key"
+  }
+}
+
+# The token proxy's identity, apart from the others.
+override_resource {
+  target = azurerm_user_assigned_identity.workload["proxy"]
+  values = {
+    id           = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ManagedIdentity/userAssignedIdentities/pghacker-example-proxy-id"
+    client_id    = "11111111-0000-4000-8000-000000000001"
+    principal_id = "22222222-0000-4000-8000-000000000001"
+  }
 }
 
 run "usage_is_off_by_default" {
   assert {
     condition = (
       length(azurerm_application_insights.usage) == 0
-      && length(azurerm_role_assignment.app_usage_publisher) == 0
+      && length(azurerm_role_assignment.proxy_usage_publisher) == 0
       && length(azapi_resource_action.usage_table) == 0
       && length(azurerm_key_vault_secret.usage_id_key) == 0
       && output.usage_app_insights_name == null
@@ -63,8 +82,12 @@ run "usage_is_off_by_default" {
 
   assert {
     condition = (
-      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
-      && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
+      !anytrue([
+        for name in keys(output.kubernetes.app_settings) :
+        contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], name) || startswith(name, "PGHACKER_FEEDBACK_")
+      ])
+      && !anytrue([for identity in output.kubernetes.identities : contains(identity.secrets, "usage-id-key")])
+      && !anytrue([for grant in keys(azurerm_role_assignment.workload_secret) : endswith(grant, "/usage-id-key")])
     )
     error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."
   }
@@ -90,11 +113,11 @@ run "usage_is_recorded_when_enabled" {
 
   assert {
     condition = (
-      azurerm_role_assignment.app_usage_publisher[0].scope == azurerm_application_insights.usage[0].id
-      && azurerm_role_assignment.app_usage_publisher[0].role_definition_name == "Monitoring Metrics Publisher"
-      && azurerm_role_assignment.app_usage_publisher[0].principal_id == azurerm_user_assigned_identity.app.principal_id
+      azurerm_role_assignment.proxy_usage_publisher[0].scope == azurerm_application_insights.usage[0].id
+      && azurerm_role_assignment.proxy_usage_publisher[0].role_definition_name == "Monitoring Metrics Publisher"
+      && azurerm_role_assignment.proxy_usage_publisher[0].principal_id == "22222222-0000-4000-8000-000000000001"
     )
-    error_message = "The app's identity, and only through this role, must send to the resource."
+    error_message = "The token proxy's identity, and only through this role, must send to the resource."
   }
 
   assert {
@@ -119,19 +142,12 @@ run "usage_is_recorded_when_enabled" {
 
   assert {
     condition = (
-      {
-        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
-      }["APPLICATIONINSIGHTS_CONNECTION_STRING"] == "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
-      && {
-        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.secret_name if env.secret_name != null
-      }["PGHACKER_USAGE_ID_KEY"] == "usage-id-key"
-      && !anytrue(flatten([
-        for job in azurerm_container_app_job.this : [
-          for env in job.template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY"], env.name)
-        ]
-      ]))
+      output.kubernetes.app_settings.APPLICATIONINSIGHTS_CONNECTION_STRING == "InstrumentationKey=11111111-2222-4333-8444-555555555555;IngestionEndpoint=https://westus3-1.in.applicationinsights.azure.com/;LiveEndpoint=https://westus3.livediagnostics.monitor.azure.com/;ApplicationId=7a1b2c3d-0000-4000-8000-000000000003"
+      && tolist([for name, identity in output.kubernetes.identities : name if contains(identity.secrets, "usage-id-key")]) == tolist(["home", "mcp"])
+      && azurerm_role_assignment.workload_secret["mcp/usage-id-key"].scope == azurerm_key_vault_secret.usage_id_key[0].resource_versionless_id
+      && azurerm_role_assignment.workload_secret["home/usage-id-key"].scope == azurerm_key_vault_secret.usage_id_key[0].resource_versionless_id
     )
-    error_message = "The app, and not the jobs, must get the connection string and the users' key."
+    error_message = "The settings must have the connection string, and only pghacker-mcp's and the home page's identities read the users' key."
   }
 
   assert {
@@ -140,39 +156,23 @@ run "usage_is_recorded_when_enabled" {
   }
 
   assert {
-    condition = (
-      {
-        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
-        } == {
-        PGHACKER_FEEDBACK_RATE          = "0.1"
-        PGHACKER_FEEDBACK_COMMENTS      = "false"
-        PGHACKER_FEEDBACK_QUESTION_GAP  = "180"
-        PGHACKER_FEEDBACK_SESSION_GAP   = "600"
-        PGHACKER_FEEDBACK_MIN_QUESTIONS = "3"
-        PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
-        PGHACKER_FEEDBACK_DEBUG         = "false"
-      }
-      && !anytrue(flatten([
-        for job in azurerm_container_app_job.this : [
-          for env in job.template[0].container[0].env : startswith(env.name, "PGHACKER_FEEDBACK_")
-        ]
-      ]))
-    )
-    error_message = "With usage, the app, and not the jobs, must by default ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments or debug mode."
+    condition = tomap({
+      for name, value in output.kubernetes.app_settings : name => value if startswith(name, "PGHACKER_FEEDBACK_")
+      }) == tomap({
+      PGHACKER_FEEDBACK_RATE          = "0.1"
+      PGHACKER_FEEDBACK_COMMENTS      = "false"
+      PGHACKER_FEEDBACK_QUESTION_GAP  = "180"
+      PGHACKER_FEEDBACK_SESSION_GAP   = "600"
+      PGHACKER_FEEDBACK_MIN_QUESTIONS = "3"
+      PGHACKER_FEEDBACK_CLIENTS       = "copilot,codex,Visual Studio Code,claude,cursor"
+      PGHACKER_FEEDBACK_DEBUG         = "false"
+    })
+    error_message = "With usage, the app must by default ask interactive clients for feedback in one address-hour in ten, after three questions, at a question 3 to 10 minutes after the last call, without comments or debug mode."
   }
 
   assert {
-    condition = (
-      {
-        for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
-      }["PGHACKER_USAGE_DETAILS"] == "false"
-      && !anytrue(flatten([
-        for job in azurerm_container_app_job.this : [
-          for env in job.template[0].container[0].env : env.name == "PGHACKER_USAGE_DETAILS"
-        ]
-      ]))
-    )
-    error_message = "With usage, the app must by default record it without details, what users type into tools; the jobs record no usage."
+    condition     = output.kubernetes.app_settings.PGHACKER_USAGE_DETAILS == "false"
+    error_message = "With usage, the app must by default record it without details, what users type into tools."
   }
 }
 
@@ -183,9 +183,7 @@ run "usage_details_are_set_with_their_variable" {
   }
 
   assert {
-    condition = {
-      for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if env.secret_name == null
-    }["PGHACKER_USAGE_DETAILS"] == "true"
+    condition     = output.kubernetes.app_settings.PGHACKER_USAGE_DETAILS == "true"
     error_message = "usage_details_enabled = true must have the app record usage with details."
   }
 }
@@ -203,9 +201,9 @@ run "feedback_is_set_with_its_variables" {
   }
 
   assert {
-    condition = {
-      for env in azurerm_container_app.app[0].template[0].container[0].env : env.name => env.value if startswith(env.name, "PGHACKER_FEEDBACK_")
-      } == {
+    condition = tomap({
+      for name, value in output.kubernetes.app_settings : name => value if startswith(name, "PGHACKER_FEEDBACK_")
+      }) == tomap({
       PGHACKER_FEEDBACK_RATE          = "0"
       PGHACKER_FEEDBACK_COMMENTS      = "true"
       PGHACKER_FEEDBACK_QUESTION_GAP  = "120"
@@ -213,7 +211,7 @@ run "feedback_is_set_with_its_variables" {
       PGHACKER_FEEDBACK_MIN_QUESTIONS = "0"
       PGHACKER_FEEDBACK_CLIENTS       = "copilot-cli"
       PGHACKER_FEEDBACK_DEBUG         = "true"
-    }
+    })
     error_message = "The app must get the feedback settings as configured; a rate of 0 turns feedback off."
   }
 }
@@ -246,7 +244,7 @@ run "usage_can_be_turned_off" {
   assert {
     condition = (
       length(azurerm_application_insights.usage) == 0
-      && length(azurerm_role_assignment.app_usage_publisher) == 0
+      && length(azurerm_role_assignment.proxy_usage_publisher) == 0
       && length(azapi_resource_action.usage_table) == 0
       && length(azurerm_key_vault_secret.usage_id_key) == 0
       && output.usage_app_insights_name == null
@@ -257,8 +255,12 @@ run "usage_can_be_turned_off" {
 
   assert {
     condition = (
-      !anytrue([for env in azurerm_container_app.app[0].template[0].container[0].env : contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], env.name) || startswith(env.name, "PGHACKER_FEEDBACK_")])
-      && !anytrue([for secret in azurerm_container_app.app[0].secret : secret.name == "usage-id-key"])
+      !anytrue([
+        for name in keys(output.kubernetes.app_settings) :
+        contains(["APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_ID_KEY", "PGHACKER_USAGE_DETAILS"], name) || startswith(name, "PGHACKER_FEEDBACK_")
+      ])
+      && !anytrue([for identity in output.kubernetes.identities : contains(identity.secrets, "usage-id-key")])
+      && !anytrue([for grant in keys(azurerm_role_assignment.workload_secret) : endswith(grant, "/usage-id-key")])
     )
     error_message = "Without usage, the app must get neither the connection string, the users' key nor feedback's settings, so it records nothing and asks nothing."
   }

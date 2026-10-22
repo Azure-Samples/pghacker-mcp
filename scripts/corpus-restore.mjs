@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { databaseUrls, processEnvironments, readAzureConfig } from "./lib/azure.mjs";
+import { bootstrapEnvironment, databaseUrls, readAzureConfig } from "./lib/azure.mjs";
 import {
   CORPUS_TABLES, EXCLUDED_TABLES, FOREIGN_KEYS_SQL, MIGRATIONS_SQL, checkManifest, countDifferences, countsSql,
   foreignKeyScripts, migrationDifferences, quoteIdent,
@@ -50,7 +50,7 @@ try {
 
   log("Bootstrapping and migrating the database.");
   const bootstrap = await run("/usr/local/bin/pghacker-indexer", ["bootstrap"], {
-    env: processEnvironments(config).bootstrap,
+    env: bootstrapEnvironment(config),
   });
   if (bootstrap.code !== 0) throw new Error(`bootstrap failed: ${bootstrap.stderr.trim().slice(-2000)}`);
 
@@ -68,7 +68,7 @@ try {
   const indexers = Number(await psql(urls.indexer, `SELECT count(*) FROM pg_stat_activity
     WHERE datname = current_database() AND application_name LIKE 'pghacker-indexer%'`));
   if (indexers > 0) {
-    throw new Error("pghacker-indexer is connected: restore before the app runs, or stop it (scale the app to 0) first.");
+    throw new Error("pghacker-indexer is connected: restore before the app runs, or stop it first (kubectl scale deployment/indexer --replicas=0).");
   }
   const keys = await psqlJson(urls.indexer, FOREIGN_KEYS_SQL);
   const scripts = foreignKeyScripts(keys);

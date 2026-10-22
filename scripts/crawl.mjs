@@ -12,11 +12,11 @@ import { appAgentNames, modelProvidersPath } from "./lib/worker.mjs";
 //   npm run crawl -- --threads 200 --concurrency 4
 //   npm run crawl -- --supervisor           the pghacker-crawler agent drives its own pilot
 //   npm run crawl -- --dedup                one deduplication session
-//   npm run crawl -- --watch                keep extracting as threads arrive (the Azure container runs this)
+//   npm run crawl -- --watch                keep extracting as threads arrive (the Azure worker runs this)
 // Extractor sessions are pghacker-extract agents on the configured model
 // (default github-copilot:gpt-6-luna, or PGHACKER_CRAWL_MODEL). Progress
 // comes from ingest_status. In Azure (PGHACKER_DEPLOYMENT=azure) the
-// settings come from the environment the container's supervisor gives it.
+// settings come from the environment the worker gives it (scripts/worker.mjs).
 const { values: options } = parseArgs({
   options: {
     pilot: { type: "boolean", default: false },

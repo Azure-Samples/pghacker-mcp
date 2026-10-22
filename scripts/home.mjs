@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-// The home page's server in the Azure container, which the supervisor
-// (scripts/container.mjs) runs as pgh-home on loopback, behind oauth2-proxy.
-// It reads only the built page, and asks GitHub's API, without a token, for
+// The home page's server, in its own pod behind oauth2-proxy (on the pod's
+// address, HOST, in AKS; loopback otherwise). It reads only the built page,
+// and asks GitHub's API, without a token, for
 // the stars of the repository the page links to (scripts/lib/github-stars.mjs).
 // Its settings are its port, the page's directory, and the portal's origin
 // (PGHACKER_PORTAL_URL), which the portal's share links go on to; the
@@ -42,6 +42,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     setTimeout(() => process.exit(0), 8000).unref();
   });
 }
-server.listen(port, "127.0.0.1", () => {
-  console.log(`[home] The home page from ${root} on 127.0.0.1:${port}.`);
+const host = process.env.HOST || "127.0.0.1";
+server.listen(port, host, () => {
+  console.log(`[home] The home page from ${root} on ${host}:${port}.`);
 });

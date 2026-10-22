@@ -3,8 +3,8 @@
 
 //! The listeners as `main` assembles them: the public one's Front Door
 //! check, usage records, rate limit and feedback, and the internal one's
-//! records; their deadline and panics; and the tools under load: a busy
-//! pool, and a slow embeddings service.
+//! rate limit and records; their deadline and panics; and the tools under
+//! load: a busy pool, and a slow embeddings service.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -134,6 +134,11 @@ fn properties(envelope: &Value) -> &Value {
     &envelope["data"]["baseData"]["properties"]
 }
 
+/// An internal listener's limit that the tests not about it never reach.
+fn ample() -> RateLimit {
+    RateLimit::new(60_000, 10_000, ClientIp::Socket)
+}
+
 #[tokio::test]
 async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
     let ingestion = Ingestion::start().await;
@@ -160,7 +165,13 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
         Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
     ))
     .await;
-    let internal_base = listen(internal(router(server, None), &usage)).await;
+    let internal_base = listen(internal(
+        router(server, None),
+        // One request, then one a minute.
+        RateLimit::new(1, 1, ClientIp::Socket),
+        &usage,
+    ))
+    .await;
     let client = reqwest::Client::new();
     let through_front_door = [
         ("x-azure-fdid", FRONT_DOOR_ID),
@@ -189,11 +200,29 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
         post(&client, &base, &through_front_door, call("more")).await,
         429
     );
-    // The internal listener: no limit, and no client address.
+    // The internal listener: a limit of its own, per connection peer,
+    // whatever headers an agent sends, with Retry-After; and no client
+    // address.
     let agent = [("x-azure-socketip", "203.0.113.9")];
     assert_eq!(
         post(&client, &internal_base, &agent, call("agent")).await,
         200
+    );
+    let throttled = client
+        .post(format!("{internal_base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .header("x-azure-socketip", "198.51.100.2")
+        .header("x-forwarded-for", "198.51.100.3")
+        .json(&call("again"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(throttled.status().as_u16(), 429);
+    assert!(
+        throttled.headers().contains_key("retry-after"),
+        "{:?}",
+        throttled.headers()
     );
 
     usage.flush().await;
@@ -215,10 +244,11 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
             ("McpToolCall", "public"),
             ("McpRateLimited", "public"),
             ("McpToolCall", "internal"),
+            ("McpRateLimited", "internal"),
         ],
         "{events:#?}"
     );
-    let [initialized, called, limited, agent_call] = &events[..] else {
+    let [initialized, called, limited, agent_call, agent_limited] = &events[..] else {
         unreachable!()
     };
 
@@ -267,6 +297,20 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
         "{agent_call}"
     );
     assert_eq!(properties(agent_call)["arg.text"], "agent");
+
+    assert_eq!(agent_limited["data"]["baseData"]["name"], ERROR);
+    assert_eq!(properties(agent_limited)["statusCode"], "429");
+    assert_eq!(agent_limited["tags"]["ai.location.ip"], "0.0.0.0");
+    assert!(
+        agent_limited["tags"].get("ai.user.id").is_none(),
+        "{agent_limited}"
+    );
+    for forged in ["198.51.100.2", "198.51.100.3"] {
+        assert!(
+            !agent_limited.to_string().contains(forged),
+            "{agent_limited}"
+        );
+    }
     assert_eq!(usage.lost(), 0);
 }
 
@@ -289,7 +333,7 @@ async fn reads_of_the_skills_are_recorded_with_their_uris() {
             crate::tools::EXTENSION_INSTRUCTIONS,
         )
         .unwrap();
-    let base = listen(internal(router(server, None), &usage)).await;
+    let base = listen(internal(router(server, None), ample(), &usage)).await;
     let client = reqwest::Client::new();
     let uri = crate::tools::REVIEW_SKILL;
     let tool = crate::tools::REVIEW_TOOL;
@@ -410,7 +454,7 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
         Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
     ))
     .await;
-    let internal_base = listen(internal(router(server, None), &usage)).await;
+    let internal_base = listen(internal(router(server, None), ample(), &usage)).await;
     let client = reqwest::Client::new();
     let through_front_door = [
         ("x-azure-fdid", FRONT_DOOR_ID),
@@ -528,7 +572,7 @@ async fn without_details_calls_of_the_served_tools_keep_only_their_choices() {
     })
     .unwrap();
     let server = McpServer::new(Served, "pghacker-mcp", "1", "Served.");
-    let base = listen(internal(router(server, None), &usage)).await;
+    let base = listen(internal(router(server, None), ample(), &usage)).await;
     let client = reqwest::Client::new();
 
     // Every argument of every tool: a choice where the schema offers some,
@@ -752,6 +796,49 @@ async fn a_stalled_request_is_answered_503_and_a_panic_500() {
     assert_eq!(again.status().as_u16(), 500);
 }
 
+/// In a cluster, agents reach the internal listener by its Service's name,
+/// with a port: the names given are accepted, at any port, and others not.
+#[tokio::test]
+async fn the_internal_listener_takes_the_host_names_it_is_given() {
+    let usage = Usage::off();
+    let server = McpServer::new(Echo, "echo", "1", "Echo.");
+    let named = Some(vec!["mcp.pghacker.svc.cluster.local".to_owned()]);
+    let base = listen(internal(router(server.clone(), named), ample(), &usage)).await;
+    let loopback = listen(internal(router(server, None), ample(), &usage)).await;
+    let client = reqwest::Client::new();
+    let status = |base: String, host: Option<&'static str>| {
+        let client = client.clone();
+        async move {
+            let mut request = client
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("content-type", "application/json");
+            if let Some(host) = host {
+                request = request.header("host", host);
+            }
+            request
+                .json(&call("hi"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(
+        status(base.clone(), Some("mcp.pghacker.svc.cluster.local:3103")).await,
+        200
+    );
+    assert_ne!(status(base.clone(), Some("evil.example:3103")).await, 200);
+    assert_ne!(status(base, None).await, 200);
+    // Unset, loopback only, as before.
+    assert_eq!(status(loopback.clone(), None).await, 200);
+    assert_ne!(
+        status(loopback, Some("mcp.pghacker.svc.cluster.local:3103")).await,
+        200
+    );
+}
+
 /// The tools on `db` with a pool of one connection, waited for up to 300 ms.
 fn server(db: &TestDb, embedder: Option<Embedder>) -> (Server, CallPool) {
     let pool = CallPool::new(db.reader_pool(1).unwrap(), Duration::from_millis(300));
@@ -889,7 +976,7 @@ async fn a_database_failure_records_its_sqlstate_without_details() {
         details: false,
     })
     .unwrap();
-    let base = listen(internal(router(server, None), &usage)).await;
+    let base = listen(internal(router(server, None), ample(), &usage)).await;
     let mut indexer = db.indexer().await.unwrap();
     let tx = indexer.transaction().await.unwrap();
     tx.batch_execute("LOCK TABLE authors IN ACCESS EXCLUSIVE MODE")

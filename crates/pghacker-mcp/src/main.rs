@@ -4,7 +4,8 @@
 //! pghacker-mcp: the public MCP server. Stateless, read-only (pgh_reader),
 //! rate-limited per client, no LLM calls beyond query embeddings. It serves
 //! the repository's skills too (`skills/`). An optional second listener, for
-//! agents in the same deployment, serves loopback clients without the limit.
+//! agents in the same deployment, has a rate limit of its own, per address
+//! that agents connect from, without the public one's Front Door check.
 //! With PGHACKER_USAGE_ENDPOINT set, both listeners record usage
 //! (`pghacker_core::usage`), and with PGHACKER_FEEDBACK_RATE above 0 too, the
 //! public one now and then asks an interactive client's user, as their next
@@ -151,13 +152,18 @@ async fn run() -> Result<()> {
         env.parse_or("PGHACKER_RATE_BURST", 40u32)?,
         client_ip.clone(),
     );
-    let allowed_hosts = env.get("PGHACKER_ALLOWED_HOSTS").map(|hosts| {
-        hosts
-            .split(',')
-            .map(|host| host.trim().to_owned())
-            .filter(|host| !host.is_empty())
-            .collect()
-    });
+    // The internal listener's: per connection peer, since agents choose
+    // their headers. A deployment's agents all connect from one address, so
+    // they share it.
+    let internal_limit = RateLimit::new(
+        env.parse_or("PGHACKER_INTERNAL_RATE_PER_MINUTE", 300u32)?,
+        env.parse_or("PGHACKER_INTERNAL_RATE_BURST", 60u32)?,
+        ClientIp::Socket,
+    );
+    let allowed_hosts = host_list(&env, "PGHACKER_ALLOWED_HOSTS");
+    // The Host headers the internal listener accepts: loopback when unset;
+    // in a cluster, its Service's names, which agents reach it by.
+    let internal_allowed_hosts = host_list(&env, "PGHACKER_INTERNAL_ALLOWED_HOSTS");
     let server = McpServer::new(
         Server::new(pool, embedder, query),
         "pghacker-mcp",
@@ -191,7 +197,11 @@ async fn run() -> Result<()> {
     let served = match internal_addr {
         Some(internal_addr) => {
             let internal_app = guarded(
-                internal(router(server, None), &usage),
+                internal(
+                    router(server, internal_allowed_hosts),
+                    internal_limit,
+                    &usage,
+                ),
                 call_timeout + REQUEST_MARGIN,
             );
             tokio::try_join!(serve(app, &addr), serve(internal_app, &internal_addr)).map(|_| ())
@@ -200,6 +210,18 @@ async fn run() -> Result<()> {
     };
     usage.shutdown().await;
     served
+}
+
+/// The Host headers a listener accepts, from `name`'s comma-separated list;
+/// unset, none but loopback's.
+fn host_list(env: &Env, name: &str) -> Option<Vec<String>> {
+    env.get(name).map(|hosts| {
+        hosts
+            .split(',')
+            .map(|host| host.trim().to_owned())
+            .filter(|host| !host.is_empty())
+            .collect()
+    })
 }
 
 /// `app` with a deadline for each response, a backstop past the calls' own
@@ -246,11 +268,16 @@ fn public(
     }
 }
 
-/// The internal listener: its requests are recorded as internal, with no
-/// client address, so no location or user.
-fn internal(router: Router, usage: &Usage) -> Router {
+/// The internal listener, for agents: `router` behind a rate limit of its
+/// own, which should take the connection's peer as the client (main gives it
+/// `ClientIp::Socket`), then the usage middleware. Its requests, those the
+/// limit turns away too, are recorded as internal, with no client address,
+/// so no location or user.
+fn internal(router: Router, limit: RateLimit, usage: &Usage) -> Router {
     let recorder = Recorder::new(usage.clone(), Endpoint::Internal, |_| None);
-    router.layer(middleware::from_fn_with_state(recorder, usage::record))
+    router
+        .layer(middleware::from_fn_with_state(limit, ratelimit::limit))
+        .layer(middleware::from_fn_with_state(recorder, usage::record))
 }
 
 #[cfg(test)]

@@ -6,10 +6,11 @@
 # for each request. The events land in the workspace's AppEvents table, kept
 # longer than the logs.
 #
-# The resource takes only Entra-authenticated telemetry: the supervisor's
-# proxy (scripts/lib/monitor.mjs) signs the events with the app's identity,
-# a Monitoring Metrics Publisher of it, so the instrumentation key in
-# APPLICATIONINSIGHTS_CONNECTION_STRING only names the resource. Application
+# The resource takes only Entra-authenticated telemetry: the token proxy
+# (scripts/token-proxy.mjs, scripts/lib/monitor.mjs) signs the events with
+# its workload identity, a Monitoring Metrics Publisher of it, so the
+# instrumentation key in APPLICATIONINSIGHTS_CONNECTION_STRING only names the
+# resource. Application
 # Insights derives each event's country, region and city from the client's
 # address, then discards the address: IP masking stays on.
 #
@@ -33,13 +34,13 @@ resource "azurerm_application_insights" "usage" {
   tags                         = var.tags
 }
 
-# The app's identity sends the events, through the supervisor's proxy.
-resource "azurerm_role_assignment" "app_usage_publisher" {
+# The token proxy's identity sends the events.
+resource "azurerm_role_assignment" "proxy_usage_publisher" {
   count = var.usage_enabled ? 1 : 0
 
   scope                            = azurerm_application_insights.usage[0].id
   role_definition_name             = "Monitoring Metrics Publisher"
-  principal_id                     = azurerm_user_assigned_identity.app.principal_id
+  principal_id                     = azurerm_user_assigned_identity.workload["proxy"].principal_id
   principal_type                   = "ServicePrincipal"
   skip_service_principal_aad_check = true
 }

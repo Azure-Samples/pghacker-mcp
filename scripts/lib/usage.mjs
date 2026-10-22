@@ -130,8 +130,8 @@ function value(text) {
 }
 
 /**
- * The settings in the environment: the ingestion endpoint (the supervisor's
- * proxy), the instrumentation key, the users' key, the instance, and the
+ * The settings in the environment: the ingestion endpoint (in Azure, the
+ * token proxy), the instrumentation key, the users' key, the instance, and the
  * Front Door profile whose requests name their client; or undefined, off.
  */
 export function readUsageSettings(env = process.env) {

@@ -1,27 +1,8 @@
 # Deploying pghacker-mcp to Azure
 
-This deploys pghacker-mcp in production mode. Users index whatever they ask for, and the deployment starts with the local corpus. [TERRAFORM.md](TERRAFORM.md) documents the Terraform itself: variables, outputs, secrets and state.
+This deploys pghacker-mcp in production mode on Azure Kubernetes Service (AKS). Users index whatever they ask for, and the deployment starts with the local corpus. [TERRAFORM.md](TERRAFORM.md) documents the Terraform itself: variables, outputs, secrets and state. Local development is unchanged: `npm start` runs everything on one machine ([reference](../docs/reference.md)).
 
-```mermaid
-flowchart LR
-  U[MCP clients and browsers] --> AFD[Front Door Standard]
-  AFD -->|Front Door's IPs only| CA
-  subgraph VNet
-    subgraph CA[Container App: one replica]
-      P[oauth2-proxy :8080] -->|/mcp, anonymous| M[pghacker-mcp]
-      P -->|/, anonymous| H[home page]
-      P -->|/portal after GitHub sign-in| S[PilotSwarm portal and worker]
-      S --> I[pghacker-indexer]
-      S -->|agents, no rate limit| M2[pghacker-mcp internal]
-      C[crawl scheduler] --> S
-    end
-    DB[(HorizonDB PG17: private endpoint)]
-    F[(Foundry: private endpoint)]
-  end
-  CA --> DB
-  CA --> F
-  CA -->|usage events| AI[(Application Insights)]
-```
+![pghacker-mcp on AKS: Front Door Premium reaches the cluster over Private Link; the services pool holds the edge, the home page, pghacker-mcp, the indexer, the token proxy and the jobs; the tainted PilotSwarm pool holds the portal and the worker, which reach only the indexer, pghacker-mcp's internal listener, the token proxy and the database; Azure Firewall admits each subnet's named hosts alone.](aks-architecture.svg)
 
 - **`https://<front door>/mcp`** is the public MCP endpoint. It is anonymous and read-only, rate-limited per client, and serves only requests that came through this Front Door profile (`X-Azure-FDID`). A client is the address it connected from, `X-Azure-SocketIP` (IPv6 by /64). `X-Azure-ClientIP` would follow a client's `X-Forwarded-For`.
 - **`https://<front door>/`** is the public home page (`home/`): what pghacker-mcp is, the MCP URL (its own origin's `/mcp`) and how to add it to an agent, and example prompts with their answers. Its top bar links to the GitHub repository, with its stars once the repository is public: the home page's server asks GitHub's API for them, without a token, at most every 10 minutes. Its footer links to your privacy statement if you set `privacy_url`, and to a copyright notice, to its right, if you set `copyright_url` and `copyright_text`; without them it has no such links. Its files are public; any other path needs sign-in. oauth2-proxy answers `/robots.txt` itself (`Disallow: /`).
@@ -30,8 +11,8 @@ flowchart LR
   - PilotSwarm 0.8.2 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`, `/?canvasShare=...`) reach the home page, which sends them on to `/portal/` on Front Door's host name (`portal_url`), whichever host they name. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.2's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
-  - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door and the ingress pass a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
-- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design; the app calls them with its managed identity: a proxy in the supervisor adds an Entra token to each request (`scripts/lib/foundry.mjs`), and nothing in the container holds a key.
+  - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door passes a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
+- **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design: the token proxy (`scripts/token-proxy.mjs`) adds its workload identity's Entra token to each request (`scripts/lib/foundry.mjs`), and no pod holds a key. Since the agents reach the models too, the proxy forwards only the operations the app uses (the Responses API, the model list and a deployment's embeddings), removes hosted tools that reach the network (web search, remote MCP servers), and refuses a request that would have Foundry fetch a URL, such as an image's. The account itself may reach no outside host (data loss prevention).
 - **Usage telemetry**, with `usage_enabled = true`, goes to Application Insights on the logs' workspace. It's off by default: set `privacy_url` to your privacy statement before you turn it on.
   - It records an event for each request to `/mcp`: the tool, its arguments' names, its outcome and the shape of its answer, and the client. It also records each view of the home page.
   - `usage_details_enabled = true` also records what users type into tools: arguments' values, error messages and sqlparser's errors. Off by default, a call keeps only the values of its fixed-choice arguments (enums and booleans) and, for `query`, PostgreSQL's SQLSTATE.
@@ -53,30 +34,41 @@ MCP is a new and developing standard. As with all new technology standards, you 
 
 This MCP server may provide access to underlying resources, such as tools, services, and/or data. Your use of that underlying resource via this MCP server is governed by the underlying resource's license terms.
 
-## The container
+## The cluster
 
-`scripts/container.mjs` runs as root under tini. It starts the Foundry proxy on loopback, and, with Application Insights, the usage telemetry's proxy (`scripts/lib/monitor.mjs`). Then it bootstraps the database (creating it, the roles, extensions, schema and graph, then migrating). It then runs each service as its own user, with an environment that lists only what it needs (`scripts/lib/azure.mjs`):
+The cluster has three node pools, each in its own subnet, and every pod runs in the `pghacker` namespace from the one image (`Dockerfile`), with its own command, user, identity and NetworkPolicy (`deploy/k8s`, rendered by `scripts/lib/aks.mjs` from Terraform's `kubernetes` output):
 
-| Process | User | Gets |
-| --- | --- | --- |
-| oauth2-proxy | `pgh-proxy` | The GitHub OAuth App's ID and secret, and the cookie secret |
-| The home page's server (`scripts/home.mjs`) | `pgh-home` | The built page, its port and the portal's origin (`PGHACKER_PORTAL_URL`), for share links; the privacy statement's URL (`PGHACKER_PRIVACY_URL`) and the copyright link's URL and text (`PGHACKER_COPYRIGHT_URL`, `PGHACKER_COPYRIGHT_TEXT`), for the footer's links, if `privacy_url` and `copyright_url` with `copyright_text` are set; usage telemetry's settings, among them its one secret, the users' key (`usage-id-key`) |
-| pghacker-indexer, pghacker-mcp | `pgh-svc` | Their database role (`pgh_indexer`, `pgh_reader`); embeddings through the Foundry proxy; pghacker-mcp also gets usage telemetry's settings |
-| PilotSwarm worker and portal, crawl scheduler | `pgh-agent` | `pgh_swarm`, which can create its own schemas but can't read the corpus; models through the Foundry proxy |
+- **system**: the cluster's add-ons alone.
+- **services**: oauth2-proxy, the home page, pghacker-mcp, pghacker-indexer, the token proxy and the ops jobs.
+- **swarm**: PilotSwarm, tainted so that nothing else lands there: the portal, and the worker, which runs every agent session, the crawl's and the portal's, and the crawl scheduler. Its subnet gets no internet.
 
-Only the bootstrap, which runs once before the services start, gets the administrator's password. No process gets the managed identity's endpoint: the proxies, in the supervisor, use it, and forward only to the Foundry account and to Application Insights' `/v2.1/track`. Agents have PilotSwarm's built-in shell and read mail that anyone can post, so this separation is the containment: an agent's shell can't read another user's environment or files. The database and Foundry accept connections only from the VNet. The health server on 8081 serves the probes:
-- `/healthz` fails after 15 minutes of failed bootstraps, or when a service keeps exiting.
-- `/readyz` passes when bootstrap is done and oauth2-proxy, pghacker-mcp and the portal answer. It reports the home page too, but doesn't wait for it, so that `/mcp` stays up if the page fails.
+| Pod | Pool | Reaches | Secrets |
+| --- | --- | --- | --- |
+| `edge`: oauth2-proxy, ×2 | services | pghacker-mcp's public listener, the portal, the home page; GitHub | The GitHub OAuth App's ID and secret, and the cookie secret |
+| `home`: the home page's server (`scripts/home.mjs`) | services | The token proxy (usage telemetry); GitHub's API, for the stars | The users' key (`usage-id-key`), with usage telemetry |
+| `mcp`: pghacker-mcp | services | Its database role, `pgh_reader`; the token proxy (embeddings, usage telemetry) | `pgh_reader`'s password; the users' key |
+| `indexer`: pghacker-indexer | services | `pgh_indexer`; the token proxy; the archive and git.postgresql.org | `pgh_indexer`'s password |
+| `token-proxy`, ×2 (`scripts/token-proxy.mjs`) | services | Foundry's private endpoint; Entra ID; Application Insights' ingestion | None: its workload identity's tokens |
+| `portal`: PilotSwarm's portal, ×2, which runs no agent | swarm | `pgh_swarm`; the token proxy | `pgh_swarm`'s password |
+| `worker`: PilotSwarm's worker and the crawl scheduler (`scripts/worker.mjs`) | swarm | The indexer's tools, pghacker-mcp's internal listener, the token proxy and `pgh_swarm`: nothing else | `pgh_swarm`'s password |
+| Jobs: `bootstrap`, `probe`, `restore`, `history` | services | The database as its administrator; the token proxy; the firewall's hosts | The administrator's password and the roles' |
+| Job: `egress-check` (`scripts/egress-check.mjs`) | swarm | As the worker, whose identity and policy it has | `pgh_swarm`'s password |
+
+- **Identities.** Each component has its own user-assigned identity, federated with its Kubernetes service account. The Secrets Store CSI driver reads a component's Key Vault secrets with it, each granted one by one, and syncs them into the Kubernetes Secret its environment reads. Only the token proxy's pod gets a token of its own. No pod mounts a Kubernetes API token, and only the jobs read the administrator's password.
+- **Pods.** The namespace enforces Pod Security's `restricted` profile: each pod runs as its image user (`pgh-agent`, `pgh-svc`, `pgh-proxy`, `pgh-home`), with a read-only root, no Linux capabilities and the runtime's seccomp profile. tini is PID 1 and reaps what the agents' shells leave behind.
+- **The network.** Cilium enforces the NetworkPolicies: everything is denied unless a policy allows it. The edge alone takes traffic from outside the cluster, from the Private Link Service's addresses; the portal, which trusts oauth2-proxy's identity headers, takes it from the edge alone. Every node subnet sends what leaves the VNet to Azure Firewall, which admits the services pool's named hosts and every pool's platform endpoints (AKS, the registry, the vault, Azure Monitor), and denies and logs the rest. The private endpoints' NSG takes the database from the services and PilotSwarm pools, and Foundry from the services pool alone.
+- **Health.** Each Deployment's probes ask its `/healthz`, oauth2-proxy's `/ping` and PilotSwarm's `/api/health`; the token proxy is ready once it has a token. The worker has none: Kubernetes restarts it when it exits.
+- **Artifacts.** Without blob storage, PilotSwarm keeps sessions' artifacts on the worker's disk, where the portal, in pods of its own, can't show them. The app's agents write none.
 
 ## First deployment
 
-You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, and Node 24 with the local app set up (for the corpus). From the repository root, copy the synthetic example:
+You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, `kubectl` and `kubelogin` (`az aks install-cli`), and Node 24 with the local app set up (for the corpus) and its development dependencies installed (`npm install`; `deploy/scripts/aks.mjs` uses them). From the repository root, copy the synthetic example:
 
 ```sh
 cp deploy/environments/example.tfvars deploy/environments/local.tfvars
 ```
 
-Replace its placeholder subscription ID, names, region, model capacities, and GitHub access settings with your own. `github_org` and `github_team` have no default, and their placeholders fail validation: their members get the portal's agents, which run shell commands on your subscription. Choose globally unique registry and vault names, and leave `create_app = false` until step 8. Real `.tfvars`, `.tfvars.json`, and `.backend.hcl` files are ignored; do not force-add them or commit secrets, state, or plans.
+Replace its placeholder subscription ID, names, region, model capacities, and GitHub access settings with your own. `github_org` and `github_team` have no default, and their placeholders fail validation: their members get the portal's agents, which run shell commands on your subscription. Choose globally unique registry and vault names, and leave `create_origin = false` until step 9. Real `.tfvars`, `.tfvars.json`, and `.backend.hcl` files are ignored; do not force-add them or commit secrets, state, or plans.
 
 The remaining commands run from `deploy/terraform` unless they say otherwise. The `local` filenames are examples: use a separate settings file and backend for each environment.
 
@@ -107,23 +99,28 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 
    Set `image = "<your-registry>.azurecr.io/pghacker-mcp@sha256:<digest>"` in `local.tfvars`, using your registry name and the returned digest.
 
-4. **Everything but the app.** This step creates:
-   - the VNet, HorizonDB with its parameter group and private endpoint;
-   - Foundry with its three deployments and private endpoint;
-   - Key Vault and its secrets, the identity, the Container Apps environment, the probe job, and Front Door.
+4. **The infrastructure.** This step creates:
+   - the VNet, Azure Firewall and its policy, the route that sends every node subnet's traffic through it;
+   - the AKS cluster and its three pools, and the workload identities;
+   - HorizonDB with its parameter group and private endpoint; Foundry with its three deployments and private endpoint;
+   - Key Vault and its secrets, the GitHub OAuth App's as placeholders, and Front Door, without an origin yet.
 
    ```sh
    terraform apply -var-file=../environments/local.tfvars
    ```
 
-5. **The probe.** It bootstraps the database from inside the VNet. It then checks:
-   - the extensions, and that BM25, vector, trigram and Cypher queries run as `pgh_reader`;
-   - the managed identity's token, and each Foundry deployment through the same proxy as the app's;
-   - the archive, git.postgresql.org and GitHub.
+5. **The cluster's objects and the probe.** `credentials` gets a kubeconfig through Entra ID. `apply --infra` applies everything but the app's workloads: the namespace, service accounts, secret classes, NetworkPolicies, Services (the edge's creates its internal load balancer and Private Link Service) and the token proxy. It then runs the `bootstrap` job, which creates the database, the roles, the extensions, the schema and the graph, and applies the migrations.
 
    ```sh
-   ../scripts/run-job.sh probe | jq .
+   node ../scripts/aks.mjs credentials
+   node ../scripts/aks.mjs apply --infra
+   node ../scripts/aks.mjs job probe | jq .
    ```
+
+   The probe checks, from inside the VNet:
+   - the extensions, and that BM25, vector, trigram and Cypher queries run as `pgh_reader`;
+   - each Foundry deployment, through the token proxy;
+   - the archive, git.postgresql.org and GitHub, and that the firewall refuses any other host.
 
    Fix what `failures` lists, then run the probe again until `ok` is true.
 
@@ -137,14 +134,14 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
      --build-arg "APP_IMAGE=$acr.azurecr.io/pghacker-mcp@sha256:<digest>" .
    ```
 
-   Set `seed_image = "<your-registry>.azurecr.io/pghacker-seed:<id>"`, apply (this creates the restore job), and run it:
+   Set `seed_image = "<your-registry>.azurecr.io/pghacker-seed:<id>"`, apply, and run the restore:
 
    ```sh
    terraform apply -var-file=../environments/local.tfvars
-   ../scripts/run-job.sh restore | jq '{ok, corpus, rows}'
+   node ../scripts/aks.mjs job restore | jq '{ok, corpus, rows}'
    ```
 
-   The restore checks that the dump's checksum, migrations and embedding model match. It refuses a database that already has a corpus unless run with `--replace`, and refuses while the indexer is connected. It loads schema `pghacker` and checks every table's row count. The app rebuilds the graph from the tables when it starts.
+   The restore checks that the dump's checksum, migrations and embedding model match. It refuses a database that already has a corpus unless run with `--replace` (`node ../scripts/aks.mjs job restore -- --replace`), and refuses while the indexer is connected. It loads schema `pghacker` and checks every table's row count. The indexer rebuilds the graph from the tables when it starts.
 
 7. **The GitHub OAuth App.**
    - Register it under your GitHub organization's **Settings > Developer settings > OAuth Apps** (or under your account), with:
@@ -153,7 +150,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
    - Some organizations restrict OAuth Apps. Until an org owner approves this one, GitHub hides org and team membership from it, and every sign-in fails with a 500 (the logs say `user is missing required organization`).
      - To ask for approval, open `https://github.com/settings/connections/applications/<client ID>` and click **Request** next to your organization.
      - Until then, `github_users` (a list of logins) lets those users in. It doesn't follow the team: once the app is approved, keep only the logins that aren't on the team.
-   - Store its credentials (TERRAFORM.md, "Key Vault secrets"):
+   - Store its credentials over Terraform's placeholders (TERRAFORM.md, "Key Vault secrets"):
 
    ```sh
    vault=$(terraform output -raw key_vault_name)
@@ -162,41 +159,62 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
    az keyvault secret set --vault-name "$vault" --name github-client-secret --value "$secret" --output none && unset secret
    ```
 
-8. **The app.** Set `create_app = true` and apply. From then on, never set it back to `false`, which destroys the app.
-
-9. **Check it.** Front Door can take a few minutes to route a new origin.
+8. **The app.** `apply` refuses while a GitHub secret is still the placeholder. It applies what `--infra` does, runs the bootstrap again, then the workloads, and waits for their rollouts:
 
    ```sh
-   mcp=$(terraform output -raw mcp_url)
-   curl -s "$mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '[.result.tools[].name]'
+   node ../scripts/aks.mjs apply
    ```
 
-   From the repository root, check the routes from outside, read-only. On the public URL: the home page and its files without sign-in, its share links sent on to the portal's host, and `/mcp`; with a custom domain, Front Door's 404 for the portal's paths. On the portal's: the portal and its API behind sign-in, whose callback is on that host, even with a forged `X-Forwarded-Uri`:
+9. **Front Door's origin.** Set `create_origin = true` and apply: Front Door asks to connect to the edge's Private Link Service, and the apply warns that the connection isn't approved (`edge_private_link_approved`). Approve it: `approve-edge` approves only a pending request whose message is this Front Door's. From then on, never set `create_origin` back to `false`, which takes the site down.
 
    ```sh
-   npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)" \
-     --portal-url "$(terraform -chdir=deploy/terraform output -raw portal_url)"
+   terraform apply -var-file=../environments/local.tfvars
+   node ../scripts/aks.mjs approve-edge
+   terraform plan -var-file=../environments/local.tfvars   # no warning once approved
    ```
 
-   Then open `public_url`, the home page, without signing in, and `portal_url`: GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
+10. **Check it.** Front Door can take a few minutes to route a new origin.
 
-10. **The code.** Unless the corpus brought a commit history, build one ([Commit history](#commit-history)): the code tools have no other source.
+    ```sh
+    mcp=$(terraform output -raw mcp_url)
+    curl -s "$mcp" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq '[.result.tools[].name]'
+    ```
+
+    From the repository root, check the routes from outside, read-only. On the public URL: the home page and its files without sign-in, its share links sent on to the portal's host, and `/mcp`; with a custom domain, Front Door's 404 for the portal's paths. On the portal's: the portal and its API behind sign-in, whose callback is on that host, even with a forged `X-Forwarded-Uri`:
+
+    ```sh
+    npm run check:public -- --url "$(terraform -chdir=deploy/terraform output -raw public_url)" \
+      --portal-url "$(terraform -chdir=deploy/terraform output -raw portal_url)"
+    ```
+
+    Then check the agents' lockdown from the worker's place: the indexer, pghacker-mcp's internal listener, the token proxy and the database answer, and nothing else does, not the internet, the instance metadata endpoint, Azure's WireServer, the Kubernetes API, the portal or pghacker-mcp's public listener:
+
+    ```sh
+    node ../scripts/aks.mjs job egress-check | jq .
+    ```
+
+    Then open `public_url`, the home page, without signing in, and `portal_url`: GitHub asks you to sign in, and a team member reaches the portal; anyone else gets 403. In a pghacker Crawler session, `ingest_status` shows the restored corpus and the graph's vertices and edges.
+
+11. **The code.** Unless the corpus brought a commit history, build one ([Commit history](#commit-history)): the code tools have no other source.
 
 ## Updates
 
-Build and push a new image (step 3), set its digest as `image`, and apply. Container Apps starts the new revision before it stops the old. The two overlap: the old revision serves until the new one has applied its migrations and is ready ([Schema upgrades](#schema-upgrades)). The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped. Only the indexer that holds a session advisory lock runs jobs; it checks the lock's connection every 2 s. If that connection is lost, the lock goes with it, so the indexer drops its running jobs and exits, and the supervisor starts it again to wait for its turn. An indexer that takes the lock and finds jobs left running waits 30 s, until the one that ran them has stopped them, before it queues them again. A worker that can't record a job's outcome, as when the database drops its connection, tries again for 30 s; then the indexer drops its running jobs and exits the same way. If the indexer's MCP server stops, as when it can't listen, the indexer finishes its running jobs, as on a shutdown, and exits with the error for the supervisor to start it again.
+Build and push a new image (step 3), set its digest as `image`, and apply. Then deploy it: `node ../scripts/aks.mjs apply` runs the `bootstrap` job with the new image, which applies its migrations while the old pods serve ([Schema upgrades](#schema-upgrades)), and only then rolls the Deployments out. A setting changed in Terraform (`app_env` and the other variables in the `kubernetes` output) is deployed the same way: apply, then `aks.mjs apply`; the pods whose environment changed restart.
+
+- The services' Deployments start their new pods before they stop the old ones. The new indexer serves its tools as soon as it starts, but runs jobs only once the old one has stopped. Only the indexer that holds a session advisory lock runs jobs; it checks the lock's connection every 2 s. If that connection is lost, the lock goes with it, so the indexer drops its running jobs and exits, and Kubernetes starts it again to wait for its turn. An indexer that takes the lock and finds jobs left running waits 30 s, until the one that ran them has stopped them, before it queues them again. A worker that can't record a job's outcome, as when the database drops its connection, tries again for 30 s; then the indexer drops its running jobs and exits the same way. If the indexer's MCP server stops, as when it can't listen, the indexer finishes its running jobs, as on a shutdown, and exits with the error for Kubernetes to start it again.
+- The worker is replaced, never doubled, since two crawl schedulers would race over the sessions. It gets 60 s to stop: the scheduler first, then PilotSwarm's sessions. A turn still running is dropped; extraction leases lapse after 20 minutes and their threads are extracted again.
 
 Usage telemetry is off unless `usage_enabled = true`; it used to be on by default. A deployment that relied on that default must set `usage_enabled = true`, and `privacy_url`, before its next apply. Otherwise the apply deletes its Application Insights resource and the users' key, `usage-id-key`: `AppEvents` keeps the events it holds until their retention ends, but if telemetry is turned on again, clients get new IDs.
 
 ### Schema upgrades
 
-Startup applies the migrations a database lacks, in name order and each in its own transaction, and refuses one that changed after it was applied.
+The bootstrap applies the migrations a database lacks, in name order and each in its own transaction, and refuses one that changed after it was applied.
 
 - A migration waits at most 5 s for a lock, unless it sets its own `lock_timeout`, as most do (10 s). Meanwhile, other sessions' requests for the table queue behind it.
-- One that fails rolls back alone, and those before it stay applied. Bootstrap exits, the supervisor runs it again 5 s to 60 s later, and the next attempt starts with the failed migration. After 15 minutes of failed bootstraps, `/healthz` fails ([The container](#the-container)).
+- One that fails rolls back alone, and those before it stay applied. The `bootstrap` job tries three more times, each attempt starting with the failed migration; if they all fail, `aks.mjs apply` stops there, and the old pods keep serving.
 - The log says when each migration is applied, and how long it took. When one times out waiting for a lock, or deadlocks, its error lists the sessions that hold locks on the schema's tables, oldest transaction first: their pid, role, application, how long they have been connected and in their transaction, their state, their query and their locks. Only this log shows them: the `query` tool can't see other roles' sessions.
-- Until every migration is applied, the new revision isn't ready, and the old one serves on the partly migrated schema. So each migration must work with the previous image by itself. One that the previous image can't run on, such as `0019`, which changed the type of a column that images before it read, goes last in its deployment: otherwise, while a later migration waits for a lock, the old revision serves on a schema it can't read. Changes that must commit together go in one file.
+- Until every migration is applied, the new pods don't start, and the old ones serve on the partly migrated schema. So each migration must work with the previous image by itself. One that the previous image can't run on, such as `0019`, which changed the type of a column that images before it read, goes last in its deployment: otherwise, while a later migration waits for a lock, the old pods serve on a schema they can't read. Changes that must commit together go in one file.
 - A migration can't hold statements that can't run in a transaction, such as `CREATE INDEX CONCURRENTLY`. An index on a populated table is built before the deployment, from a reviewed runbook, as [Graph index preparation](#graph-index-preparation) does for the graph's.
 
 | Migration | Adds |
@@ -231,7 +249,7 @@ UPDATE pghacker.jobs SET state = 'queued', payload = '{}', attempts = 0, run_aft
 WHERE kind = 'patch_series';
 ```
 
-Images before `0019` read the column as a number. While the old revision overlaps the new one during the upgrade, its `search_patches` and `get_commit` fail; its ingest still works. To roll back to one, as `pgh_indexer`, give it an empty number column, and stop the job, which it doesn't know:
+Images before `0019` read the column as a number. While the old image's pods overlap the new ones during the upgrade, their `search_patches` and `get_commit` fail; their ingest still works. To roll back to one, as `pgh_indexer`, give it an empty number column, and stop the job, which it doesn't know:
 
 ```sql
 ALTER TABLE pghacker.patches DROP COLUMN series_version;
@@ -256,7 +274,7 @@ An image with migration `0021_shipped_releases` saves a feature's release by the
 - The migration renames the features saved before.
 - The graph sync then moves their `TARGETS` edges and drops the four development names' `Release` vertices, without a full sync.
 
-Images before `0021` save releases as their threads name them. That includes the old revision while it overlaps the new one during the upgrade. Rolling back to one needs nothing. After the upgrade, and after rolling forward from one, rename the releases they saved, as `pgh_indexer`; it changes nothing when there are none:
+Images before `0021` save releases as their threads name them. That includes the old image's pods while they overlap the new ones during the upgrade. Rolling back to one needs nothing. After the upgrade, and after rolling forward from one, rename the releases they saved, as `pgh_indexer`; it changes nothing when there are none:
 
 ```sql
 UPDATE pghacker.features SET release = pghacker.shipped_release(release)
@@ -374,10 +392,10 @@ transaction, and `--check` then passes.
 
 ## Commit history
 
-The code tools read PostgreSQL's whole commit history ([reference](../docs/reference.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed (`list_sources.history` shows it). Installing it, or rebuilding it from scratch, is a one-off execution of the probe job, given 4 vCPU and 8 GiB, that runs `scripts/history-build.mjs`:
+The code tools read PostgreSQL's whole commit history ([reference](../docs/reference.md#commit-history), [the search design](../docs/search-design.md)), their only source: a deployment has no code to read until one is installed (`list_sources.history` shows it). Installing it, or rebuilding it from scratch, is the `history` job, given up to 4 vCPU, 8 GiB and 16 GiB of scratch disk, which runs `scripts/history-build.mjs`:
 
 ```sh
-../scripts/run-job.sh history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
+node ../scripts/aks.mjs job history | jq '{ok, error, build, verify: (.verify // {} | {ms, commits, files, mismatch_count, mismatches})}'
 ```
 
 It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.git` into a bare clone on the job's disk, builds the history into schema `pghacker_history`, and swaps it into `pghacker`. It then rebuilds every file of the branch heads and of 40 random commits and compares them with git, for the rest of the job's hour. `ok` is true when nothing differed.
@@ -386,7 +404,7 @@ It fetches every branch and tag of `https://git.postgresql.org/git/postgresql.gi
 - The next `resolve_anchors` run resolves mail's file anchors to the history's paths.
 - `PGHACKER_CODE_HISTORY` in `app_env` names another schema for the code tools to read; unset, `pghacker`.
 
-Check `tools/list` (First deployment, step 9) and run the evaluation.
+Check `tools/list` (First deployment, step 10) and run the evaluation.
 
 **Retired snapshots.** Migration `0016_retire_snapshots` drops the snapshots' tables (`code_snapshots`, `code_files`, `code_lines`) and their change capture, and cancels unfinished `code_snapshot` jobs. It records the graph keys of their files and of the history's, so that the incremental graph sync moves File and Subsystem vertices and `PART_OF` edges onto the history without a full sync: a File is `loaded` when the history has its path. Migration `0020_retire_version_sources` then deletes what their loader left: the 15 `postgres_version` rows in `sources` and its `code_snapshot` jobs, so `sources` lists mailing lists only.
 
@@ -440,8 +458,8 @@ alone: the home page, its files, `/mcp` and `/robots.txt`. Front Door answers
 404 for any other path there. The portal and its sign-in stay on the default
 `azurefd.net` hostname, which keeps every path, so the OAuth callback
 (`oauth_callback_url`) doesn't change, and oauth2-proxy never has to tell the
-hosts apart. The app accepts both hostnames and the origin hostname; the
-origin host header and certificate checks do not change.
+hosts apart. The app accepts both host names: Front Door sends the request's
+own host on to the edge.
 
 For a new domain, first create only its Front Door resource, so you can publish
 the ownership record before changing the app's public URL:
@@ -457,7 +475,7 @@ The name is fully qualified; providers that append the zone name need only the
 relative part (`_dnsauth` for an apex domain, `_dnsauth.mcp` for this example).
 Wait for the domain's validation state in Front Door to become **Approved**.
 Then apply the full configuration, which gives the domain its route and
-updates the app. The GitHub OAuth App's homepage can become `public_url`; its
+updates the app's settings, and deploy them (`node ../scripts/aks.mjs apply`). The GitHub OAuth App's homepage can become `public_url`; its
 callback stays `oauth_callback_url`.
 
 A deployment whose portal was on the custom domain, before it had a route of
@@ -497,9 +515,9 @@ Ask a **pghacker Crawler** session in the portal, for example:
 
 It confirms the scope of large requests, since a whole archive is decades of mail. It reports what `add_source` queued, and follows retrieval and extraction with `ingest_status`. For the code, it reports the commit history's head and last sync from `list_sources.history`: there is no version to add.
 
-The crawl scheduler's progress is in the container's log, with `[crawl]` lines. To stop extraction, set `app_env = { PGHACKER_CRAWL = "off" }` and apply. The other knobs are `crawl_start_sessions`, `crawl_max_sessions` and the Foundry capacities in `foundry_deployments`.
+The crawl scheduler's progress is in the worker's log, with `[crawl]` lines. To stop extraction, set `app_env = { PGHACKER_CRAWL = "off" }`, apply, and deploy (`node ../scripts/aks.mjs apply`): the worker restarts without the scheduler. The other knobs are `crawl_start_sessions`, `crawl_max_sessions` and the Foundry capacities in `foundry_deployments`.
 
-Extraction leases new mail as it arrives, for up to half of the threads, and fills in the rest of the archive from the newest thread back ([extraction](../docs/reference.md#extraction)). `ingest_status.extraction.lanes`, and the log's `[crawl] Backlog:` lines every 10 minutes, show both lanes. To tune them, set `PGHACKER_EXTRACTION_NEW_MAIL_SHARE` or `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` in `app_env`. To lease the largest threads never extracted first instead, set `app_env = { PGHACKER_EXTRACTION_ORDER = "largest" }` and apply; the app restarts with it.
+Extraction leases new mail as it arrives, for up to half of the threads, and fills in the rest of the archive from the newest thread back ([extraction](../docs/reference.md#extraction)). `ingest_status.extraction.lanes`, and the log's `[crawl] Backlog:` lines every 10 minutes, show both lanes. To tune them, set `PGHACKER_EXTRACTION_NEW_MAIL_SHARE` or `PGHACKER_EXTRACTION_NEW_MAIL_DAYS` in `app_env`. To lease the largest threads never extracted first instead, set `app_env = { PGHACKER_EXTRACTION_ORDER = "largest" }`, apply and deploy; the indexer restarts with it.
 
 Of `app_env`'s settings, the Rust services get only the extraction order's, `PGHACKER_CODE_HISTORY` and general ones such as `RUST_LOG`.
 
@@ -526,20 +544,24 @@ Without `--skill`, the agents, which don't declare the skills extension, must fi
 
 ## Operations
 
-- **Logs.** Log Analytics (`terraform output -raw log_analytics_workspace_id`), table `ContainerAppConsoleLogs_CL`. Each line is prefixed with its process: `[supervisor]`, `[indexer]`, `[mcp]`, `[swarm]`, `[crawl]`, `[home]`, `[oauth2-proxy]`.
+`kubectl` commands run in the app's namespace: `kubectl --namespace pghacker ...`, after `node ../scripts/aks.mjs credentials`.
+
+- **Logs.** `kubectl logs deployment/<name>` for the last ones; Log Analytics (`terraform output -raw log_analytics_workspace_id`) keeps them, in Container Insights' `ContainerLogV2` table, by `PodName` and `ContainerName`. The worker's lines are prefixed `[swarm]` and `[crawl]`.
+- **Egress.** The firewall's verdicts are in `AZFWApplicationRule` and `AZFWNetworkRule`. The `<name_prefix>-swarm-denied-egress` alert fires when it denies anything from the PilotSwarm pool's subnet, and emails `alert_emails`: find what in those tables, by `SourceIp`. Run the `egress-check` job again after any change to the network.
 - **Usage telemetry.**
   - Events that couldn't be sent are logged as `usage events weren't sent`, under `[mcp]` or `[home]`, at most once a minute.
   - Past `usage_daily_cap_gb` (5 GB) a day, Application Insights drops the rest of the day's events.
-- **Restart.** `az containerapp revision restart` on the active revision. A restart drops live portal sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
+- **Restart.** `kubectl rollout restart deployment/<name>`. Restarting the worker drops live sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.
   - A full sync runs once after the upgrade that installs the change capture, after an upgrade that changes what the graph projects, after a restore or a commit-history install, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
 - **Secrets.**
-  - Rotating the GitHub OAuth App's secret means a new `github-client-secret` version and then a restart.
-  - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. The next bootstrap sets it on the role.
-- **Front Door's ranges** change now and then. Every apply reads the `AzureFrontDoor.Backend` tag again.
+  - The CSI driver syncs a new version of a vault secret into its Kubernetes Secret within 2 minutes, but pods read their environment when they start. Rotating the GitHub OAuth App's secret therefore means a new `github-client-secret` version, then `kubectl rollout restart deployment/edge`.
+  - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. `node ../scripts/aks.mjs apply` then runs the bootstrap, which sets it on the role; restart the role's Deployments once the Secret has synced.
 - **Limits.**
-  - The app has `cpu` vCPU and `memory` (4 and 8 GiB by default); each extraction session runs a Copilot CLI process, and the scheduler holds back above 85% memory use.
+  - The worker has 2 vCPU and 6 GiB, and up to 8 GiB (`deploy/k8s/worker.yaml`), on a `swarm_pool` node of its own; each session runs a Copilot CLI process, and the scheduler holds back above 85% of the worker's memory. For more sessions, give `swarm_pool` a larger `vm_size` and raise the worker's limit.
   - HorizonDB has `horizondb_vcores` vCores per replica (4 by default).
+  - The agents share pghacker-mcp's internal listener's rate limit, `mcp_internal_rate_per_minute` and `mcp_internal_rate_burst` (300 a minute, in bursts of 60): they all connect from the worker's pod. A call over it gets 429 with Retry-After, and usage telemetry records `McpRateLimited` on the `internal` endpoint, at most once a minute.
   - Extraction's pace is bounded by `gpt-6-luna`'s capacity in `foundry_deployments`, within the subscription's quota for the region.
-  - The ephemeral disk holds the commit history's clone (about 850 MB, once a history is installed) and no mbox files.
+  - The indexer's ephemeral disk, on its node, holds the commit history's clone (about 850 MB, once a history is installed) and no mbox files.
+- **Cost.** Beyond the nodes, Azure Firewall Standard and Front Door Premium each have a fixed hourly charge, and the cluster's Standard tier (`aks_sku_tier`) one for its uptime SLA.

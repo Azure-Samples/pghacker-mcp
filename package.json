@@ -27,5 +27,8 @@
     "pilotswarm": "file:dist-tarballs/pilotswarm-0.8.2.tgz",
     "pilotswarm-horizon-store": "file:dist-tarballs/pilotswarm-horizon-store-0.8.2.tgz",
     "pilotswarm-sdk": "file:dist-tarballs/pilotswarm-sdk-0.8.2.tgz"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.1"
   }
 }

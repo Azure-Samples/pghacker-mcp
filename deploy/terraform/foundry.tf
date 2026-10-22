@@ -2,11 +2,11 @@
 # Licensed under the MIT license.
 
 # Azure AI Foundry: an AIServices account with the app's model deployments,
-# reachable only through its private endpoint. Key (local) authentication is
-# disabled by design: the app's managed identity calls the models with Entra
-# tokens, which a proxy in the container adds to the
-# requests of PilotSwarm, the embedder and the crawl scheduler
-# (scripts/lib/foundry.mjs).
+# reachable only through its private endpoint, from the services pool alone
+# (network.tf's NSG). Key (local) authentication is disabled by design: the
+# token proxy (scripts/token-proxy.mjs) adds its workload identity's Entra
+# token to the requests of PilotSwarm, the embedders and the crawl scheduler,
+# which hold no credential.
 
 locals {
   foundry_private_endpoint_name = "${local.foundry_account_name}-pe"
@@ -32,6 +32,13 @@ resource "azurerm_cognitive_account" "foundry" {
   local_auth_enabled            = false
   public_network_access_enabled = false
   tags                          = var.tags
+
+  # Data loss prevention: the account reaches no outside host for a caller,
+  # such as an image or file by URL, On Your Data's search service or a
+  # remote MCP server, since no host is allowed (fqdns). PilotSwarm's agents
+  # reach the models through the token proxy, which refuses such requests
+  # first (scripts/lib/foundry.mjs); the app uses none of them.
+  outbound_network_access_restricted = true
 
   # Set in full, bypass included: Azure reports a default bypass that would
   # otherwise show as a change in every plan.
@@ -135,11 +142,12 @@ data "azapi_resource" "foundry_private_endpoint_connection" {
   }
 }
 
-# The app's identity calls the models: inference only, on this account.
-resource "azurerm_role_assignment" "app_foundry_openai_user" {
+# The token proxy's identity calls the models: inference only, on this
+# account.
+resource "azurerm_role_assignment" "proxy_foundry_openai_user" {
   scope                            = azurerm_cognitive_account.foundry.id
   role_definition_name             = "Cognitive Services OpenAI User"
-  principal_id                     = azurerm_user_assigned_identity.app.principal_id
+  principal_id                     = azurerm_user_assigned_identity.workload["proxy"].principal_id
   principal_type                   = "ServicePrincipal"
   skip_service_principal_aad_check = true
 }
