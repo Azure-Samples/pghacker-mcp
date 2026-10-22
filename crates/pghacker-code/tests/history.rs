@@ -96,6 +96,7 @@ fn fixture() -> Repo {
     r.write("empty.txt", b"");
     // Not UTF-8 (Latin-1) until c2.
     r.write("latin1.txt", b"caf\xe9\nplain line\nmore\n");
+    #[cfg(unix)]
     std::os::unix::fs::symlink("a.c", r.dir.path().join("link.c")).unwrap();
     r.commit("c0: the first files");
 
@@ -151,11 +152,15 @@ fn fixture() -> Repo {
     r.git(&["branch", "REL_3_STABLE"]);
     a = format!("/* header */\n{a}/* footer */\n");
     r.write("src/a.c", a.as_bytes());
-    let mut perms = std::fs::metadata(r.dir.path().join("crlf.txt"))
-        .unwrap()
-        .permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-    std::fs::set_permissions(r.dir.path().join("crlf.txt"), perms).unwrap();
+    // Symlinks and modes are Unix's: elsewhere the history just lacks them.
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(r.dir.path().join("crlf.txt"))
+            .unwrap()
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(r.dir.path().join("crlf.txt"), perms).unwrap();
+    }
     r.commit("c5: header and footer, crlf.txt executable");
     r
 }
