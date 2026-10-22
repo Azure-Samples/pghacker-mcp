@@ -11,11 +11,14 @@
 //! question starts, whether the last answer helped
 //! (`pghacker_core::feedback`).
 //!
-//! Under load, a tool call waits a bounded time for a connection
-//! (PGHACKER_MCP_POOL_WAIT_SECONDS) and runs to a deadline
-//! (PGHACKER_MCP_CALL_TIMEOUT_SECONDS); one whose client goes away is
-//! abandoned. Either way its statements are cancelled.
+//! Under load, the public listener runs a few calls at once per client
+//! (PGHACKER_MCP_CALLS_PER_CLIENT) and so many in all (PGHACKER_MCP_CALLS),
+//! leaving the agents' listener the rest of the pool. A tool call waits a
+//! bounded time for a connection (PGHACKER_MCP_POOL_WAIT_SECONDS) and runs to
+//! a deadline (PGHACKER_MCP_CALL_TIMEOUT_SECONDS); one whose client goes away
+//! is abandoned. Either way its statements are cancelled.
 
+mod admission;
 mod ratelimit;
 mod tools;
 
@@ -37,20 +40,30 @@ use pghacker_core::mcp::{McpServer, router, serve};
 use pghacker_core::usage::{self, Endpoint, Recorder, Usage};
 use pghacker_core::{db, telemetry};
 
+use crate::admission::Admission;
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
 use crate::tools::{Server, instructions};
 
 /// How long a tool call waits for a connection, by default, before it fails
-/// as busy.
+/// as busy; and a request on the public listener for its turn.
 const POOL_WAIT_SECONDS: u64 = 10;
+
+/// The most connections the two pools, PGHACKER_MCP_POOL and
+/// PGHACKER_QUERY_POOL, hold in all: pgh_reader's connection limit, 160, is
+/// a backstop above it.
+const MAX_POOLED: usize = 128;
+
+/// The calls a client may run at once on the public listener, by default.
+const CALLS_PER_CLIENT: usize = 4;
 
 /// A tool call's deadline, by default: past code search's 15-second budget
 /// and query's own 20-second deadline, so that those report their own
 /// outcome.
 const CALL_TIMEOUT_SECONDS: u64 = 30;
 
-/// How much longer than a call's deadline a request may take before it's
-/// answered 503: the call's own error comes first.
+/// How much longer than a call's wait for its turn and its deadline a
+/// request may take before it's answered 503: the call's own error comes
+/// first.
 const REQUEST_MARGIN: Duration = Duration::from_secs(10);
 
 /// The runtime's threads, which run the tool calls and query's checks, have
@@ -76,7 +89,28 @@ async fn run() -> Result<()> {
     }
     let reader_url = env.reader_database_url()?;
     let addr = env.get_or("PGHACKER_MCP_ADDR", "127.0.0.1:3102").to_owned();
+    let internal_addr = env.get("PGHACKER_MCP_INTERNAL_ADDR").map(str::to_owned);
     let pool_size = env.parse_or("PGHACKER_MCP_POOL", 16usize)?;
+    let query_pool_size = env.parse_or("PGHACKER_QUERY_POOL", 8usize)?;
+    ensure!(
+        pool_size >= 1 && query_pool_size >= 1 && pool_size + query_pool_size <= MAX_POOLED,
+        "PGHACKER_MCP_POOL and PGHACKER_QUERY_POOL must each be at least 1, and at most {MAX_POOLED} in all"
+    );
+    // With the agents' listener, the public one leaves it a quarter of the
+    // pool, by default.
+    let calls = env.parse_or(
+        "PGHACKER_MCP_CALLS",
+        match internal_addr {
+            Some(_) => (pool_size * 3 / 4).max(1),
+            None => pool_size,
+        },
+    )?;
+    let calls_per_client = env.parse_or("PGHACKER_MCP_CALLS_PER_CLIENT", CALLS_PER_CLIENT)?;
+    ensure!(calls > 0, "PGHACKER_MCP_CALLS must be at least 1");
+    ensure!(
+        calls_per_client > 0,
+        "PGHACKER_MCP_CALLS_PER_CLIENT must be at least 1"
+    );
     let pool_wait = env.parse_or("PGHACKER_MCP_POOL_WAIT_SECONDS", POOL_WAIT_SECONDS)?;
     let call_timeout = env.parse_or("PGHACKER_MCP_CALL_TIMEOUT_SECONDS", CALL_TIMEOUT_SECONDS)?;
     ensure!(
@@ -87,6 +121,7 @@ async fn run() -> Result<()> {
         call_timeout > 0,
         "PGHACKER_MCP_CALL_TIMEOUT_SECONDS must be at least 1"
     );
+    let pool_wait = Duration::from_secs(pool_wait);
     let call_timeout = Duration::from_secs(call_timeout);
     if call_timeout <= pghacker_sqlquery::CALL_TIMEOUT {
         tracing::warn!(
@@ -94,20 +129,14 @@ async fn run() -> Result<()> {
             pghacker_sqlquery::CALL_TIMEOUT.as_secs()
         );
     }
-    let pool = CallPool::new(
-        db::pool(&reader_url, pool_size, "pghacker-mcp")?,
-        Duration::from_secs(pool_wait),
-    );
+    let pool = CallPool::new(db::pool(&reader_url, pool_size, "pghacker-mcp")?, pool_wait);
     let embedder = Embedder::from_env(&env)?;
     if embedder.is_none() {
         tracing::warn!(
             "HORIZON_EMBED_* is not set: semantic search is off and hybrid falls back to full text"
         );
     }
-    let query = pghacker_sqlquery::QueryTool::new(
-        &reader_url,
-        env.parse_or("PGHACKER_QUERY_POOL", 8usize)?,
-    )?;
+    let query = pghacker_sqlquery::QueryTool::new(&reader_url, query_pool_size)?;
     let usage = Usage::from_env(&env, "pghacker-mcp", env!("CARGO_PKG_VERSION"))?;
     let feedback = Feedback::from_env(&env, &usage)?;
     // The client's address: a header the proxy in front sets
@@ -149,23 +178,26 @@ async fn run() -> Result<()> {
     let front_door = env
         .get("PGHACKER_FRONT_DOOR_ID")
         .map(|id| FrontDoor(Arc::from(id.trim())));
+    let admission = Admission::new(calls, calls_per_client, pool_wait, client_ip.clone());
     // Feedback on the public listener only: no person reads the answers of
     // the internal one's agents.
-    let request_timeout = call_timeout + REQUEST_MARGIN;
     let app = guarded(
         public(
             router(server.clone().with_feedback(feedback), allowed_hosts),
             limit,
+            admission,
             &usage,
             client_ip,
             front_door,
         ),
-        request_timeout,
+        pool_wait + call_timeout + REQUEST_MARGIN,
     );
-    let served = match env.get("PGHACKER_MCP_INTERNAL_ADDR") {
+    let served = match internal_addr {
         Some(internal_addr) => {
-            let internal_addr = internal_addr.to_owned();
-            let internal_app = guarded(internal(router(server, None), &usage), request_timeout);
+            let internal_app = guarded(
+                internal(router(server, None), &usage),
+                call_timeout + REQUEST_MARGIN,
+            );
             tokio::try_join!(serve(app, &addr), serve(internal_app, &internal_addr)).map(|_| ())
         }
         None => serve(app, &addr).await,
@@ -188,14 +220,16 @@ fn guarded(app: Router, request_timeout: Duration) -> Router {
     .layer(CatchPanicLayer::new())
 }
 
-/// The public listener: `router` behind the rate limit, then the usage
-/// middleware, which so records the requests the limit turns away, then,
-/// behind Azure Front Door, whose addresses other profiles share, the check
-/// that requests came through this profile (PGHACKER_FRONT_DOOR_ID). Requests
-/// it refuses aren't recorded: their client address can't be trusted.
+/// The public listener: `router` behind the limit on calls at once, then the
+/// rate limit, then the usage middleware, which so records the requests the
+/// limits turn away, then, behind Azure Front Door, whose addresses other
+/// profiles share, the check that requests came through this profile
+/// (PGHACKER_FRONT_DOOR_ID). Requests it refuses aren't recorded: their
+/// client address can't be trusted.
 fn public(
     router: Router,
     limit: RateLimit,
+    admission: Admission,
     usage: &Usage,
     client_ip: ClientIp,
     front_door: Option<FrontDoor>,
@@ -204,6 +238,7 @@ fn public(
         client_ip.of(request)
     });
     let app = router
+        .layer(middleware::from_fn_with_state(admission, admission::admit))
         .layer(middleware::from_fn_with_state(limit, ratelimit::limit))
         .layer(middleware::from_fn_with_state(recorder, usage::record));
     match front_door {

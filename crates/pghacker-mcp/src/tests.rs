@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{guarded, internal, public};
+use crate::admission::Admission;
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
 use crate::tools::Server;
 
@@ -54,6 +55,44 @@ impl Tools for Echo {
 }
 
 const FRONT_DOOR_ID: &str = "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11";
+
+/// Calls at once that the tests' listeners never reach.
+fn admission(client_ip: &ClientIp) -> Admission {
+    Admission::new(64, 64, Duration::from_secs(1), client_ip.clone())
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SleepArgs {
+    ms: u64,
+}
+
+/// A tool that takes its time.
+#[derive(Clone)]
+struct Sleeper;
+
+static SLEEPER_SPECS: &[ToolSpec] = &[ToolSpec {
+    name: "sleep",
+    description: "Sleeps.",
+    effect: Effect::Read,
+    schema: schema::<SleepArgs>,
+}];
+
+impl Tools for Sleeper {
+    fn specs(&self) -> &'static [ToolSpec] {
+        SLEEPER_SPECS
+    }
+
+    async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
+        let args: SleepArgs = parse(name, arguments)?;
+        tokio::time::sleep(Duration::from_millis(args.ms)).await;
+        Ok(Output::Text("slept".into()))
+    }
+}
+
+fn sleep(ms: u64) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "sleep", "arguments": { "ms": ms } } })
+}
 
 async fn listen(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -115,6 +154,7 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
     let base = listen(public(
         router(server.clone(), None),
         limit,
+        admission(&socket_ip),
         &usage,
         socket_ip,
         Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
@@ -364,6 +404,7 @@ async fn the_public_listener_asks_for_feedback_and_the_internal_one_never_does()
     let base = listen(public(
         router(server.clone().with_feedback(feedback), None),
         RateLimit::new(600, 100, socket_ip.clone()),
+        admission(&socket_ip),
         &usage,
         socket_ip,
         Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
@@ -560,6 +601,67 @@ async fn without_details_calls_of_the_served_tools_keep_only_their_choices() {
         assert!(!event.contains(SECRET), "{event}");
     }
     assert_eq!(usage.lost(), 0);
+}
+
+/// One client runs its share of calls at once, and is refused more at once;
+/// past the calls at once in all, a request waits its while for a turn, then
+/// is answered 503. Either says when to retry.
+#[tokio::test]
+async fn the_public_listener_runs_a_few_calls_at_once_per_client_and_so_many_in_all() {
+    let socket_ip = ClientIp::Header(HeaderName::from_static("x-azure-socketip"));
+    let wait = Duration::from_millis(400);
+    let base = listen(public(
+        router(McpServer::new(Sleeper, "sleeper", "1", "Sleeps."), None),
+        RateLimit::new(6000, 1000, socket_ip.clone()),
+        Admission::new(3, 2, wait, socket_ip.clone()),
+        &Usage::off(),
+        socket_ip,
+        None,
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let send = |ip: &'static str, body: Value| {
+        let (client, base) = (client.clone(), base.clone());
+        async move {
+            client
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("content-type", "application/json")
+                .header("x-azure-socketip", ip)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let long = |ip| tokio::spawn(send(ip, sleep(1500)));
+    let (first, second) = (long("203.0.113.1"), long("203.0.113.1"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    let refused = send("203.0.113.1", sleep(0)).await;
+    assert_eq!(refused.status().as_u16(), 429);
+    assert_eq!(refused.headers()["retry-after"], "1");
+    assert!(started.elapsed() < wait);
+    // Another client has a share of its own, to the total. Past it, a third
+    // client's request waits its while for a turn; the health check none.
+    let third = long("2001:db8::1");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let health = client.get(format!("{base}/healthz")).send().await.unwrap();
+    assert_eq!(health.status().as_u16(), 200);
+    let started = Instant::now();
+    let busy = send("198.51.100.7", sleep(0)).await;
+    assert_eq!(busy.status().as_u16(), 503);
+    assert_eq!(busy.headers()["retry-after"], "1");
+    assert!(started.elapsed() >= wait);
+    for call in [first, second, third] {
+        assert_eq!(call.await.unwrap().status().as_u16(), 200);
+    }
+    // The places and turns are given back: the full share and total again.
+    let again =
+        ["203.0.113.1", "203.0.113.1", "198.51.100.7"].map(|ip| tokio::spawn(send(ip, sleep(200))));
+    for call in again {
+        assert_eq!(call.await.unwrap().status().as_u16(), 200);
+    }
 }
 
 #[tokio::test]

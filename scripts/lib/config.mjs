@@ -344,9 +344,11 @@ export function serviceEnvironments(config, inherited = process.env) {
       PGHACKER_READER_DATABASE_URL: readerUrl,
       PGHACKER_MCP_ADDR: `${LOCAL_HOST}:${config.mcpPort}`,
       // Every local agent and script reaches pghacker-mcp from 127.0.0.1 and
-      // shares one rate-limit bucket, sized for the server's public clients.
+      // shares one rate-limit bucket, sized for the server's public clients,
+      // and one share of the calls it runs at once: here, all of them.
       PGHACKER_RATE_PER_MINUTE: config.values.PGHACKER_RATE_PER_MINUTE || "3000",
       PGHACKER_RATE_BURST: config.values.PGHACKER_RATE_BURST || "500",
+      PGHACKER_MCP_CALLS_PER_CLIENT: config.values.PGHACKER_MCP_CALLS_PER_CLIENT || "128",
     },
   };
 }

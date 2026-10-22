@@ -206,6 +206,7 @@ test("each process gets only the credentials it needs", () => {
   assert.equal(services.indexer.PATH, "/test/path");
   assert.equal(services.mcp.PGHACKER_RATE_PER_MINUTE, "3000");
   assert.equal(services.mcp.PGHACKER_RATE_BURST, "500");
+  assert.equal(services.mcp.PGHACKER_MCP_CALLS_PER_CLIENT, "128");
   assert.equal(
     serviceEnvironments(parseLocalConfig(`${initialEnv(password)}PGHACKER_RATE_PER_MINUTE=120\n`), {}).mcp.PGHACKER_RATE_PER_MINUTE,
     "120",

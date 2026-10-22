@@ -118,7 +118,7 @@ impl RateLimit {
 }
 
 /// Requests that skip the checks: the health check.
-fn exempt(request: &Request) -> bool {
+pub(crate) fn exempt(request: &Request) -> bool {
     request.uri().path() == "/healthz"
 }
 
