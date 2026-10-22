@@ -18,21 +18,25 @@ const ROLES: &str = include_str!("../sql/roles.sql");
 const DATABASE: &str = include_str!("../sql/database.sql");
 
 /// The license header that starts each migration, with the blank line after
-/// it (scripts/lib/license-headers.mjs), with LF and with CRLF line ends. A
-/// migration's checksum leaves it out, so the header changed no checksum that
-/// a database had recorded.
-const LICENSE_HEADER: [&str; 2] = [
-    "-- Copyright (c) Microsoft Corporation.\n-- Licensed under the MIT license.\n\n",
-    "-- Copyright (c) Microsoft Corporation.\r\n-- Licensed under the MIT license.\r\n\r\n",
-];
+/// it (scripts/lib/license-headers.mjs). A migration's checksum leaves it
+/// out, so the header changed no checksum that a database had recorded.
+const LICENSE_HEADER: &str =
+    "-- Copyright (c) Microsoft Corporation.\n-- Licensed under the MIT license.\n\n";
 
-/// A migration's checksum: the SHA-256 of its SQL without the license header.
+/// A migration's checksum: the SHA-256 of its SQL with LF line ends, without
+/// the license header. A checkout with CRLF line ends has the same.
 fn checksum(sql: &str) -> String {
-    let body = LICENSE_HEADER
-        .iter()
-        .find_map(|header| sql.strip_prefix(header))
-        .unwrap_or(sql);
+    let sql = sql.replace("\r\n", "\n");
+    let body = sql.strip_prefix(LICENSE_HEADER).unwrap_or(&sql);
     hex::encode(Sha256::digest(body.as_bytes()))
+}
+
+/// The checksum that older binaries recorded from a checkout with CRLF line
+/// ends, such as Windows's with core.autocrlf: of the body with CRLF ends.
+fn crlf_checksum(sql: &str) -> String {
+    let sql = sql.replace("\r\n", "\n");
+    let body = sql.strip_prefix(LICENSE_HEADER).unwrap_or(&sql);
+    hex::encode(Sha256::digest(body.replace('\n', "\r\n").as_bytes()))
 }
 
 /// The roles' passwords: pgh_indexer's and pgh_reader's, and pgh_swarm's
@@ -216,6 +220,15 @@ pub struct Migration {
     pub sha256: String,
 }
 
+impl Migration {
+    /// Whether `recorded`, the checksum a database recorded for this
+    /// migration, is this one's: its checksum, or the one older binaries
+    /// recorded from a checkout with CRLF line ends.
+    fn recorded_as(&self, recorded: &str) -> bool {
+        recorded == self.sha256 || recorded == crlf_checksum(self.sql)
+    }
+}
+
 /// The embedded migrations, in order.
 pub fn migrations() -> Vec<Migration> {
     let mut list: Vec<Migration> = MIGRATIONS
@@ -326,7 +339,7 @@ async fn prepare(
     for migration in migrations {
         if applied
             .get(&migration.version)
-            .is_some_and(|sha| *sha != migration.sha256)
+            .is_some_and(|sha| !migration.recorded_as(sha))
         {
             bail!(changed(migration));
         }
@@ -357,7 +370,7 @@ async fn apply(
         .await?
         .map(|row| row.get(0));
     match recorded {
-        Some(sha) if sha == migration.sha256 => return Ok(false),
+        Some(sha) if migration.recorded_as(&sha) => return Ok(false),
         Some(_) => bail!(changed(migration)),
         None => {}
     }
@@ -583,16 +596,29 @@ mod tests {
     }
 
     #[test]
-    fn a_checksum_leaves_out_the_license_header() {
+    fn a_checksum_leaves_out_the_license_header_and_line_ends() {
         use sha2::{Digest, Sha256};
         let body = "-- A migration.\nCREATE TABLE t (id int);\n";
         let plain = hex::encode(Sha256::digest(body.as_bytes()));
         assert_eq!(super::checksum(body), plain);
-        for header in super::LICENSE_HEADER {
+        let crlf = |text: &str| text.replace('\n', "\r\n");
+        for header in [
+            super::LICENSE_HEADER.to_owned(),
+            crlf(super::LICENSE_HEADER),
+        ] {
             assert_eq!(super::checksum(&format!("{header}{body}")), plain);
             // Only a header at the start is left out.
             assert_ne!(super::checksum(&format!("{body}{header}")), plain);
         }
+        // A CRLF checkout has the same checksum, and the one older binaries
+        // recorded from it is the migration's too.
+        let sql: &'static str = Box::leak(crlf(&format!("{}{body}", super::LICENSE_HEADER)).into());
+        assert_eq!(super::checksum(sql), plain);
+        let migration = migration("9000_crlf", sql);
+        let older = hex::encode(Sha256::digest(crlf(body).as_bytes()));
+        assert!(migration.recorded_as(&plain));
+        assert!(migration.recorded_as(&older));
+        assert!(!migration.recorded_as(&super::checksum("SELECT 1;\n")));
     }
 
     /// The lock timeout of most tests: short, as nothing should wait.

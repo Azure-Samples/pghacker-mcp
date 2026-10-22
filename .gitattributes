@@ -1,0 +1,3 @@
+# SQL keeps LF line ends in every checkout: migrations are checksummed, and
+# their string literals, such as COMMENT ON's, are stored as written.
+*.sql text eol=lf
