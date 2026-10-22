@@ -394,6 +394,12 @@ static DATABASE: &[ToolSpec] = &[
         schema: schema::<NoArgs>,
     },
     ToolSpec {
+        name: "panic_streaming",
+        description: "Panics while its statement streams rows.",
+        effect: Effect::Read,
+        schema: schema::<NoArgs>,
+    },
+    ToolSpec {
         name: "one",
         description: "Reads one.",
         effect: Effect::Read,
@@ -407,18 +413,35 @@ impl Tools for Database {
     }
 
     async fn call(&self, name: &str, _arguments: Value) -> Result<Output, ErrorData> {
+        use futures_util::TryStreamExt;
         let client = match self.pool.get().await {
             Ok(client) => client,
             Err(error) => return Ok(failed(error)),
         };
-        let one: i32 = client.query_one("SELECT 1", &[]).await.unwrap().get(0);
+        let row = client
+            .query_one("SELECT 1, pg_backend_pid()", &[])
+            .await
+            .unwrap();
+        let (one, pid): (i32, i32) = (row.get(0), row.get(1));
         match name {
             "sleep" => {
                 client.execute("SELECT pg_sleep(30)", &[]).await.unwrap();
                 Ok(Output::Text("slept".into()))
             }
             "panic" => panic!("a test panic, holding a connection"),
-            _ => Ok(Output::Json(json!({ "one": one }))),
+            "panic_streaming" => {
+                let rows = client
+                    .query_raw(
+                        "SELECT pg_sleep(0.25) FROM generate_series(1, 16)",
+                        Vec::<String>::new(),
+                    )
+                    .await
+                    .unwrap();
+                let mut rows = std::pin::pin!(rows);
+                rows.try_next().await.unwrap();
+                panic!("a test panic, its statement running")
+            }
+            _ => Ok(Output::Json(json!({ "one": one, "pid": pid }))),
         }
     }
 }
@@ -479,12 +502,15 @@ async fn a_call_past_its_deadline_fails_and_frees_its_connection() {
     assert_eq!(body["result"]["structuredContent"]["one"], 1, "{body}");
 }
 
+/// A call that panics is answered with an error, and its connection is
+/// closed, with whatever statement it was running: the next call gets
+/// another connection at once.
 #[tokio::test]
 async fn a_call_that_panics_is_an_error_and_frees_its_connection() {
     let db = TestDb::create().await.unwrap();
     let pool = CallPool::new(
         db::pool(&db.reader_url, 1, DATABASE_APP).unwrap(),
-        Duration::from_secs(2),
+        Duration::from_secs(10),
     );
     let base = serve_server(
         McpServer::new(Database { pool }, "db", "1", "Database tools."),
@@ -492,16 +518,24 @@ async fn a_call_that_panics_is_an_error_and_frees_its_connection() {
     )
     .await;
     let client = reqwest::Client::new();
-    for id in [1, 2] {
-        let (status, body) = rpc(&client, &base, call(id, "panic")).await;
+    let pid = |body: &Value| body["result"]["structuredContent"]["pid"].as_i64();
+    let (_, body) = rpc(&client, &base, call(1, "one")).await;
+    let mut backend = pid(&body).unwrap();
+    for (id, tool) in [(2, "panic"), (3, "panic_streaming")] {
+        let (status, body) = rpc(&client, &base, call(id, tool)).await;
         assert_eq!(status, 200);
         assert_eq!(
             body["error"]["message"], "the tool failed unexpectedly",
             "{body}"
         );
+        let started = Instant::now();
+        let (_, body) = rpc(&client, &base, call(id + 10, "one")).await;
+        assert!(started.elapsed() < Duration::from_secs(2), "{tool}");
+        assert_eq!(body["result"]["structuredContent"]["one"], 1, "{body}");
+        let next = pid(&body).unwrap();
+        assert_ne!(next, backend, "{tool}");
+        backend = next;
     }
-    let (_, body) = rpc(&client, &base, call(3, "one")).await;
-    assert_eq!(body["result"]["structuredContent"]["one"], 1, "{body}");
 }
 
 const SKILL: &str = "---\nname: demo\ndescription: Shows how; use when asked for a demo.\nlicense: MIT\nmetadata:\n  version: \"1\"\n---\n\n# Demo\n\nRead references/notes.md, then call echo.\n";

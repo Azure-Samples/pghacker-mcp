@@ -117,8 +117,8 @@ impl CallPool {
 }
 
 /// A connection from a [`CallPool`]. It goes back to the pool when dropped,
-/// unless its call was abandoned: then its statement is cancelled and it's
-/// closed.
+/// unless its call was abandoned or is panicking: then its statement is
+/// cancelled and it's closed.
 pub struct CallClient {
     object: Option<Object>,
     call: Option<Arc<Call>>,
@@ -149,7 +149,10 @@ impl Drop for CallClient {
             .call
             .as_ref()
             .is_some_and(|call| call.abandoned.load(Ordering::Acquire));
-        if !abandoned {
+        // A call that panics drops its connections as it unwinds, before its
+        // future is dropped as abandoned: they may still be busy with a
+        // statement.
+        if !abandoned && !std::thread::panicking() {
             return;
         }
         let cancel = object.cancel_token();

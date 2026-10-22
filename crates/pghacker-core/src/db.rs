@@ -30,6 +30,10 @@ const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a pool may take to check a connection before reusing it.
 const RECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a cancel may take: it opens a connection and TLS session of its
+/// own, while the caller holds the connection it cancels.
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The TLS connector of every connection, built once.
 pub fn tls() -> Result<MakeRustlsConnect> {
     static TLS: OnceLock<std::result::Result<MakeRustlsConnect, String>> = OnceLock::new();
@@ -132,11 +136,16 @@ pub async fn connect(url: &str, application_name: &str) -> Result<Client> {
 }
 
 /// Cancels the statement running on `token`'s connection, over TLS like the
-/// connection itself.
+/// connection itself, within [`CANCEL_TIMEOUT`].
 pub async fn cancel_query(token: &CancelToken) -> Result<()> {
-    token
-        .cancel_query(tls()?)
+    cancel_within(token, CANCEL_TIMEOUT).await
+}
+
+/// [`cancel_query`], within `limit`.
+pub async fn cancel_within(token: &CancelToken, limit: Duration) -> Result<()> {
+    tokio::time::timeout(limit, token.cancel_query(tls()?))
         .await
+        .map_err(|_| anyhow::anyhow!("cancelling the statement timed out"))?
         .context("cannot cancel the statement")
 }
 

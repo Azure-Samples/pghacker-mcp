@@ -121,3 +121,44 @@ async fn a_busy_pool_answers_within_its_wait_and_options_hold() {
         "{error:?}"
     );
 }
+
+/// A cancel that the server never answers ends at its limit, rather than
+/// holding the connection it cancels.
+#[tokio::test]
+async fn a_cancel_that_is_never_answered_ends_at_its_limit() {
+    let db = TestDb::create().await.unwrap();
+    let mut url = url::Url::parse(&db.reader_url).unwrap();
+    let upstream = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap_or(5432));
+    // The first connection goes through to the database; those after it,
+    // the cancel's, are held unanswered.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    url.set_port(Some(listener.local_addr().unwrap().port()))
+        .unwrap();
+    url.set_host(Some("127.0.0.1")).unwrap();
+    tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move {
+            let mut database = tokio::net::TcpStream::connect(upstream).await.unwrap();
+            let _ = tokio::io::copy_bidirectional(&mut first, &mut database).await;
+        });
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let client = db::connect(url.as_str(), APP).await.unwrap();
+    let started = Instant::now();
+    let error = db::cancel_within(&client.cancel_token(), Duration::from_millis(300))
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("timed out"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        client
+            .query_one("SELECT 1", &[])
+            .await
+            .unwrap()
+            .get::<_, i32>(0),
+        1
+    );
+}
