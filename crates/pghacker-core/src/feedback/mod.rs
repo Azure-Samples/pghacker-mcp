@@ -75,6 +75,10 @@ const MAX_ASKS: usize = 100_000;
 const MAX_ANSWERED: usize = 100_000;
 /// How often a server forgets the asks whose state has expired.
 const SWEEP: Duration = Duration::from_secs(60);
+/// The longest gaps, in seconds: an hour between a client's questions, and a
+/// day in a session, as Terraform and the supervisor allow.
+const MAX_QUESTION_GAP_SECONDS: u64 = 3600;
+const MAX_SESSION_GAP_SECONDS: u64 = 86_400;
 
 /// The apps asked by default: any whose `clientInfo` name contains one of
 /// these, ignoring case. That's Copilot CLI and the GitHub Copilot app
@@ -265,8 +269,8 @@ impl Feedback {
     ///   address's hour is armed for an ask;
     /// - PGHACKER_FEEDBACK_COMMENTS, whether the form takes a comment;
     /// - PGHACKER_FEEDBACK_QUESTION_GAP and PGHACKER_FEEDBACK_SESSION_GAP,
-    ///   in seconds (180 and 600): a longer gap starts a question, a shorter
-    ///   one keeps the session active;
+    ///   in seconds (180 and 600; at most an hour and a day): a longer gap
+    ///   starts a question, a shorter one keeps the session active;
     /// - PGHACKER_FEEDBACK_MIN_QUESTIONS (3), the questions before an ask;
     /// - PGHACKER_FEEDBACK_CLIENTS, the apps asked: names separated by
     ///   commas, any of which an app's `clientInfo` name contains, ignoring
@@ -295,12 +299,12 @@ impl Feedback {
             defaults.session_gap.as_secs(),
         )?;
         ensure!(
-            question_gap >= 1,
-            "PGHACKER_FEEDBACK_QUESTION_GAP must be at least 1 (seconds)"
+            (1..=MAX_QUESTION_GAP_SECONDS).contains(&question_gap),
+            "PGHACKER_FEEDBACK_QUESTION_GAP must be from 1 to {MAX_QUESTION_GAP_SECONDS} (seconds)"
         );
         ensure!(
-            session_gap > question_gap,
-            "PGHACKER_FEEDBACK_SESSION_GAP must be more than PGHACKER_FEEDBACK_QUESTION_GAP"
+            session_gap > question_gap && session_gap <= MAX_SESSION_GAP_SECONDS,
+            "PGHACKER_FEEDBACK_SESSION_GAP must be more than PGHACKER_FEEDBACK_QUESTION_GAP, and at most {MAX_SESSION_GAP_SECONDS} (seconds)"
         );
         let min_questions: u32 =
             env.parse_or("PGHACKER_FEEDBACK_MIN_QUESTIONS", defaults.min_questions)?;
@@ -1048,8 +1052,10 @@ mod tests {
             ("PGHACKER_FEEDBACK_COMMENTS", "maybe"),
             ("PGHACKER_FEEDBACK_QUESTION_GAP", "0"),
             ("PGHACKER_FEEDBACK_QUESTION_GAP", "3m"),
+            ("PGHACKER_FEEDBACK_QUESTION_GAP", "3601"),
             ("PGHACKER_FEEDBACK_SESSION_GAP", "180"),
             ("PGHACKER_FEEDBACK_SESSION_GAP", "-1"),
+            ("PGHACKER_FEEDBACK_SESSION_GAP", "86401"),
             ("PGHACKER_FEEDBACK_MIN_QUESTIONS", "101"),
             ("PGHACKER_FEEDBACK_MIN_QUESTIONS", "five"),
             ("PGHACKER_FEEDBACK_CLIENTS", "copilot-cli,,codex-mcp-client"),
