@@ -11,7 +11,7 @@
 //! its query on a short budget instead ([`Embedder::embed_one_interactive`]),
 //! so that a slow endpoint costs its caller seconds, not minutes.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use pgvector::HalfVector;
@@ -48,7 +48,8 @@ const BULK: Retries = Retries {
     longest_wait: Duration::from_secs(60),
 };
 
-/// A tool call's retries: two tries, within [`INTERACTIVE_BUDGET`].
+/// A tool call's retries: two tries, within [`INTERACTIVE_BUDGET`], waiting
+/// at most a second between them unless the endpoint asks for longer.
 const INTERACTIVE: Retries = Retries {
     attempts: 2,
     longest_wait: Duration::from_secs(1),
@@ -177,7 +178,7 @@ impl Embedder {
     /// request that fails or is throttled is tried up to six times, over
     /// minutes if the endpoint asks.
     pub async fn embed(&self, inputs: &[String]) -> Result<Vec<HalfVector>> {
-        self.embed_with(inputs, BULK).await
+        self.embed_with(inputs, BULK, None).await
     }
 
     /// One input's embedding for a tool call, as [`Embedder::embed_interactive`] gives it.
@@ -190,11 +191,13 @@ impl Embedder {
 
     /// The inputs' embeddings for a tool call, whose caller waits: tried at
     /// most twice, and an error once the interactive budget
-    /// ([`INTERACTIVE_BUDGET`]) has passed.
+    /// ([`INTERACTIVE_BUDGET`]) has passed. A retry waits as long as a
+    /// throttled endpoint asks if the budget has room, and else isn't tried.
     pub async fn embed_interactive(&self, inputs: &[String]) -> Result<Vec<HalfVector>> {
+        let deadline = Instant::now() + self.interactive_budget;
         match tokio::time::timeout(
             self.interactive_budget,
-            self.embed_with(inputs, INTERACTIVE),
+            self.embed_with(inputs, INTERACTIVE, Some(deadline)),
         )
         .await
         {
@@ -206,16 +209,26 @@ impl Embedder {
         }
     }
 
-    async fn embed_with(&self, inputs: &[String], retries: Retries) -> Result<Vec<HalfVector>> {
+    async fn embed_with(
+        &self,
+        inputs: &[String],
+        retries: Retries,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<HalfVector>> {
         let mut out = Vec::with_capacity(inputs.len());
         for batch in inputs.chunks(BATCH) {
-            let vectors = self.request(batch, retries).await?;
+            let vectors = self.request(batch, retries, deadline).await?;
             out.extend(vectors.into_iter().map(|v| HalfVector::from_f32_slice(&v)));
         }
         Ok(out)
     }
 
-    async fn request(&self, inputs: &[String], retries: Retries) -> Result<Vec<Vec<f32>>> {
+    async fn request(
+        &self,
+        inputs: &[String],
+        retries: Retries,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<Vec<f32>>> {
         let inputs: Vec<&str> = inputs
             .iter()
             .map(|input| {
@@ -280,14 +293,25 @@ impl Embedder {
             }
             let retryable = status.as_u16() == 429 || status.is_server_error();
             if retryable && attempt < attempts {
-                let wait = response
+                let asked = response
                     .headers()
                     .get("retry-after")
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.trim().parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .unwrap_or(delay)
-                    .min(retries.longest_wait);
+                    .map(Duration::from_secs);
+                let wait = match (asked, deadline) {
+                    // A caller waiting: as long as the endpoint asks, if
+                    // the budget has room.
+                    (Some(asked), Some(_)) => asked,
+                    (Some(asked), None) => asked.min(retries.longest_wait),
+                    (None, _) => delay.min(retries.longest_wait),
+                };
+                if deadline.is_some_and(|deadline| Instant::now() + wait >= deadline) {
+                    bail!(
+                        "the embeddings endpoint answered {status}, and a retry in {} ms would pass the budget",
+                        wait.as_millis()
+                    );
+                }
                 tracing::warn!(%status, attempt, wait_ms = wait.as_millis() as u64, "embeddings throttled or failed; retrying");
                 tokio::time::sleep(wait).await;
                 delay = (delay * 2).min(Duration::from_secs(30));
@@ -359,5 +383,70 @@ mod tests {
         let error = embedder.embed_one_interactive("vacuum").await.unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(error.to_string().contains("didn't answer"), "{error:#}");
+    }
+
+    /// An embedder of an endpoint that answers 429 with `retry_after` to
+    /// the requests within `throttled` of its first, and the others with a
+    /// vector; and how many requests it had.
+    async fn throttled(
+        throttled: Duration,
+        retry_after: &'static str,
+    ) -> (Embedder, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::http::{StatusCode, header};
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::{Arc, Mutex};
+        let first: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(move || {
+                let (first, counted) = (Arc::clone(&first), Arc::clone(&counted));
+                async move {
+                    counted.fetch_add(1, SeqCst);
+                    let first = *first.lock().unwrap().get_or_insert_with(Instant::now);
+                    if first.elapsed() < throttled {
+                        return (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [(header::RETRY_AFTER, retry_after)],
+                        )
+                            .into_response();
+                    }
+                    axum::Json(json!({"data": [{"index": 0, "embedding": vec![0.0; DIMENSIONS]}]}))
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let embedder = Embedder::new(EmbedConfig {
+            url,
+            model: "test".into(),
+            dim: DIMENSIONS,
+            api_key: None,
+            api_key_header: "api-key".into(),
+            bearer: false,
+        })
+        .unwrap();
+        (embedder, requests)
+    }
+
+    #[tokio::test]
+    async fn a_tool_calls_embedding_waits_as_asked_if_its_budget_has_room() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (embedder, requests) = throttled(Duration::from_millis(1500), "2").await;
+        let started = Instant::now();
+        embedder.embed_one_interactive("vacuum").await.unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(requests.load(SeqCst), 2);
+        // Past the budget, it doesn't wait: the search falls back at once.
+        let (embedder, requests) = throttled(Duration::from_secs(60), "10").await;
+        let started = Instant::now();
+        let error = embedder.embed_one_interactive("vacuum").await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(error.to_string().contains("pass the budget"), "{error:#}");
+        assert_eq!(requests.load(SeqCst), 1);
     }
 }
