@@ -672,7 +672,7 @@ impl<T: Tools> ServerHandler for McpServer<T> {
 }
 
 /// A panic's message, if it has one.
-fn panic_message(panic: &(dyn Any + Send)) -> &str {
+pub fn panic_message(panic: &(dyn Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
         .copied()

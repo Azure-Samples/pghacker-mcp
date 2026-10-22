@@ -401,8 +401,12 @@ fn git_header_path(rest: &str) -> Option<String> {
         return normalize_path(&rest[index + 1..]);
     }
     let half = rest.len() / 2;
-    if rest.len() % 2 == 1 && rest.is_char_boundary(half) && rest[..half] == rest[half + 1..] {
-        return normalize_path(&rest[..half]);
+    // Compared as bytes: equal halves are whole characters.
+    if rest.len() % 2 == 1
+        && rest.as_bytes()[..half] == rest.as_bytes()[half + 1..]
+        && let Some(path) = rest.get(..half)
+    {
+        return normalize_path(path);
     }
     rest.split_whitespace().last().and_then(normalize_path)
 }

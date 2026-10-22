@@ -112,6 +112,38 @@ fn normalizes_paths() {
 }
 
 #[test]
+fn git_headers_with_multibyte_characters_parse() {
+    assert_eq!(
+        git_header_path("src/é.c src/é.c").as_deref(),
+        Some("src/é.c")
+    );
+    // Every text of up to 5 of these.
+    let pieces = ["a", " ", "/", "é", "€", "𝄞"];
+    let mut texts = vec![String::new()];
+    for _ in 0..5 {
+        texts = texts
+            .iter()
+            .flat_map(|text| pieces.iter().map(move |piece| format!("{text}{piece}")))
+            .collect();
+        for text in &texts {
+            git_header_path(text);
+            parse_diff(&format!("diff --git {text}\n@@ -1 +1 @@\n-a\n+b\n"));
+        }
+    }
+}
+
+#[test]
+fn git_headers_parse_alike_with_addresses_redacted() {
+    let raw = "diff --git a@example.org\u{e9}\u{e9}\u{e9}\u{e9}\n@@ -1 +1 @@\n-a\n+b\n";
+    let redacted = crate::redact::redact_emails(raw);
+    assert!(redacted.starts_with("diff --git [email]"), "{redacted}");
+    let (_, raw_lines) = parse_diff(raw);
+    let (_, lines) = parse_diff(&redacted);
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[1..], raw_lines[1..]);
+}
+
+#[test]
 fn extracts_attached_patches() {
     let msg = parse(MULTIPART).unwrap();
     let patches = extract(&msg);

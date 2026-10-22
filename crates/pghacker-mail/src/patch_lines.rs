@@ -5,6 +5,7 @@
 //! patch_texts, by kind, and each patch's lines in order as text_ids.
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::patch::parse_diff;
 use anyhow::{Result, bail};
@@ -41,12 +42,8 @@ pub async fn index(client: &mut Client, limit: i64) -> Result<Indexed> {
     let patches: Vec<(i64, Vec<(char, &str)>)> = rows
         .iter()
         .map(|r| {
-            let lines = parse_diff(r.get(1))
-                .1
-                .into_iter()
-                .map(|l| (l.kind.code(), l.text))
-                .collect();
-            (r.get(0), lines)
+            let id = r.get(0);
+            (id, lines(id, r.get(1), diff_lines))
         })
         .collect();
     let mut distinct: Vec<(char, &str)> = Vec::new();
@@ -103,4 +100,50 @@ pub async fn index(client: &mut Client, limit: i64) -> Result<Indexed> {
     }
     tx.commit().await?;
     Ok(out)
+}
+
+/// A diff's lines as (kind, text).
+fn diff_lines(content: &str) -> Vec<(char, &str)> {
+    parse_diff(content)
+        .1
+        .into_iter()
+        .map(|l| (l.kind.code(), l.text))
+        .collect()
+}
+
+/// Patch `id`'s lines by `parse`, or none, logged, if `parse` fails: the
+/// patch is then indexed without lines.
+fn lines<'a>(
+    id: i64,
+    content: &'a str,
+    parse: impl FnOnce(&'a str) -> Vec<(char, &'a str)>,
+) -> Vec<(char, &'a str)> {
+    catch_unwind(AssertUnwindSafe(|| parse(content))).unwrap_or_else(|_| {
+        tracing::error!(
+            patch = id,
+            "cannot parse a patch's lines; it is indexed without them"
+        );
+        Vec::new()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_patch_that_cannot_be_parsed_has_no_lines() {
+        let diff = "--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(
+            lines(1, diff, diff_lines),
+            [
+                ('h', "--- a/x.c"),
+                ('h', "+++ b/x.c"),
+                ('h', "@@ -1 +1 @@"),
+                ('-', "a"),
+                ('+', "b")
+            ]
+        );
+        assert!(lines(2, diff, |_| panic!("a parser's bug")).is_empty());
+    }
 }

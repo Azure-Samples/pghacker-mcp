@@ -1264,6 +1264,41 @@ async fn stored_mail_is_redacted_in_place() {
     );
 }
 
+/// A patch is indexed from its stored text, as redaction left it.
+#[tokio::test]
+async fn patches_are_indexed_as_stored() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let msg = raw_message(
+        "multibyte@example.org",
+        ALICE,
+        "A patch",
+        "Date: 1 Jun 2026 10:00:00 +0000\n",
+        "diff --git a@example.org\u{e9}\u{e9}\u{e9}\u{e9}\n@@ -1 +1 @@\n-a\n+b\n",
+    );
+    store_each(&mut client, &[&msg]).await;
+    let content: String = client
+        .query_one("SELECT content FROM patches", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(content.starts_with("diff --git [email]"), "{content}");
+    let indexed = pghacker_mail::patch_lines::index(&mut client, 10)
+        .await
+        .unwrap();
+    assert_eq!((indexed.patches, indexed.lines), (1, 4));
+    let lines: i64 = client
+        .query_one("SELECT cardinality(text_ids)::int8 FROM patches", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(lines, 4);
+    let again = pghacker_mail::patch_lines::index(&mut client, 10)
+        .await
+        .unwrap();
+    assert_eq!(again.patches, 0);
+}
+
 type ThreadStats = (i32, i32, String, String, i32, String, String);
 
 /// Message and participant counts, subject, key, version, first and last day.

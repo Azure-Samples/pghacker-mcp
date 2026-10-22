@@ -5,9 +5,12 @@
 //! `FOR UPDATE SKIP LOCKED`, retried with backoff, and recurring jobs that
 //! re-queue themselves.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use futures_util::FutureExt;
+use pghacker_core::mcp::panic_message;
 use serde_json::{Value, json};
 use tokio_postgres::GenericClient;
 use tokio_util::sync::CancellationToken;
@@ -762,13 +765,13 @@ async fn run_workers(
     );
     // Cancelled by `abort`, or by a worker that can't record a job's outcome.
     let halt = abort.child_token();
-    let mut handles = Vec::new();
+    let mut running = tokio::task::JoinSet::new();
     for worker in 0..workers {
         let indexer = indexer.clone();
         let (stop, halt) = (stop.clone(), halt.clone());
         let node = format!("{node}/{worker}");
         let kinds = lane(worker, workers);
-        handles.push(tokio::spawn(async move {
+        running.spawn(async move {
             while !stop.is_cancelled() {
                 tokio::select! {
                     () = halt.cancelled() => break,
@@ -781,14 +784,20 @@ async fn run_workers(
                 }
             }
             Ok(())
-        }));
+        });
     }
+    // Any worker's end is seen at once: one that fails or panics halts the
+    // others.
     let mut stopped = Ok(());
-    for handle in handles {
-        if let Err(error) = handle.await?
-            && stopped.is_ok()
+    while let Some(ended) = running.join_next().await {
+        if let Err(error) = ended
+            .context("a job worker failed")
+            .and_then(|worked| worked)
         {
-            stopped = Err(error);
+            halt.cancel();
+            if stopped.is_ok() {
+                stopped = Err(error);
+            }
         }
     }
     stopped
@@ -829,7 +838,7 @@ async fn work(
     match claimed {
         Ok(Some(job)) => {
             let started = std::time::Instant::now();
-            let ending = Ending::of(&job, execute(indexer, &job).await);
+            let ending = Ending::of(&job, contained(execute(indexer, &job)).await);
             let ok = !matches!(ending, Ending::Failed { .. });
             record(indexer, node, &job, &ending, stop).await?;
             if !matches!(
@@ -860,4 +869,29 @@ async fn work(
         }
     }
     Ok(())
+}
+
+/// A job's outcome, or an error if it panics: the job fails, and is retried
+/// with backoff.
+async fn contained(job: impl Future<Output = Result<Outcome>>) -> Result<Outcome> {
+    AssertUnwindSafe(job)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| Err(anyhow!("the job panicked: {}", panic_message(&*panic))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_job_that_panics_fails() {
+        let done = contained(async { Ok(Outcome::Done(json!({"n": 1}))) }).await;
+        assert!(matches!(done, Ok(Outcome::Done(result)) if result == json!({"n": 1})));
+        let error = contained(async { panic!("a handler's bug") })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "the job panicked: a handler's bug");
+    }
 }
