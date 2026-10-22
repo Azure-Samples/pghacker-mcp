@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-// PilotSwarm 0.8.2's portal server offers the "proxy" auth provider, which
+// PilotSwarm 0.8.5's portal server offers the "proxy" auth provider, which
 // takes the identity an authenticating proxy (here oauth2-proxy) puts on each
 // request. Its prebuilt SPA has no browser half for it, though (it knows only
 // none, entra and dev), so behind a proxy it stops at 'Unsupported portal auth
@@ -46,8 +46,8 @@ export const PROXY_BROWSER_AUTH = `function pghProxyBrowserAuth() {
 `;
 
 export const PORTAL_SPA = {
-  entry: "index-BrOn9Elg.js",
-  sha256: "25c9d041535f6801c2c9b38a4f8f3e6f995fed25563072022f6efbaaa476bebc",
+  entry: "index-DUHgKMzl.js",
+  sha256: "c7fdb85989f19f527ba7c965708d8c2a922240eff39fa655ac6e951bd0b61e7a",
   // The function that picks the browser half for the portal's provider.
   anchor: 'function vy(u){return!u||u==="none"?hy():',
   replacement: `${PROXY_BROWSER_AUTH}function vy(u){return!u||u==="none"?hy():u==="proxy"?pghProxyBrowserAuth():`,

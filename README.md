@@ -16,7 +16,7 @@ The project is powered by PostgreSQL itself. The mail, the graph and PostgreSQL'
 
 ## Quick start
 
-You need Node.js 24 or later, Rust (the toolchain in `rust-toolchain.toml`), and Docker with Docker Compose, on macOS or Linux.
+You need Node.js 24.22.1 or a later 24.x release, or 26.12.1 or later (PilotSwarm's security baseline), Rust (the toolchain in `rust-toolchain.toml`), and Docker with Docker Compose, on macOS or Linux.
 
 ```bash
 npm run setup   # download PilotSwarm, install dependencies, build, and create .env

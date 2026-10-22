@@ -7,7 +7,7 @@
 //
 //   /mcp       pghacker-mcp, public
 //   /portal    the PilotSwarm portal, after GitHub sign-in in Azure. PilotSwarm
-//              0.8.2 has no base path (microsoft/PilotSwarm#179): its page
+//              0.8.5 has no base path (microsoft/PilotSwarm#179): its page
 //              loads at /portal/, but it asks for /assets/* and /api/*
 //              (WebSockets included) at the root, so those go to it too.
 //   /          everything else: the home page. Its own files are public; any

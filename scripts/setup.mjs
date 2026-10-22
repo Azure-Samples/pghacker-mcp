@@ -5,11 +5,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { APP_ROOT, ensureRolePasswords, initializeEnv, readLocalConfig } from "./lib/config.mjs";
-import { PILOTSWARM_VERSION, RELEASE_ASSETS, restoreRelease } from "./lib/release.mjs";
+import { NODE_REQUIREMENT, PILOTSWARM_VERSION, RELEASE_ASSETS, restoreRelease, supportedNode } from "./lib/release.mjs";
 
 try {
-  if (Number(process.versions.node.split(".")[0]) < 24) {
-    throw new Error("Node.js 24 or later is required.");
+  if (!supportedNode(process.versions.node)) {
+    throw new Error(`Node.js ${process.versions.node} isn't supported: PilotSwarm ${PILOTSWARM_VERSION} needs ${NODE_REQUIREMENT}.`);
   }
   const created = initializeEnv();
   const roles = !created && ensureRolePasswords();

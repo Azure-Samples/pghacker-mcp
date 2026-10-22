@@ -22,7 +22,7 @@ Don't report security vulnerabilities in issues: follow [SECURITY.md](SECURITY.m
 
 ## Development
 
-The [README](README.md#quick-start) sets up a local copy: Node.js 24 or later, the Rust toolchain in
+The [README](README.md#quick-start) sets up a local copy: Node.js 24.22.1+ or 26.12.1+, the Rust toolchain in
 `rust-toolchain.toml`, and Docker. The [reference](docs/reference.md) describes the settings, the tools and the
 repository's layout.
 

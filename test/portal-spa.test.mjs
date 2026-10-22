@@ -55,7 +55,7 @@ test("the patched portal has a browser half for proxy, and browsers fetch it und
   assert.equal(browserAuthFor(original)("proxy"), null, "the release's SPA has no browser half for proxy");
 
   const patched = patchPortalSpa(dir);
-  assert.match(patched, /^index-BrOn9Elg-[0-9a-f]{8}\.js$/);
+  assert.match(patched, /^index-DUHgKMzl-[0-9a-f]{8}\.js$/);
   assert.ok(!existsSync(path.join(dist, "assets", PORTAL_SPA.entry)), "the unpatched bundle is gone");
   const html = readFileSync(path.join(dist, "index.html"), "utf8");
   assert.ok(html.includes(`src="/assets/${patched}"`));

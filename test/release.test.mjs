@@ -8,7 +8,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { APP_ROOT } from "../scripts/lib/config.mjs";
-import { RELEASE_ASSETS, PILOTSWARM_VERSION, restoreAsset, verifyAsset } from "../scripts/lib/release.mjs";
+import {
+  NODE_REQUIREMENT, RELEASE_ASSETS, PILOTSWARM_VERSION, restoreAsset, supportedNode, verifyAsset,
+} from "../scripts/lib/release.mjs";
 
 const bytes = Buffer.from("unit-test release fixture");
 const asset = { file: "fixture.tgz", sha256: createHash("sha256").update(bytes).digest("hex") };
@@ -24,6 +26,30 @@ test("every dependency uses the same pinned, verified GitHub Release", () => {
     assert.match(entry.sha256, /^[a-f0-9]{64}$/);
   }
   assert.ok(RELEASE_ASSETS.some((entry) => entry.file === "LICENSE"));
+});
+
+test("the app needs the Node.js releases that PilotSwarm's packages do", () => {
+  const manifest = JSON.parse(readFileSync(path.join(APP_ROOT, "package.json"), "utf8"));
+  assert.equal(manifest.engines.node, NODE_REQUIREMENT);
+  for (const entry of RELEASE_ASSETS.filter((asset) => asset.name)) {
+    const installed = JSON.parse(readFileSync(path.join(APP_ROOT, "node_modules", entry.name, "package.json"), "utf8"));
+    assert.equal(installed.version, PILOTSWARM_VERSION, entry.name);
+    assert.equal(installed.engines.node, NODE_REQUIREMENT, entry.name);
+  }
+  for (const version of ["24.22.1", "v24.22.1", "24.23.0", "24.30.4", "26.12.1", "26.13.0", "27.0.0", "28.1.2"]) {
+    assert.ok(supportedNode(version), version);
+  }
+  // The unpatched releases, and 25.x, which has reached its end of life.
+  for (const version of ["22.23.4", "24.0.0", "24.21.9", "24.22.0", "25.9.0", "26.10.0", "26.12.0"]) {
+    assert.ok(!supportedNode(version), version);
+  }
+});
+
+test("the image runs a Node.js release that PilotSwarm supports", () => {
+  const dockerfile = readFileSync(path.join(APP_ROOT, "Dockerfile"), "utf8");
+  const [, version] = /^ARG NODE_IMAGE=node:(\d+\.\d+\.\d+)-trixie-slim$/m.exec(dockerfile) ?? [];
+  assert.ok(version, "the Dockerfile pins NODE_IMAGE to an exact Node.js release");
+  assert.ok(supportedNode(version), version);
 });
 
 test("checksum verification rejects altered bytes", () => {

@@ -3,7 +3,7 @@
 # Licensed under the MIT license.
 
 # pghacker-mcp for Azure Kubernetes Service (deploy/README.md): the Rust
-# services, PilotSwarm 0.8.2 with the app's agents, the home page,
+# services, PilotSwarm 0.8.5 with the app's agents, the home page,
 # oauth2-proxy and the token proxy. One image for every component: each pod
 # (deploy/k8s) runs its own command, as its own user, under tini.
 #   docker build -t pghacker-mcp .                                    (local check)
@@ -11,7 +11,9 @@
 # ACR Tasks' classic `az acr build` can't use the cache mounts: use the task.
 
 ARG RUST_IMAGE=rust:1.95-trixie
-ARG NODE_IMAGE=node:24-trixie-slim
+# PilotSwarm's security baseline, as its own images pin (scripts/lib/release.mjs,
+# NODE_REQUIREMENT).
+ARG NODE_IMAGE=node:24.22.1-trixie-slim
 
 # The services, built against trixie's glibc, which the runtime image has.
 FROM ${RUST_IMAGE} AS rust
