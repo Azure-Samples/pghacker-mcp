@@ -34,9 +34,9 @@ static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
 
 /// `text` with each email address replaced by [`REDACTED`]; Message-IDs in
 /// URLs (`/message-id/<id>`, `postgr.es/m/<id>`) and after `message-id:`
-/// kept.
+/// kept. Borrowed when nothing was replaced, kept addresses or not.
 pub fn redact_emails(text: &str) -> Cow<'_, str> {
-    EMAIL.replace_all(text, |caps: &regex::Captures<'_>| {
+    let redacted = EMAIL.replace_all(text, |caps: &regex::Captures<'_>| {
         let m = caps.get(0).unwrap();
         let before = &text[..m.start()];
         if before.ends_with('/')
@@ -47,7 +47,11 @@ pub fn redact_emails(text: &str) -> Cow<'_, str> {
         } else {
             REDACTED.to_owned()
         }
-    })
+    });
+    match redacted {
+        Cow::Owned(owned) if owned == text => Cow::Borrowed(text),
+        redacted => redacted,
+    }
 }
 
 /// Whether `text` has an address [`redact_emails`] replaces.
@@ -282,5 +286,9 @@ mod tests {
         ));
         assert!(!has_email("ping @tom on x@localhost"));
         assert!(has_email("mail me at me@example.org"));
+        // Addresses that stay change nothing either.
+        let kept = "See https://postgr.es/m/CA+abc=d@mail.gmail.com";
+        assert!(matches!(redact_emails(kept), Cow::Borrowed(_)));
+        assert!(!has_email(kept));
     }
 }

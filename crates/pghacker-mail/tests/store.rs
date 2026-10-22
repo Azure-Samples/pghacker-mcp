@@ -1264,6 +1264,43 @@ async fn stored_mail_is_redacted_in_place() {
     );
 }
 
+/// Redaction rewrites only what it changes: a patch whose only addresses are
+/// Message-IDs in URLs, which stay, keeps its indexed lines.
+#[tokio::test]
+async fn redaction_leaves_what_it_keeps_alone() {
+    let db = TestDb::create().await.unwrap();
+    let mut client = db.indexer().await.unwrap();
+    let url = "https://postgr.es/m/CA+abc=d@mail.gmail.com";
+    let msg = raw_message(
+        "kept@example.org",
+        ALICE,
+        "A patch",
+        "Date: 1 Jun 2026 10:00:00 +0000\n",
+        &format!(
+            "As {url} said:\n\ndiff --git a/x.c b/x.c\n--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-a\n+b /* {url} */\n"
+        ),
+    );
+    store_each(&mut client, &[&msg]).await;
+    assert_eq!(count(&client, "SELECT count(*) FROM patches").await, 1);
+    pghacker_mail::patch_lines::index(&mut client, 10)
+        .await
+        .unwrap();
+    let tx = client.transaction().await.unwrap();
+    let done = pghacker_mail::redact::redact_messages(&tx, 0, 10)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!((done.messages, done.patches), (0, 0));
+    assert_eq!(
+        count(
+            &client,
+            "SELECT count(*) FROM patches WHERE text_ids IS NULL"
+        )
+        .await,
+        0
+    );
+}
+
 /// A patch is indexed from its stored text, as redaction left it.
 #[tokio::test]
 async fn patches_are_indexed_as_stored() {
