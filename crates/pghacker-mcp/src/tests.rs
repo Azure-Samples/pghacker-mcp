@@ -603,6 +603,62 @@ async fn without_details_calls_of_the_served_tools_keep_only_their_choices() {
     assert_eq!(usage.lost(), 0);
 }
 
+/// The public listener's guards where they refuse: another Front Door
+/// profile's requests, Host names the server doesn't serve, and a client over
+/// its rate, told how long to wait; and the health check, which passes them.
+#[tokio::test]
+async fn the_public_listeners_guards_refuse_what_isnt_theirs() {
+    let socket_ip = ClientIp::Header(HeaderName::from_static("x-azure-socketip"));
+    let server = McpServer::new(Echo, "echo", "1", "Echo.");
+    // One request, then one every 60/7 = 8.6 seconds.
+    let base = listen(public(
+        router(server, Some(vec!["mcp.example.org".to_owned()])),
+        RateLimit::new(7, 1, socket_ip.clone()),
+        admission(&socket_ip),
+        &Usage::off(),
+        socket_ip,
+        Some(FrontDoor(Arc::from(FRONT_DOOR_ID))),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let send = |ip: &'static str, front_door: &'static str, host: &'static str| {
+        let (client, base) = (client.clone(), base.clone());
+        async move {
+            client
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .header("content-type", "application/json")
+                .header("x-azure-socketip", ip)
+                .header("x-azure-fdid", front_door)
+                .header("host", host)
+                .json(&call("hi"))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let other_profile = "00000000-0000-4000-8000-000000000000";
+    let refused = send("203.0.113.9", other_profile, "mcp.example.org").await;
+    assert_eq!(refused.status().as_u16(), 403);
+    let elsewhere = send("198.51.100.1", FRONT_DOOR_ID, "evil.example").await;
+    assert_eq!(elsewhere.status().as_u16(), 403);
+    let ours = send("203.0.113.9", FRONT_DOOR_ID, "mcp.example.org").await;
+    assert_eq!(ours.status().as_u16(), 200);
+    // 8.6 seconds, rounded up: a client that waits as long is let in.
+    let limited = send("203.0.113.9", FRONT_DOOR_ID, "mcp.example.org").await;
+    assert_eq!(limited.status().as_u16(), 429);
+    assert_eq!(limited.headers()["retry-after"], "9");
+    for _ in 0..3 {
+        let health = client
+            .get(format!("{base}/healthz"))
+            .header("x-azure-socketip", "203.0.113.9")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status().as_u16(), 200);
+    }
+}
+
 /// One client runs its share of calls at once, and is refused more at once;
 /// past the calls at once in all, a request waits its while for a turn, then
 /// is answered 503. Either says when to retry.

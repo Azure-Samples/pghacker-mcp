@@ -115,6 +115,12 @@ impl RateLimit {
     fn client(&self, request: &Request) -> Option<IpAddr> {
         self.inner.client_ip.of(request)
     }
+
+    /// The clients with a bucket.
+    #[cfg(test)]
+    fn clients(&self) -> usize {
+        self.inner.buckets.lock().unwrap().len()
+    }
 }
 
 /// Requests that skip the checks: the health check.
@@ -153,7 +159,8 @@ pub async fn limit(State(limit): State<RateLimit>, request: Request, next: Next)
     match limit.take(ip, Instant::now()) {
         Ok(()) => next.run(request).await,
         Err(wait) => {
-            let seconds = wait.as_secs().max(1);
+            // Rounded up: a client that waits as long is let in.
+            let seconds = (wait.as_secs_f64().ceil() as u64).max(1);
             let mut response = (
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate limit exceeded; retry later\n",
@@ -183,6 +190,26 @@ mod tests {
         assert!(wait <= Duration::from_secs(1));
         assert!(limit.take(b, start).is_ok());
         assert!(limit.take(a, start + Duration::from_millis(1100)).is_ok());
+    }
+
+    #[test]
+    fn idle_clients_are_forgotten_once_there_are_many() {
+        let limit = RateLimit::new(60, 2, ClientIp::Socket);
+        let start = Instant::now();
+        for n in 0..=100_000u32 {
+            limit
+                .take(IpAddr::from(std::net::Ipv4Addr::from(n)), start)
+                .unwrap();
+        }
+        assert_eq!(limit.clients(), 100_001);
+        // Still refilling: kept.
+        let soon = start + Duration::from_millis(1500);
+        limit.take("203.0.113.9".parse().unwrap(), soon).unwrap();
+        assert_eq!(limit.clients(), 100_002);
+        // Full again: forgotten when the next client comes.
+        let later = start + Duration::from_secs(3);
+        limit.take("203.0.113.10".parse().unwrap(), later).unwrap();
+        assert_eq!(limit.clients(), 2);
     }
 
     #[test]
