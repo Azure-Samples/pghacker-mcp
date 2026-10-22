@@ -379,11 +379,27 @@ fn failure(e: &tokio_postgres::Error, sql: &str) -> QueryResponse {
     }
 }
 
-/// PostgreSQL's error as psql prints it, or the driver's.
+/// PostgreSQL's error as psql prints it, or the driver's, cut at
+/// [`MAX_ERROR_CHARS`].
 fn describe_error(e: &tokio_postgres::Error, sql: &str) -> String {
-    match e.as_db_error() {
+    let message = match e.as_db_error() {
         Some(db) => format_db_error_psql(db, sql),
         None => format_executing_error(&e.to_string()),
+    };
+    cut_error(message)
+}
+
+/// The most characters of an error a caller gets: PostgreSQL's can quote a
+/// whole value, up to the largest message the connection takes.
+const MAX_ERROR_CHARS: usize = 16 * 1024;
+
+fn cut_error(message: String) -> String {
+    match message.char_indices().nth(MAX_ERROR_CHARS) {
+        Some((end, _)) => format!(
+            "{}\n(the error is cut at {MAX_ERROR_CHARS} characters)",
+            &message[..end]
+        ),
+        None => message,
     }
 }
 

@@ -401,6 +401,15 @@ async fn postgres_errors_read_as_psql_prints_them() {
     assert!(refused.contains("BEGIN"), "{refused}");
     let refused = failure(&tool, "SELECT 1; SELECT 2").await;
     assert!(refused.contains("2 statements"), "{refused}");
+    // An error that quotes a large value is cut.
+    let long = failure(&tool, "SELECT repeat('x', 100000)::int").await;
+    assert!(
+        long.starts_with("ERROR:  invalid input syntax for type integer: \"xxx"),
+        "{}",
+        &long[..100]
+    );
+    assert!(long.ends_with("\n(the error is cut at 16384 characters)"));
+    assert!(long.chars().count() < 16_500);
 }
 
 /// Ada Example authored two messages, in the graph as the indexer writes it.
