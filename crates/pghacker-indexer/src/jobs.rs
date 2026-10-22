@@ -287,26 +287,51 @@ pub async fn requeue_orphans(client: &impl GenericClient) -> Result<u64> {
         .await?)
 }
 
-/// Records a job's outcome, unless the job is no longer `node`'s to finish:
-/// another indexer requeued it.
+/// How a job's run ended, as [`finish`] records it: its outcome, or the
+/// error it failed with and whether it's tried again.
+enum Ending {
+    Done(Value),
+    Again { after: Duration, result: Value },
+    Failed { message: String, retry: bool },
+}
+
+impl Ending {
+    /// How `job`'s run ended, given what it returned. A failure is logged
+    /// here, once, however many tries recording it takes.
+    fn of(job: &Job, outcome: Result<Outcome>) -> Self {
+        match outcome {
+            Ok(Outcome::Done(result)) => Self::Done(result),
+            Ok(Outcome::Again { after, result }) => Self::Again { after, result },
+            Err(error) => {
+                let message = format!("{error:#}");
+                let retry = job.attempts < job.max_attempts;
+                tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, attempts = job.attempts, retry, error = %message, "a job failed");
+                Self::Failed { message, retry }
+            }
+        }
+    }
+}
+
+/// Records how a job's run ended, unless the job is no longer `node`'s to
+/// finish: false when it isn't. Trying again is safe ([`record`]).
 async fn finish(
     client: &impl GenericClient,
     node: &str,
     job: &Job,
-    outcome: Result<Outcome>,
-) -> Result<()> {
-    let recorded = match outcome {
-        Ok(Outcome::Done(result)) => {
+    ending: &Ending,
+) -> Result<bool> {
+    let recorded = match ending {
+        Ending::Done(result) => {
             client
                 .execute(
                     "UPDATE jobs SET state = 'done', result = $3, last_error = NULL, finished_at = now(),
                          locked_by = NULL, locked_at = NULL
                      WHERE id = $1 AND state = 'running' AND locked_by = $2",
-                    &[&job.id, &node, &result],
+                    &[&job.id, &node, result],
                 )
                 .await?
         }
-        Ok(Outcome::Again { after, result }) => {
+        Ending::Again { after, result } => {
             let seconds = after.as_secs_f64();
             client
                 .execute(
@@ -314,30 +339,88 @@ async fn finish(
                          run_after = now() + make_interval(secs => $4), finished_at = now(),
                          locked_by = NULL, locked_at = NULL
                      WHERE id = $1 AND state = 'running' AND locked_by = $2",
-                    &[&job.id, &node, &result, &seconds],
+                    &[&job.id, &node, result, &seconds],
                 )
                 .await?
         }
-        Err(error) => {
-            let message = format!("{error:#}");
-            let retry = job.attempts < job.max_attempts;
+        Ending::Failed { message, retry } => {
             let backoff = 30.0 * 2f64.powi(job.attempts.clamp(0, 8));
-            tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, attempts = job.attempts, retry, error = %message, "a job failed");
             client
                 .execute(
                     "UPDATE jobs SET state = CASE WHEN $4 THEN 'queued' ELSE 'failed' END,
                          last_error = $3, run_after = now() + make_interval(secs => $5),
                          finished_at = now(), locked_by = NULL, locked_at = NULL
                      WHERE id = $1 AND state = 'running' AND locked_by = $2",
-                    &[&job.id, &node, &message, &retry, &backoff],
+                    &[&job.id, &node, message, retry, &backoff],
                 )
                 .await?
         }
     };
-    if recorded == 0 {
-        tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, "a job's outcome isn't recorded: it was requeued while it ran");
+    Ok(recorded > 0)
+}
+
+/// How long a worker keeps trying to record how a job's run ended, by
+/// default (`Settings::record_for`).
+pub const RECORD_FOR: Duration = Duration::from_secs(30);
+
+/// The longest pause between two tries to record a job's outcome.
+const RECORD_PAUSE_MOST: Duration = Duration::from_secs(5);
+
+/// Records how `job`'s run ended ([`finish`]), and tries again while that
+/// fails, as when the database drops the pooled connection, for up to
+/// `settings.record_for`, pausing longer each time. The job stays `node`'s
+/// meanwhile: only a new leader requeues running jobs. Past that, this
+/// returns an error, and the workers must stop: the indexer then exits, and
+/// the next leader requeues the job. On `stop`, it gives up at once and
+/// leaves the job to the next start.
+async fn record(
+    indexer: &Indexer,
+    node: &str,
+    job: &Job,
+    ending: &Ending,
+    stop: &CancellationToken,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + indexer.settings.record_for;
+    let mut pause = Duration::from_millis(500);
+    let mut tries = 0u32;
+    loop {
+        tries += 1;
+        let tried = match indexer.pool.get().await {
+            Ok(client) => finish(&**client, node, job, ending).await,
+            Err(error) => Err(error.into()),
+        };
+        let error = match tried {
+            Ok(true) => return Ok(()),
+            Ok(false) if tries == 1 => {
+                tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, "a job's outcome isn't recorded: it was requeued while it ran");
+                return Ok(());
+            }
+            Ok(false) => {
+                tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, tries, "a job's outcome isn't recorded: it was requeued while it ran, or a try that seemed to fail recorded it");
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return Err(error.context(format!(
+                "cannot record the outcome of job {} ({} {}) in {} s",
+                job.id,
+                job.kind,
+                job.key,
+                indexer.settings.record_for.as_secs()
+            )));
+        }
+        tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, tries, error = %format!("{error:#}"), "cannot record a job's outcome; trying again");
+        tokio::select! {
+            () = stop.cancelled() => {
+                tracing::warn!(job = job.id, kind = %job.kind, key = %job.key, "stopping without recording a job's outcome: the next start requeues it");
+                return Ok(());
+            }
+            () = tokio::time::sleep(pause.min(left)) => {}
+        }
+        pause = (pause * 2).min(RECORD_PAUSE_MOST);
     }
-    Ok(())
 }
 
 /// Runs one job's handler.
@@ -561,7 +644,9 @@ async fn after_ingest(indexer: &Indexer) -> Result<()> {
 }
 
 /// Runs `workers` workers until `shutdown` is cancelled; each finishes its
-/// current job first. Each worker claims the jobs of its [`lane`].
+/// current job first. Each worker claims the jobs of its [`lane`]. They stop
+/// sooner, with an error, when one can't record a job's outcome within
+/// `settings.record_for` ([`RECORD_FOR`]).
 pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) -> Result<()> {
     run_workers(indexer, workers, shutdown, CancellationToken::new()).await
 }
@@ -573,9 +658,11 @@ pub async fn run(indexer: Indexer, workers: usize, shutdown: CancellationToken) 
 /// connection is lost, the lock went with it, and another indexer may
 /// requeue the jobs running here and run them again: the workers stop at
 /// once, dropping their jobs without recording an outcome, and this returns
-/// an error. The process must then exit, which also stops what the jobs
-/// started outside the runtime's control, such as a blocking git fetch; its
-/// supervisor starts it again, to wait for the lead.
+/// an error. It returns one too when a worker can't record a job's outcome
+/// ([`run`]), as the workers then stop the same way. The process must then
+/// exit, which also stops what the jobs started outside the runtime's
+/// control, such as a blocking git fetch; its supervisor starts it again, to
+/// wait for the lead, and the next leader requeues the jobs left running.
 pub async fn run_leading(
     indexer: Indexer,
     workers: usize,
@@ -639,7 +726,9 @@ async fn wait_for_orphans(indexer: &Indexer, stop: &CancellationToken) -> Result
 }
 
 /// Runs the workers until `stop`, which lets each finish its job, or
-/// `abort`, which drops it.
+/// `abort`, which drops it. When a worker can't record a job's outcome
+/// ([`record`]), they all stop at once, dropping their jobs, and this
+/// returns its error.
 async fn run_workers(
     indexer: Indexer,
     workers: usize,
@@ -671,25 +760,38 @@ async fn run_workers(
         std::process::id(),
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
+    // Cancelled by `abort`, or by a worker that can't record a job's outcome.
+    let halt = abort.child_token();
     let mut handles = Vec::new();
     for worker in 0..workers {
         let indexer = indexer.clone();
-        let (stop, abort) = (stop.clone(), abort.clone());
+        let (stop, halt) = (stop.clone(), halt.clone());
         let node = format!("{node}/{worker}");
         let kinds = lane(worker, workers);
         handles.push(tokio::spawn(async move {
             while !stop.is_cancelled() {
                 tokio::select! {
-                    () = abort.cancelled() => break,
-                    () = work(&indexer, &node, kinds, &stop) => {}
+                    () = halt.cancelled() => break,
+                    worked = work(&indexer, &node, kinds, &stop) => {
+                        if let Err(error) = worked {
+                            halt.cancel();
+                            return Err(error);
+                        }
+                    }
                 }
             }
+            Ok(())
         }));
     }
+    let mut stopped = Ok(());
     for handle in handles {
-        handle.await?;
+        if let Err(error) = handle.await?
+            && stopped.is_ok()
+        {
+            stopped = Err(error);
+        }
     }
-    Ok(())
+    stopped
 }
 
 const RECURRING_KINDS: &[&str] = &[
@@ -712,13 +814,14 @@ pub fn lane(worker: usize, workers: usize) -> Option<&'static [&'static str]> {
     (worker == 0 && workers > 1).then_some(RECURRING_KINDS)
 }
 
-/// Claims and runs one job, or waits a moment when none is due.
+/// Claims and runs one job, or waits a moment when none is due. An error
+/// means the job's outcome couldn't be recorded ([`record`]).
 async fn work(
     indexer: &Indexer,
     node: &str,
     kinds: Option<&'static [&'static str]>,
     stop: &CancellationToken,
-) {
+) -> Result<()> {
     let claimed = match indexer.pool.get().await {
         Ok(client) => claim(&**client, node, kinds).await,
         Err(error) => Err(error.into()),
@@ -726,15 +829,9 @@ async fn work(
     match claimed {
         Ok(Some(job)) => {
             let started = std::time::Instant::now();
-            let outcome = execute(indexer, &job).await;
-            let ok = outcome.is_ok();
-            let finished = match indexer.pool.get().await {
-                Ok(client) => finish(&**client, node, &job, outcome).await,
-                Err(error) => Err(error.into()),
-            };
-            if let Err(error) = finished {
-                tracing::error!(job = job.id, error = %format!("{error:#}"), "cannot record a job's outcome");
-            }
+            let ending = Ending::of(&job, execute(indexer, &job).await);
+            let ok = !matches!(ending, Ending::Failed { .. });
+            record(indexer, node, &job, &ending, stop).await?;
             if !matches!(
                 job.kind.as_str(),
                 kind::EMBED
@@ -762,4 +859,5 @@ async fn work(
             }
         }
     }
+    Ok(())
 }

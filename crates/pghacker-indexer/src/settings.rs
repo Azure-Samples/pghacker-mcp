@@ -56,6 +56,10 @@ pub struct Settings {
     /// How often a full graph sync reconciles the graph with the tables:
     /// `PGHACKER_GRAPH_RECONCILE_HOURS`, 168 by default; 0 never does.
     pub graph_reconcile_every: Option<Duration>,
+    /// How long a worker keeps trying to record a job's outcome while the
+    /// database fails, before the workers stop and the indexer exits, for
+    /// the next leader to requeue the job: [`crate::jobs::RECORD_FOR`].
+    pub record_for: Duration,
 }
 
 impl Settings {
@@ -108,6 +112,7 @@ impl Settings {
                 0 => None,
                 hours => Some(Duration::from_secs(hours * 3600)),
             },
+            record_for: crate::jobs::RECORD_FOR,
         })
     }
 }

@@ -35,6 +35,11 @@ INSERT INTO anchors (message_id, kind, value, origin) VALUES
 "#;
 
 async fn indexer(db: &TestDb) -> Indexer {
+    indexer_with(db, |_| {}).await
+}
+
+/// An indexer on `db` whose settings `adjust` changes first.
+async fn indexer_with(db: &TestDb, adjust: impl FnOnce(&mut Settings)) -> Indexer {
     let root = pghacker_core::config::repo_root().unwrap();
     let cache = tempfile::tempdir().unwrap().keep();
     let env = Env::from_pairs([("PGHACKER_INDEXER_DATABASE_URL", db.indexer_url.as_str())]);
@@ -42,6 +47,7 @@ async fn indexer(db: &TestDb) -> Indexer {
     settings.slices_path = root.join("config/test-slices.toml");
     settings.cache_dir = cache.clone();
     settings.git_dir = cache;
+    adjust(&mut settings);
     Indexer::new(settings, &env).unwrap()
 }
 
@@ -1550,6 +1556,174 @@ async fn a_new_leader_waits_before_requeueing_running_jobs() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+/// Waits until the recurring jobs have run once and no job runs or is due
+/// in the next 15 s, so that the workers claim only the jobs a test queues.
+async fn settle(client: &tokio_postgres::Client) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let settled: bool = client
+            .query_one(
+                "SELECT count(*) FILTER (WHERE key = 'recurring' AND finished_at IS NOT NULL) = $1
+                    AND count(*) FILTER (WHERE state = 'running'
+                        OR (state = 'queued' AND run_after < now() + interval '15 seconds')) = 0
+                 FROM jobs",
+                &[&(jobs::RECURRING.len() as i64)],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if settled {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the recurring jobs didn't settle"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Lets pgh_indexer claim jobs but not record their outcomes: it may update
+/// only the columns a claim sets. False gives it the whole table again.
+async fn block_outcomes(db: &TestDb, blocked: bool) {
+    let sql = if blocked {
+        "REVOKE UPDATE ON pghacker.jobs FROM pgh_indexer;
+         GRANT UPDATE (state, locked_by, locked_at, attempts) ON pghacker.jobs TO pgh_indexer"
+    } else {
+        "GRANT UPDATE ON pghacker.jobs TO pgh_indexer"
+    };
+    db.admin().await.unwrap().batch_execute(sql).await.unwrap();
+}
+
+/// Queues job `blocked`, whose unknown kind fails it as soon as it runs. A
+/// plain insert: `jobs::enqueue` updates on conflict, which the block denies.
+async fn queue_failing_job(client: &tokio_postgres::Client) {
+    client
+        .execute(
+            "INSERT INTO jobs (kind, key, priority) VALUES ('test', 'blocked', 100)",
+            &[],
+        )
+        .await
+        .unwrap();
+}
+
+/// The state of the job with `key`, once it's no longer `not`, within `wait`.
+async fn state_once_not(
+    client: &tokio_postgres::Client,
+    key: &str,
+    not: &str,
+    wait: std::time::Duration,
+) -> String {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + wait;
+    loop {
+        let state: String = client
+            .query_one("SELECT state FROM jobs WHERE key = $1", &[&key])
+            .await
+            .unwrap()
+            .get(0);
+        if state != not || Instant::now() >= deadline {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_jobs_outcome_is_recorded_once_the_database_takes_it_again() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer(&db).await;
+    let client = db.indexer().await.unwrap();
+    let shutdown = CancellationToken::new();
+    let leader = jobs::lead(&db.indexer_url, &shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = tokio::spawn(jobs::run_leading(indexer, 2, leader, shutdown.clone()));
+    settle(&client).await;
+
+    // The job fails at once, as its kind is unknown, but its outcome can't
+    // be recorded: it stays running, and the workers keep trying.
+    block_outcomes(&db, true).await;
+    queue_failing_job(&client).await;
+    let state = state_once_not(&client, "blocked", "queued", Duration::from_secs(10)).await;
+    assert_eq!(state, "running", "a worker claims the job");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let state = state_once_not(&client, "blocked", "running", Duration::ZERO).await;
+    assert_eq!(state, "running", "its outcome can't be recorded yet");
+    assert!(!running.is_finished(), "the workers keep trying");
+
+    // The database takes it again: the next try records the failure.
+    block_outcomes(&db, false).await;
+    let state = state_once_not(&client, "blocked", "running", Duration::from_secs(15)).await;
+    assert_eq!(
+        state, "queued",
+        "the failure is recorded, to be tried again"
+    );
+    let row = client
+        .query_one(
+            "SELECT last_error, locked_by FROM jobs WHERE key = 'blocked'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(
+        row.get::<_, Option<String>>(0)
+            .unwrap()
+            .contains("unknown job kind test")
+    );
+    assert_eq!(row.get::<_, Option<String>>(1), None);
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_workers_stop_when_an_outcome_cannot_be_recorded() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    let db = TestDb::create().await.unwrap();
+    let indexer = indexer_with(&db, |settings| {
+        settings.record_for = Duration::from_secs(2);
+    })
+    .await;
+    assert!(jobs::RECORD_FOR >= Duration::from_secs(10));
+    let client = db.indexer().await.unwrap();
+    let shutdown = CancellationToken::new();
+    let leader = jobs::lead(&db.indexer_url, &shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = tokio::spawn(jobs::run_leading(indexer, 2, leader, shutdown.clone()));
+    settle(&client).await;
+
+    block_outcomes(&db, true).await;
+    queue_failing_job(&client).await;
+    // Past record_for, the workers stop, with an error that says why, for
+    // the indexer to exit.
+    let stopped = tokio::time::timeout(Duration::from_secs(20), running)
+        .await
+        .expect("the workers didn't stop")
+        .unwrap();
+    let error = format!("{:#}", stopped.unwrap_err());
+    assert!(
+        error.contains("cannot record the outcome of job") && error.contains("permission denied"),
+        "{error}"
+    );
+    // The job is left running, for the next leader to requeue.
+    let state = state_once_not(&client, "blocked", "running", Duration::ZERO).await;
+    assert_eq!(state, "running");
+    block_outcomes(&db, false).await;
+    assert_eq!(jobs::requeue_orphans(&client).await.unwrap(), 1);
 }
 
 #[tokio::test]
