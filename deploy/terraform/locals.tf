@@ -144,6 +144,7 @@ locals {
       PGHACKER_FRONT_DOOR_ID            = azurerm_cdn_frontdoor_profile.this.resource_guid
       PGHACKER_RATE_PER_MINUTE          = tostring(var.mcp_rate_per_minute)
       PGHACKER_RATE_BURST               = tostring(var.mcp_rate_burst)
+      PGHACKER_MCP_CALLS_PER_CLIENT     = tostring(var.mcp_calls_per_client)
       PGHACKER_INTERNAL_RATE_PER_MINUTE = tostring(var.mcp_internal_rate_per_minute)
       PGHACKER_INTERNAL_RATE_BURST      = tostring(var.mcp_internal_rate_burst)
       PGHACKER_MCP_POOL                 = tostring(var.mcp_pool_size)

@@ -552,6 +552,17 @@ variable "mcp_rate_burst" {
   }
 }
 
+variable "mcp_calls_per_client" {
+  description = "Calls a client address may run at once on the public MCP endpoint (PGHACKER_MCP_CALLS_PER_CLIENT); it answers more at once 429. The endpoint runs at most twice mcp_pool_size and mcp_query_pool_size together in all, whatever this allows."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.mcp_calls_per_client >= 1 && var.mcp_calls_per_client <= 1000 && floor(var.mcp_calls_per_client) == var.mcp_calls_per_client
+    error_message = "mcp_calls_per_client must be a whole number from 1 to 1000."
+  }
+}
+
 variable "mcp_internal_rate_per_minute" {
   description = "Requests per minute that the deployment's agents may make to pghacker-mcp's internal listener, all of them together: they connect from one address (PGHACKER_INTERNAL_RATE_PER_MINUTE)."
   type        = number
@@ -719,6 +730,7 @@ variable "app_env" {
       "PGHACKER_GITHUB_USERS",
       "PGHACKER_INTERNAL_RATE_BURST",
       "PGHACKER_INTERNAL_RATE_PER_MINUTE",
+      "PGHACKER_MCP_CALLS_PER_CLIENT",
       "PGHACKER_PORTAL_ROLE",
       "PGHACKER_PORTAL_URL",
       "PGHACKER_PRIVACY_URL",
@@ -729,7 +741,7 @@ variable "app_env" {
       "PGHACKER_USAGE_DETAILS",
       "PGHACKER_USAGE_ID_KEY",
     ])) == 0
-    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate-limit, crawl, home page footer, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
+    error_message = "app_env can't set the variables this configuration derives (the database, Foundry, Front Door, GitHub sign-in, rate and call limit, crawl, home page footer, usage telemetry and feedback settings, and the secrets) or oauth2-proxy's OAUTH2_PROXY_* settings; use the matching variables instead."
   }
 }
 

@@ -159,6 +159,14 @@ test("agents reach the indexer and pghacker-mcp's internal listener by their Ser
   assert.equal(mcp.PGHACKER_CLIENT_IP_HEADER, "x-azure-socketip");
   assert.equal(mcp.PGHACKER_FRONT_DOOR_ID, SETTINGS.PGHACKER_FRONT_DOOR_ID);
   assert.equal(mcp.PGHACKER_RATE_PER_MINUTE, "60");
+  // A client's calls at once on the public listener: pghacker-mcp's default
+  // unless Terraform sets mcp_calls_per_client.
+  assert.equal(mcp.PGHACKER_MCP_CALLS_PER_CLIENT, "10");
+  assert.equal(flats({ ...SETTINGS, PGHACKER_MCP_CALLS_PER_CLIENT: "20" }).mcp.PGHACKER_MCP_CALLS_PER_CLIENT, "20");
+  for (const calls of ["0", "2.5", "1001"]) {
+    assert.throws(() => readAzureConfig({ ...ENV, PGHACKER_MCP_CALLS_PER_CLIENT: calls }), /PGHACKER_MCP_CALLS_PER_CLIENT/);
+  }
+  assert.equal(worker.PGHACKER_MCP_CALLS_PER_CLIENT, undefined);
   // The agents' listener has a limit of its own, which they share.
   assert.equal(mcp.PGHACKER_INTERNAL_RATE_PER_MINUTE, "300");
   assert.equal(mcp.PGHACKER_INTERNAL_RATE_BURST, "60");

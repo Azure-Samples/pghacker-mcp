@@ -311,6 +311,8 @@ export function readAzureConfig(env = process.env, { serve = true, secrets = tru
       perMinute: integer(env, "PGHACKER_RATE_PER_MINUTE", 60),
       burst: integer(env, "PGHACKER_RATE_BURST", 30),
     },
+    // The calls a client address may run at once on the public listener.
+    callsPerClient: integer(env, "PGHACKER_MCP_CALLS_PER_CLIENT", 10, { max: 1000 }),
     // The internal listener's, which the agents share: they all connect from
     // one address.
     internalRate: {
@@ -652,6 +654,7 @@ export function componentEnvironments(config, { namespace, revision }) {
         PGHACKER_CLIENT_IP_HEADER: "x-azure-socketip",
         PGHACKER_RATE_PER_MINUTE: String(config.rate.perMinute),
         PGHACKER_RATE_BURST: String(config.rate.burst),
+        PGHACKER_MCP_CALLS_PER_CLIENT: String(config.callsPerClient),
         PGHACKER_INTERNAL_RATE_PER_MINUTE: String(config.internalRate.perMinute),
         PGHACKER_INTERNAL_RATE_BURST: String(config.internalRate.burst),
         PGHACKER_MCP_POOL: String(config.pools.mcp),

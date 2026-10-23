@@ -81,6 +81,8 @@ front_door_endpoint_name = "pghacker-example"
 front_door_custom_domain = null
 mcp_rate_per_minute      = 60
 mcp_rate_burst           = 30
+# The calls a client address may run at once there; more at once get 429.
+mcp_calls_per_client = 10
 # The agents' own limit on pghacker-mcp's internal listener, which they share.
 mcp_internal_rate_per_minute = 300
 mcp_internal_rate_burst      = 60

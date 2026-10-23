@@ -601,7 +601,8 @@ run "kubernetes_output" {
       "PGHACKER_DEPLOYMENT", "PGHACKER_DB_HOST", "PGHACKER_DB_PORT", "PGHACKER_DB_NAME", "PGHACKER_DB_SSLMODE", "PGHACKER_DB_ADMIN_USER",
       "PGHACKER_FOUNDRY_ENDPOINT", "PGHACKER_FOUNDRY_SOL", "PGHACKER_FOUNDRY_LUNA", "PGHACKER_FOUNDRY_EMBEDDING",
       "PGHACKER_PUBLIC_URL", "PGHACKER_PORTAL_URL", "PGHACKER_PUBLIC_HOSTS", "PGHACKER_FRONT_DOOR_ID",
-      "PGHACKER_RATE_PER_MINUTE", "PGHACKER_RATE_BURST", "PGHACKER_INTERNAL_RATE_PER_MINUTE", "PGHACKER_INTERNAL_RATE_BURST",
+      "PGHACKER_RATE_PER_MINUTE", "PGHACKER_RATE_BURST", "PGHACKER_MCP_CALLS_PER_CLIENT",
+      "PGHACKER_INTERNAL_RATE_PER_MINUTE", "PGHACKER_INTERNAL_RATE_BURST",
       "PGHACKER_MCP_POOL", "PGHACKER_QUERY_POOL", "PGHACKER_CRAWL_START_SESSIONS", "PGHACKER_CRAWL_MAX_SESSIONS",
       "PGHACKER_GITHUB_ORG", "PGHACKER_GITHUB_TEAM", "PGHACKER_PORTAL_ROLE",
       "APPLICATIONINSIGHTS_CONNECTION_STRING", "PGHACKER_USAGE_DETAILS",
@@ -625,6 +626,7 @@ run "kubernetes_output" {
       && output.kubernetes.app_settings.PGHACKER_FRONT_DOOR_ID == "4f6f1d1e-8b3a-4c55-9a7e-0b5d2c9e7a11"
       && output.kubernetes.app_settings.PGHACKER_RATE_PER_MINUTE == "60"
       && output.kubernetes.app_settings.PGHACKER_RATE_BURST == "30"
+      && output.kubernetes.app_settings.PGHACKER_MCP_CALLS_PER_CLIENT == "10"
       && output.kubernetes.app_settings.PGHACKER_INTERNAL_RATE_PER_MINUTE == "300"
       && output.kubernetes.app_settings.PGHACKER_INTERNAL_RATE_BURST == "60"
       && output.kubernetes.app_settings.PGHACKER_MCP_POOL == "16"
@@ -869,6 +871,49 @@ run "mcp_pools_sized_to_the_database_plan" {
     condition     = local.app_settings.PGHACKER_MCP_POOL == "64" && local.app_settings.PGHACKER_QUERY_POOL == "16"
     error_message = "The app's settings should hold the pool sizes."
   }
+}
+
+run "a_clients_calls_at_once_reach_the_settings" {
+  command = plan
+
+  variables {
+    mcp_calls_per_client = 20
+  }
+
+  assert {
+    condition     = local.app_settings.PGHACKER_MCP_CALLS_PER_CLIENT == "20"
+    error_message = "The app's settings should hold the calls a client may run at once on the public endpoint."
+  }
+}
+
+run "a_client_runs_at_least_one_call_at_once" {
+  command = plan
+
+  variables {
+    mcp_calls_per_client = 0
+  }
+
+  expect_failures = [var.mcp_calls_per_client]
+}
+
+run "a_clients_calls_at_once_are_whole" {
+  command = plan
+
+  variables {
+    mcp_calls_per_client = 2.5
+  }
+
+  expect_failures = [var.mcp_calls_per_client]
+}
+
+run "app_env_cannot_lift_a_clients_calls_at_once" {
+  command = plan
+
+  variables {
+    app_env = { PGHACKER_MCP_CALLS_PER_CLIENT = "1000" }
+  }
+
+  expect_failures = [var.app_env]
 }
 
 run "the_agents_rate_limit_reaches_the_settings" {

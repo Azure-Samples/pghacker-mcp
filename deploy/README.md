@@ -562,6 +562,7 @@ Without `--skill`, the agents, which don't declare the skills extension, must fi
 - **Limits.**
   - The worker has 2 vCPU and 6 GiB, and up to 8 GiB (`deploy/k8s/worker.yaml`), on a `swarm_pool` node of its own; each session runs a Copilot CLI process, and the scheduler holds back above 85% of the worker's memory. For more sessions, give `swarm_pool` a larger `vm_size` and raise the worker's limit.
   - HorizonDB has `horizondb_vcores` vCores per replica (4 by default).
+  - A client address may run `mcp_calls_per_client` calls at once on the public endpoint (10 by default), up to twice the pools' connections (`mcp_pool_size` and `mcp_query_pool_size`) across all clients. More at once get 429 with Retry-After.
   - The agents share pghacker-mcp's internal listener's rate limit, `mcp_internal_rate_per_minute` and `mcp_internal_rate_burst` (300 a minute, in bursts of 60): they all connect from the worker's pod. A call over it gets 429 with Retry-After, and usage telemetry records `McpRateLimited` on the `internal` endpoint, at most once a minute.
   - Extraction's pace is bounded by `gpt-6-luna`'s capacity in `foundry_deployments`, within the subscription's quota for the region.
   - The indexer's ephemeral disk, on its node, holds the commit history's clone (about 850 MB, once a history is installed) and no mbox files.
