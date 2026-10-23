@@ -171,8 +171,10 @@ resource "azurerm_kubernetes_cluster" "this" {
   }
 
   lifecycle {
-    # The autoscaler sets the system pool's size.
-    ignore_changes = [default_node_pool[0].node_count]
+    # The autoscaler sets the system pool's size. An Azure Policy assignment
+    # may install the Azure Policy add-on (deployIfNotExists): it's left as
+    # found, rather than removed by every apply and installed again.
+    ignore_changes = [default_node_pool[0].node_count, azure_policy_enabled]
   }
 
   # The nodes need their way out, through the firewall, before they start,
