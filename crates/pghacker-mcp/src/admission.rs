@@ -7,8 +7,8 @@
 //! its turn and is then answered 503. A request is admitted before its call
 //! runs, so before the call embeds a query or takes a connection: a client
 //! within its rate can't hold every connection of the pool, nor every
-//! socket to the embeddings service, and the agents' listener, which shares
-//! the pool, keeps the connections the limit leaves.
+//! socket to the embeddings service. Calls past the connections wait for
+//! one, as the agents' calls do.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

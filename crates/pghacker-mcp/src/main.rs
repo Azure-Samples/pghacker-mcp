@@ -11,12 +11,14 @@
 //! question starts, whether the last answer helped
 //! (`pghacker_core::feedback`).
 //!
-//! Under load, the public listener runs a few calls at once per client
-//! (PGHACKER_MCP_CALLS_PER_CLIENT) and so many in all (PGHACKER_MCP_CALLS),
-//! leaving the agents' listener the rest of the pool. A tool call waits a
-//! bounded time for a connection (PGHACKER_MCP_POOL_WAIT_SECONDS) and runs to
-//! a deadline (PGHACKER_MCP_CALL_TIMEOUT_SECONDS); one whose client goes away
-//! is abandoned. Either way its statements are cancelled.
+//! Under load, the public listener limits the calls it runs at once, per
+//! client (PGHACKER_MCP_CALLS_PER_CLIENT) and in all (PGHACKER_MCP_CALLS): by
+//! default twice the connections of the pools, which both listeners share.
+//! A tool call waits a bounded time for a connection
+//! (PGHACKER_MCP_POOL_WAIT_SECONDS), so the calls past the connections keep
+//! them busy, and runs to a deadline (PGHACKER_MCP_CALL_TIMEOUT_SECONDS); one
+//! whose client goes away is abandoned. Either way its statements are
+//! cancelled.
 
 mod admission;
 mod ratelimit;
@@ -54,7 +56,7 @@ const POOL_WAIT_SECONDS: u64 = 10;
 const MAX_POOLED: usize = 128;
 
 /// The calls a client may run at once on the public listener, by default.
-const CALLS_PER_CLIENT: usize = 4;
+const CALLS_PER_CLIENT: usize = 10;
 
 /// A tool call's deadline, by default: past code search's 15-second budget
 /// and query's own 20-second deadline, so that those report their own
@@ -96,15 +98,9 @@ async fn run() -> Result<()> {
         pool_size >= 1 && query_pool_size >= 1 && pool_size + query_pool_size <= MAX_POOLED,
         "PGHACKER_MCP_POOL and PGHACKER_QUERY_POOL must each be at least 1, and at most {MAX_POOLED} in all"
     );
-    // With the agents' listener, the public one leaves it a quarter of the
-    // pool, by default.
-    let calls = env.parse_or(
-        "PGHACKER_MCP_CALLS",
-        match internal_addr {
-            Some(_) => (pool_size * 3 / 4).max(1),
-            None => pool_size,
-        },
-    )?;
+    // A connection serves one call at a time, and a call waits for one, so
+    // twice as many calls as connections, by default, keep them all busy.
+    let calls = env.parse_or("PGHACKER_MCP_CALLS", 2 * (pool_size + query_pool_size))?;
     let calls_per_client = env.parse_or("PGHACKER_MCP_CALLS_PER_CLIENT", CALLS_PER_CLIENT)?;
     ensure!(calls > 0, "PGHACKER_MCP_CALLS must be at least 1");
     ensure!(
