@@ -19,9 +19,11 @@ import { psql, psqlJson, run, verifiedUrl } from "./lib/psql.mjs";
 // It bootstraps and migrates the database, checks that its migrations and
 // embedding model are the corpus's, refuses a database that has a corpus
 // (unless --replace, which empties it and the graph), loads the rows as
-// pgh_indexer with the foreign keys dropped, adds them back, releases
-// leases and running jobs, analyzes, checks every table's row count, and
-// asks for a full graph sync, which rebuilds the graph when the app runs.
+// pgh_indexer with the foreign keys dropped and the tables' triggers off,
+// adds them back, releases leases and running jobs, analyzes, checks every
+// table's row count, and asks for a full graph sync, which rebuilds the graph
+// when the app runs. A failed load is emptied again, with the foreign keys
+// back, so that the restore can run again.
 const { values: options } = parseArgs({
   options: {
     seed: { type: "string", default: "/seed" },
@@ -83,20 +85,39 @@ try {
     DELETE FROM pghacker_graph._ag_label_vertex;
     COMMIT;`);
 
-  log(`Dropping ${keys.length} foreign keys for the load.`);
+  // The tables' triggers capture graph changes, which the full sync asked for
+  // below supersedes. Left on, they would add a change for every row loaded,
+  // and a parallel load runs the dump's setval of graph_changes_id_seq among
+  // the tables' data, rewinding the sequence onto IDs already taken.
+  const triggers = (action) => `BEGIN; ${tables.map((table) => `ALTER TABLE ${table} ${action} TRIGGER USER;`).join(" ")} COMMIT;`;
+  log(`Dropping ${keys.length} foreign keys, and turning off the tables' triggers, for the load.`);
   await psql(urls.indexer, scripts.drop);
-  log(`Loading ${(manifest.dump.bytes / 1e6).toFixed(1)} MB with ${options.jobs} connections.`);
-  const restore = await run("pg_restore", [
-    "--data-only", "--no-owner", "--no-privileges", "--exit-on-error", `--jobs=${Number(options.jobs) || 4}`,
-    `--dbname=${verifiedUrl(urls.indexer)}`, dumpFile,
-  ]);
-  if (restore.code !== 0) {
-    throw new Error(`pg_restore failed: ${restore.stderr.trim().slice(-2000)}. The foreign keys are still dropped: rerun with --replace.`);
+  await psql(urls.indexer, triggers("DISABLE"));
+  try {
+    log(`Loading ${(manifest.dump.bytes / 1e6).toFixed(1)} MB with ${options.jobs} connections.`);
+    const restore = await run("pg_restore", [
+      "--data-only", "--no-owner", "--no-privileges", "--exit-on-error", `--jobs=${Number(options.jobs) || 4}`,
+      `--dbname=${verifiedUrl(urls.indexer)}`, dumpFile,
+    ]);
+    if (restore.code !== 0) throw new Error(`pg_restore failed: ${restore.stderr.trim().slice(-2000)}`);
+    log("Adding the foreign keys back.");
+    await psql(urls.indexer, scripts.add);
+  } catch (error) {
+    // The foreign keys are read from the database: without them, a second
+    // restore couldn't add them back.
+    log("Emptying the tables and adding the foreign keys back, so that the restore can run again.");
+    try {
+      await psql(urls.indexer, `TRUNCATE ${tables.join(", ")} CASCADE;`);
+      await psql(urls.indexer, scripts.add);
+    } catch (cleanup) {
+      throw new Error(`${error.message}. Emptying the tables and adding the foreign keys back failed too, so recreate the database: ${cleanup.message}`);
+    }
+    throw new Error(`${error.message}. The tables were emptied, with their foreign keys back: run the restore again.`);
+  } finally {
+    await psql(urls.indexer, triggers("ENABLE"));
   }
-  log("Adding the foreign keys back.");
-  await psql(urls.indexer, scripts.add);
 
-  // The load's rows were captured as graph changes; a full sync covers them.
+  // The triggers didn't capture the load's rows; a full sync covers them.
   log("Releasing leases and running jobs, and asking for a full graph sync.");
   await psql(urls.indexer, `BEGIN;
     TRUNCATE pghacker.graph_changes;
