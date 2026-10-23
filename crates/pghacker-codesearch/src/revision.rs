@@ -67,12 +67,12 @@ pub const ROOTS: [&str; 3] = ["commit", "branch", "tag"];
 /// `/branch/REL_17_STABLE/src`.
 pub fn mount_of(raw: &str) -> Option<(String, String)> {
     let rest = raw.trim().strip_prefix('/')?;
-    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let mut parts = lexical_components(rest)?.into_iter();
     let root = parts.next()?;
-    if !ROOTS.contains(&root) {
+    if !ROOTS.contains(&root.as_str()) {
         return None;
     }
-    Some((root.to_owned(), parts.next()?.to_owned()))
+    Some((root, parts.next()?))
 }
 
 /// Whether a tool path is a virtual root without a commit: `/commit`.
@@ -105,6 +105,8 @@ pub struct FileTable {
     top: HashSet<String>,
     /// The path prefixes the history keeps; empty means the whole tree.
     pub loaded_paths: Vec<String>,
+    /// The revisions mounted under `~v/<root>/<name>`.
+    mounts: HashMap<(String, String), Revision>,
 }
 
 impl FileTable {
@@ -126,6 +128,7 @@ impl FileTable {
             return Ok(base);
         }
         let mut files = base.files.clone();
+        let mut mounted_revs = HashMap::new();
         for (root, name) in mounts {
             let mounted =
                 match crate::rev::resolve_mount(client, &h.schema, &revision.repo, &root, &name)
@@ -142,8 +145,33 @@ impl FileTable {
                 path: format!("{MOUNTS}/{root}/{name}/{}", f.path),
                 ..f.clone()
             }));
+            mounted_revs.insert((root, name), mounted);
         }
-        Ok(Arc::new(FileTable::new(files, base.loaded_paths.clone())))
+        let mut view = FileTable::new(files, base.loaded_paths.clone());
+        view.mounts = mounted_revs;
+        Ok(Arc::new(view))
+    }
+
+    /// The revision a normalized table path reads: its mount's, or `default`
+    /// for the commit's own tree.
+    pub fn revision<'a>(&'a self, default: &'a Revision, path: &str) -> &'a Revision {
+        mount_of(&shown(path))
+            .and_then(|m| self.mounts.get(&m))
+            .unwrap_or(default)
+    }
+
+    /// The revision `paths` read when they all name the same mount, or
+    /// `default` when they read the commit's own tree or more than one tree.
+    pub fn scope_revision<'a>(&'a self, default: &'a Revision, paths: &[String]) -> &'a Revision {
+        let mut iter = paths.iter().filter(|p| !p.trim().is_empty());
+        let Some(first) = iter.next().and_then(|p| mount_of(p)) else {
+            return default;
+        };
+        if iter.all(|p| mount_of(p).as_ref() == Some(&first)) {
+            self.mounts.get(&first).unwrap_or(default)
+        } else {
+            default
+        }
     }
 }
 
@@ -219,6 +247,7 @@ impl FileTable {
             dirs,
             top,
             loaded_paths,
+            mounts: HashMap::new(),
         }
     }
 
@@ -413,6 +442,11 @@ mod tests {
             mount_of("/tag/REL_16_0/x"),
             Some(("tag".into(), "REL_16_0".into()))
         );
+        assert_eq!(
+            mount_of("/tag/REL_16_0/../REL_17_0/x"),
+            Some(("tag".into(), "REL_17_0".into()))
+        );
+        assert_eq!(mount_of("/tag/REL_16_0/.."), None);
         assert_eq!(mount_of("/branch"), None);
         assert_eq!(mount_of("/src/branch/x"), None);
         assert!(bare_root("/commit/") && !bare_root("/commit/abc"));

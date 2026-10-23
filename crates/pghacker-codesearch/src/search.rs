@@ -704,13 +704,15 @@ async fn search_inner(
         return crate::history_search::search(client, revision, args, &patterns, budget).await;
     }
     let table = FileTable::view(client, revision, &args.paths.to_vec()).await?;
+    let paths = args.paths.to_vec();
     let (files, whole) = search_scope(
         &table,
         &revision.repo,
-        &args.paths.to_vec(),
+        &paths,
         &args.include.to_vec(),
         &args.exclude.to_vec(),
     )?;
+    let revision = table.scope_revision(revision, &paths);
     if plan.every_line && plan.also.is_empty() && args.group_by == GroupBy::File {
         let scope = Scope {
             table: &table,

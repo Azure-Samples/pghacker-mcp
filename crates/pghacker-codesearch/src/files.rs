@@ -170,6 +170,7 @@ pub async fn read_file(
     let Some(k) = table.file(&path) else {
         bail!("{} is a folder: use list_files", args.path);
     };
+    let revision = table.revision(revision, &path);
     let file = &table.files[k];
     if file.is_binary {
         bail!("{path} is not a text file: it has no lines");
@@ -256,6 +257,7 @@ pub async fn list_files(
                 not_found(&table, raw, normalized.as_deref())
             })?
     };
+    let revision = table.revision(revision, &base);
     let limit = args
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)

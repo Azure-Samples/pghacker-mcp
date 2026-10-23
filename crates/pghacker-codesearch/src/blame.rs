@@ -270,9 +270,6 @@ pub async fn blame(
     revision: &Revision,
     args: &BlameArgs,
 ) -> Result<BlameResult> {
-    let h = &revision.history;
-    let s = checked(&h.schema)?;
-    let mount = mount_of(&args.path);
     let table = FileTable::view(client, revision, std::slice::from_ref(&args.path)).await?;
     let path = table
         .normalize(&revision.repo, &args.path)
@@ -285,6 +282,10 @@ pub async fn blame(
     if file.is_binary {
         bail!("{} is not a text file: it has no lines", args.path);
     }
+    let revision = table.revision(revision, &path);
+    let h = &revision.history;
+    let s = checked(&h.schema)?;
+    let mount = mount_of(&shown(&path));
     let total = file.line_count.max(0) as u32;
     let start = args.start_line.unwrap_or(1).max(1);
     let wanted_end = args.end_line.unwrap_or(u32::MAX).min(total);
@@ -339,18 +340,8 @@ pub async fn blame(
 
     let mut blamed: Vec<Option<i64>> = Vec::with_capacity(ids.len());
     if args.reverse {
-        // The commit this version is read at: the call's, or its mount's.
-        let at = match &mount {
-            Some((root, name)) => {
-                crate::rev::resolve_mount(client, s, &revision.repo, root, name)
-                    .await?
-                    .history
-                    .addr
-            }
-            None => h.addr,
-        };
         for id in &ids {
-            blamed.push(crate::range::death_after(&known[id].spans.0, at));
+            blamed.push(crate::range::death_after(&known[id].spans.0, h.addr));
         }
     } else {
         let ignore = if args.ignore_revs.unwrap_or(true) {

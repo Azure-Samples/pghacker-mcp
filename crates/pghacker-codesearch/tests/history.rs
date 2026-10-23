@@ -672,6 +672,187 @@ async fn virtual_folders_mount_other_commits() {
 }
 
 #[tokio::test]
+async fn mounted_code_tools_report_the_source_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    repository(dir.path());
+    let db = TestDb::create().await.unwrap();
+    build(
+        &db.admin_url,
+        &BuildOptions {
+            git_dir: dir.path().to_owned(),
+            master: "master".into(),
+            url: None,
+            schema: SCHEMA.into(),
+            paths: vec!["src".into(), "contrib".into()],
+            install: false,
+        },
+    )
+    .await
+    .unwrap();
+    let reader = db.reader().await.unwrap();
+    let snap = |v: &str| {
+        let (reader, v) = (&reader, v.to_owned());
+        async move {
+            pghacker_codesearch::rev::resolve(reader, SCHEMA, "postgres", Some(&v))
+                .await
+                .unwrap()
+        }
+    };
+    let caller = snap("19").await;
+    let s18 = snap("REL_18_STABLE").await;
+    let s17 = snap("REL_17_0").await;
+    let by_sha = snap(&s17.sha[..10]).await;
+    let c1 = snap("master~1").await;
+    assert_ne!(caller.sha, s18.sha);
+    assert_ne!(caller.sha, s17.sha);
+    assert_ne!(caller.sha, c1.sha);
+    let provenance = |version: Option<String>, git_ref: String, sha: String| json!({"version": version, "ref": git_ref, "sha": sha});
+    let rev_provenance =
+        |r: &Revision| provenance(r.version.clone(), r.git_ref.clone(), r.sha.clone());
+
+    for (mount, source) in [
+        ("/tag/REL_17_0".to_owned(), &s17),
+        ("/branch/REL_18_STABLE".to_owned(), &s18),
+        (format!("/commit/{}", &s17.sha[..10]), &by_sha),
+        ("/commit/master~1".to_owned(), &c1),
+    ] {
+        let path = format!("{mount}/src/backend/parser/gram.y");
+        let dir_path = format!("{mount}/src/backend");
+        let expected = rev_provenance(source);
+
+        let read = read_file(
+            &reader,
+            &caller,
+            &ReadFileArgs {
+                path: path.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let explicit = read_file(
+            &reader,
+            source,
+            &ReadFileArgs {
+                path: "src/backend/parser/gram.y".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(read.content, explicit.content);
+        assert_eq!(
+            provenance(explicit.version, explicit.git_ref, explicit.sha),
+            expected
+        );
+
+        let listed_file = list_files(
+            &reader,
+            &caller,
+            &ListFilesArgs {
+                path: Some(path.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let listed_dir = list_files(
+            &reader,
+            &caller,
+            &ListFilesArgs {
+                path: Some(dir_path.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let found = search(
+            &reader,
+            &caller,
+            &serde_json::from_value(json!({"query": "SelectStmt", "paths": &path})).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(!found.lines.is_empty());
+        let inverted = search(
+            &reader,
+            &caller,
+            &serde_json::from_value(json!({"query": "", "not": "SelectStmt", "paths": &dir_path}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let blamed = pghacker_codesearch::blame(
+            &reader,
+            &caller,
+            &pghacker_codesearch::BlameArgs {
+                path: path.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!blamed.lines.is_empty());
+
+        assert_eq!(
+            json!({
+                "read_file": provenance(read.version, read.git_ref, read.sha),
+                "list_file": provenance(listed_file.version, listed_file.git_ref, listed_file.sha),
+                "list_dir": provenance(listed_dir.version, listed_dir.git_ref, listed_dir.sha),
+                "search": provenance(found.version, found.git_ref, found.sha),
+                "search_not": provenance(inverted.version, inverted.git_ref, inverted.sha),
+                "blame": provenance(blamed.version, blamed.git_ref, blamed.sha),
+            }),
+            json!({
+                "read_file": &expected,
+                "list_file": &expected,
+                "list_dir": &expected,
+                "search": &expected,
+                "search_not": &expected,
+                "blame": &expected,
+            }),
+            "mount {mount} must report its source commit"
+        );
+    }
+
+    // Ordinary calls without a mount, bare virtual root listings, and searches
+    // that mix trees keep the caller's revision.
+    let caller_expected = rev_provenance(&caller);
+    for bare in ["/", "/branch", "/tag", "/commit"] {
+        let listed = list_files(
+            &reader,
+            &caller,
+            &ListFilesArgs {
+                path: Some(bare.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            provenance(listed.version, listed.git_ref, listed.sha),
+            caller_expected,
+            "listing {bare}"
+        );
+    }
+    let mixed = search(
+        &reader,
+        &caller,
+        &serde_json::from_value(json!({
+            "query": "SelectStmt",
+            "paths": ["src/backend", "/tag/REL_17_0/src/backend"]
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        provenance(mixed.version, mixed.git_ref, mixed.sha),
+        caller_expected
+    );
+}
+
+#[tokio::test]
 async fn history_search_finds_lines_across_commits() {
     let dir = tempfile::tempdir().unwrap();
     let commits = repository(dir.path());
