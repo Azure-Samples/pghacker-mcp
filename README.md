@@ -98,6 +98,7 @@ The software may collect information about you and your use of the software and 
 
 ## Learn more
 
+- [Blog post](https://techcommunity.microsoft.com/blog/adforpostgresql/using-postgresql-to-reflect-on-its-own-history-and-code-introducing-pghacker-mcp/4566611): what pghacker-mcp can do, and how it works.
 - [Reference](docs/reference.md): settings, tools and their limits, the commit history, the graph, extraction, tests and the repository's layout.
 - [Design](docs/design.md): why pghacker-mcp exists, and its plan.
 - [Search design](docs/search-design.md): how the code tools read every commit.

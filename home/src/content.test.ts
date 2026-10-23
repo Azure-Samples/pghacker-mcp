@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CAPABILITIES, EXAMPLES, POWERED_BY, PRODUCT, shortMessageId } from "./content.ts";
+import { BLOG, CAPABILITIES, EXAMPLES, POWERED_BY, PRODUCT, shortMessageId } from "./content.ts";
 
 /** pghacker-mcp's tools: what the page may name. */
 const TOOLS = new Set([
@@ -51,7 +51,7 @@ test("the capabilities name only pghacker-mcp's tools", () => {
 });
 
 test("the page names no deployment's host", () => {
-  const text = JSON.stringify({ PRODUCT, POWERED_BY, CAPABILITIES, EXAMPLES });
+  const text = JSON.stringify({ PRODUCT, POWERED_BY, BLOG, CAPABILITIES, EXAMPLES });
   assert.doesNotMatch(text, /azurefd\.net|azurecontainerapps\.io|https?:\/\/[^"]*\/mcp/);
 });
 

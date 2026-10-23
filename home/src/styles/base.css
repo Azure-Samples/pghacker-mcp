@@ -157,7 +157,7 @@ main:focus {
   white-space: nowrap;
 }
 
-/* The repository's link and the theme toggle, at the top bar's right end. */
+/* The links and the theme toggle, at the top bar's right end. */
 .topbar-actions {
   display: flex;
   flex-shrink: 0;
@@ -176,15 +176,18 @@ main:focus {
   text-decoration: none;
 }
 
+.btn.blog-link,
 .btn.feedback-link {
   gap: 6px;
   padding: 0 10px;
 }
 
+.blog-link:hover,
 .feedback-link:hover {
   text-decoration: none;
 }
 
+.btn.blog-link svg,
 .btn.feedback-link svg {
   width: 16px;
   height: 16px;

@@ -683,12 +683,23 @@
   }
 }
 
-@media (max-width: 420px) {
-  /* The icon alone on a phone; its title still says what it is. */
-  .feedback-label {
+@media (max-width: 560px) {
+  /*
+   * The top bar's icons alone on a phone, without the star count, so the
+   * name fits beside them; their titles still say what they are.
+   */
+  .blog-label,
+  .feedback-label,
+  .github-stars {
     display: none;
   }
 
+  .topbar-actions {
+    gap: 4px;
+  }
+}
+
+@media (max-width: 420px) {
   .hero h1 {
     font-size: 26px;
   }

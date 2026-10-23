@@ -29,6 +29,16 @@ export const POWERED_BY = {
   logo: "https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1374850-Icon-Hero-HorizonDB-24x24",
 } as const;
 
+/**
+ * The blog post that introduces pghacker-mcp, which the top bar links to. Its
+ * description doesn't quote the post's title, which names a deployment's host.
+ */
+export const BLOG = {
+  label: "Blog",
+  description: "Read the blog post introducing pghacker-mcp",
+  url: "https://techcommunity.microsoft.com/blog/adforpostgresql/using-postgresql-to-reflect-on-its-own-history-and-code-introducing-pghacker-mcp/4566611",
+} as const;
+
 export type CapabilityIcon = "history" | "people" | "code" | "sql";
 
 export interface Capability {

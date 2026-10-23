@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
+import { Newspaper } from "lucide-react";
 import { useState } from "react";
-import { PRODUCT } from "../content.ts";
+import { BLOG, PRODUCT } from "../content.ts";
 import { readCopyright, readPrivacyUrl } from "../footer.ts";
 import { FeedbackLink, GitHubLink } from "./GitHubLink.tsx";
 import { ThemeToggle } from "./ThemeToggle.tsx";
@@ -21,6 +22,16 @@ export function BrandMark({ size = 32 }: { size?: number }) {
   );
 }
 
+/** The top bar's link to the blog post that introduces pghacker-mcp. */
+function BlogLink() {
+  return (
+    <a className="btn btn-ghost blog-link" href={BLOG.url} aria-label={BLOG.description} title={BLOG.description}>
+      <Newspaper aria-hidden="true" />
+      <span className="blog-label">{BLOG.label}</span>
+    </a>
+  );
+}
+
 export function TopBar() {
   return (
     <header className="topbar">
@@ -33,6 +44,7 @@ export function TopBar() {
           </span>
         </a>
         <div className="topbar-actions">
+          <BlogLink />
           <FeedbackLink />
           <GitHubLink />
           <ThemeToggle />
