@@ -209,9 +209,9 @@ run "roles_follow_other_deployments" {
   variables {
     foundry_account_name = "pghacker-models"
     foundry_deployments = {
-      chat  = { model = "gpt-6-sol", version = "2026-09-22", capacity = 100 }
+      chat  = { model = "gpt-6-sol", version = "2026-09-22", capacity = 100, sku = "DataZoneStandard" }
       crawl = { model = "gpt-5.6-luna", version = "2026-07-09", capacity = 200 }
-      embed = { model = "text-embedding-3-small", version = "1", capacity = 50 }
+      embed = { model = "text-embedding-3-small", version = "1", capacity = 50, sku = "DataZoneStandard" }
     }
     foundry_sol_deployment       = "chat"
     foundry_luna_deployment      = "crawl"
@@ -229,6 +229,15 @@ run "roles_follow_other_deployments" {
     )
     error_message = "The roles must name the chosen deployments, and foundry_account_name the account, its subdomain and its endpoint."
   }
+
+  assert {
+    condition = tomap({ for name, deployment in azurerm_cognitive_deployment.this : name => deployment.sku[0].name }) == tomap({
+      chat  = "DataZoneStandard"
+      crawl = "GlobalStandard"
+      embed = "DataZoneStandard"
+    })
+    error_message = "Each deployment must take the deployment type it names, GlobalStandard unless it names one."
+  }
 }
 
 run "roles_must_name_a_deployment" {
@@ -239,6 +248,20 @@ run "roles_must_name_a_deployment" {
   }
 
   expect_failures = [var.foundry_luna_deployment]
+}
+
+run "deployment_types_are_known" {
+  command = plan
+
+  variables {
+    foundry_deployments = {
+      "gpt-6-luna"             = { model = "gpt-6-luna", version = "2026-09-22", capacity = 100, sku = "Standard" }
+      "text-embedding-3-small" = { model = "text-embedding-3-small", version = "1", capacity = 800 }
+      "gpt-6.1-sol"            = { model = "gpt-6.1-sol", version = "2026-09-29", capacity = 300 }
+    }
+  }
+
+  expect_failures = [var.foundry_deployments]
 }
 
 run "capacities_are_whole_thousands" {

@@ -119,7 +119,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `horizondb_max_connections` | `null` | `max_connections` in the parameter group; null keeps HorizonDB's default |
 | `extra_firewall_ips` | `[]` | Emergency operator IPv4 addresses for the public endpoint; none by default |
 | `foundry_account_name` | `null` | Foundry account and custom subdomain, globally unique; null uses `<name_prefix>-foundry` |
-| `foundry_deployments` | `gpt-6-luna` (2026-09-22, 1000), `text-embedding-3-small` (1, 800), `gpt-6.1-sol` (2026-09-29, 300) | Deployments by name: `{ model, version, capacity }`, GlobalStandard, capacity in thousands of tokens per minute |
+| `foundry_deployments` | `gpt-6-luna` (2026-09-22, 1000), `text-embedding-3-small` (1, 800), `gpt-6.1-sol` (2026-09-29, 300) | Deployments by name: `{ model, version, capacity, sku }`, capacity in thousands of tokens per minute. `sku` is `GlobalStandard`, the default, or `DataZoneStandard`, which keeps requests in the account's data zone and has a quota of its own: use it when another deployment in the subscription holds the GlobalStandard quota |
 | `foundry_sol_deployment` | `"gpt-6.1-sol"` | Deployment used as Sol, the portal's default model (`PGHACKER_FOUNDRY_SOL`) |
 | `foundry_luna_deployment` | `"gpt-6-luna"` | Deployment used as Luna, the crawler's model (`PGHACKER_FOUNDRY_LUNA`) |
 | `foundry_embedding_deployment` | `"text-embedding-3-small"` | Embedding deployment (`PGHACKER_FOUNDRY_EMBEDDING`) |

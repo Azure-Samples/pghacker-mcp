@@ -64,6 +64,8 @@ extra_firewall_ips      = []
 
 # Model names/versions must be available in your region. These example
 # capacities are in thousands of tokens per minute; size them to your quota.
+# Each takes GlobalStandard unless it sets sku = "DataZoneStandard", whose
+# quota is separate.
 foundry_deployments = {
   "gpt-6.1-sol"            = { model = "gpt-6.1-sol", version = "2026-09-29", capacity = 10 }
   "gpt-6-luna"             = { model = "gpt-6-luna", version = "2026-09-22", capacity = 10 }

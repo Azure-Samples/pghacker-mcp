@@ -364,11 +364,12 @@ variable "foundry_account_name" {
 }
 
 variable "foundry_deployments" {
-  description = "The Foundry model deployments by deployment name: each an OpenAI-format model, its version, and its GlobalStandard capacity in thousands of tokens per minute, which the subscription's regional quota bounds. Terraform creates them one at a time. A new capacity applies in place; a new model or version replaces the deployment."
+  description = "The Foundry model deployments by deployment name: each an OpenAI-format model, its version, its capacity in thousands of tokens per minute, and its deployment type (sku): GlobalStandard, the default, or DataZoneStandard, which processes requests within the account's data zone, such as the US, and has a quota of its own. The subscription's quota for the model and type bounds the capacity; GlobalStandard's is shared by every account in the subscription, in every region. Terraform creates them one at a time. A new capacity applies in place; a new model, version or type replaces the deployment."
   type = map(object({
     model    = string
     version  = string
     capacity = number
+    sku      = optional(string, "GlobalStandard")
   }))
   default = {
     "gpt-6-luna"             = { model = "gpt-6-luna", version = "2026-09-22", capacity = 1000 }
@@ -390,6 +391,11 @@ variable "foundry_deployments" {
   validation {
     condition     = alltrue([for d in values(var.foundry_deployments) : d.capacity >= 1 && floor(d.capacity) == d.capacity])
     error_message = "Each of foundry_deployments' capacities must be a whole number of thousands of tokens per minute, at least 1."
+  }
+
+  validation {
+    condition     = alltrue([for d in values(var.foundry_deployments) : contains(["GlobalStandard", "DataZoneStandard"], d.sku)])
+    error_message = "Each of foundry_deployments' sku must be GlobalStandard or DataZoneStandard."
   }
 }
 

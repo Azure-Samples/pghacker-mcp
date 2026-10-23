@@ -68,7 +68,7 @@ resource "azurerm_cognitive_deployment" "this" {
   }
 
   sku {
-    name     = "GlobalStandard"
+    name     = each.value.sku
     capacity = each.value.capacity
   }
 }
