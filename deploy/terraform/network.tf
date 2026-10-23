@@ -96,6 +96,9 @@ resource "azurerm_subnet_route_table_association" "nodes" {
 # The database from the services and PilotSwarm pools; Foundry from the
 # services pool alone, where the token proxy runs; nothing else from the VNet.
 # Pods' traffic arrives with their node's address, from their pool's subnet.
+# The PilotSwarm pool's rule, denying it all but the database, takes the top
+# priority, so that no rule added to the NSG later, such as a policy's that
+# admits HTTPS from the whole VNet, can open Foundry to it.
 resource "azurerm_network_security_group" "private_endpoints" {
   name                = "${var.name_prefix}-private-endpoints"
   location            = var.location
@@ -103,11 +106,28 @@ resource "azurerm_network_security_group" "private_endpoints" {
   tags                = var.tags
 }
 
+resource "azurerm_network_security_rule" "swarm" {
+  name                        = "swarm-database-only"
+  network_security_group_name = azurerm_network_security_group.private_endpoints.name
+  resource_group_name         = local.rg_name
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_address_prefix       = var.subnet_prefixes.swarm
+  source_port_range           = "*"
+  destination_address_prefix  = var.subnet_prefixes.private_endpoints
+  destination_port_ranges     = ["0-5431", "5433-65535"]
+
+  # The database's rule held priority 100 before this one.
+  depends_on = [azurerm_network_security_rule.database]
+}
+
 resource "azurerm_network_security_rule" "database" {
   name                        = "database-from-services-and-swarm"
   network_security_group_name = azurerm_network_security_group.private_endpoints.name
   resource_group_name         = local.rg_name
-  priority                    = 100
+  priority                    = 120
   direction                   = "Inbound"
   access                      = "Allow"
   protocol                    = "Tcp"

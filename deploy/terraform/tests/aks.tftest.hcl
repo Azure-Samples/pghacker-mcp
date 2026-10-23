@@ -335,6 +335,19 @@ run "network" {
 
   assert {
     condition = (
+      azurerm_network_security_rule.swarm.access == "Deny"
+      && azurerm_network_security_rule.swarm.protocol == "*"
+      && azurerm_network_security_rule.swarm.source_address_prefix == "10.66.0.128/27"
+      && azurerm_network_security_rule.swarm.destination_address_prefix == "10.66.1.0/27"
+      && azurerm_network_security_rule.swarm.destination_port_ranges == toset(["0-5431", "5433-65535"])
+      && azurerm_network_security_rule.swarm.priority == 100
+      && azurerm_network_security_rule.swarm.priority < min(azurerm_network_security_rule.database.priority, azurerm_network_security_rule.foundry.priority, azurerm_network_security_rule.deny_vnet.priority)
+    )
+    error_message = "The PilotSwarm pool's subnet must be denied all but the database at the NSG's top priority, 100, above any rule added later."
+  }
+
+  assert {
+    condition = (
       azurerm_network_security_rule.database.access == "Allow"
       && azurerm_network_security_rule.database.source_address_prefixes == toset(["10.66.0.96/27", "10.66.0.128/27"])
       && azurerm_network_security_rule.database.destination_port_range == "5432"
