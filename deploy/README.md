@@ -165,7 +165,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
    node ../scripts/aks.mjs apply
    ```
 
-9. **Front Door's origin.** Set `create_origin = true` and apply: Front Door asks to connect to the edge's Private Link Service, and the apply warns that the connection isn't approved (`edge_private_link_approved`). Approve it: `approve-edge` approves only a pending request whose message is this Front Door's. From then on, never set `create_origin` back to `false`, which takes the site down.
+9. **Front Door's origin.** Set `create_origin = true` and apply: Front Door asks to connect to the edge's Private Link Service, and the apply warns that the connection isn't approved (`edge_private_link_approved`). Approve it: `approve-edge` approves only a pending request whose message is this Front Door's. From then on, never set `create_origin` back to `false`, which takes the site down, except to replace the cluster ([Operations](#operations)).
 
    ```sh
    terraform apply -var-file=../environments/local.tfvars
@@ -553,6 +553,11 @@ Without `--skill`, the agents, which don't declare the skills extension, must fi
   - Events that couldn't be sent are logged as `usage events weren't sent`, under `[mcp]` or `[home]`, at most once a minute.
   - Past `usage_daily_cap_gb` (5 GB) a day, Application Insights drops the rest of the day's events.
 - **Restart.** `node ../scripts/aks.mjs kubectl -- rollout restart deployment/<name>`. Restarting the worker drops live sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
+- **Replacing the cluster.** A change that Terraform makes by replacing the cluster (`azurerm_kubernetes_cluster.this` must be replaced) takes the site down for about an hour. The database, the vault and the workload identities stay. In order:
+  1. Apply with `create_origin = false`, then delete Front Door's connection from the edge's Private Link Service (`az network private-link-service connection delete`, in the node resource group). Front Door keeps its private endpoint until its profile is deleted, and the Private Link Service goes with the cluster's node resource group.
+  2. `node ../scripts/aks.mjs kubectl -- delete pdb --all`. Terraform deletes the node pools before the cluster, and their drain honors the PodDisruptionBudgets with nowhere to move the pods.
+  3. Apply. If Azure Policy updates the new cluster as it's created, the node pools fail with `AnotherOperationInProgress`: apply again once `az aks show --query provisioningState` reads `Succeeded`.
+  4. `node ../scripts/aks.mjs apply`, then step 9: `create_origin = true`, apply, `approve-edge`.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.
   - A full sync runs once after the upgrade that installs the change capture, after an upgrade that changes what the graph projects, after a restore or a commit-history install, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
