@@ -70,7 +70,7 @@ try {
   const indexers = Number(await psql(urls.indexer, `SELECT count(*) FROM pg_stat_activity
     WHERE datname = current_database() AND application_name LIKE 'pghacker-indexer%'`));
   if (indexers > 0) {
-    throw new Error("pghacker-indexer is connected: restore before the app runs, or stop it first (kubectl scale deployment/indexer --replicas=0).");
+    throw new Error("pghacker-indexer is connected: restore before the app runs, or stop it first (node deploy/scripts/aks.mjs kubectl -- scale deployment/indexer --replicas=0).");
   }
   const keys = await psqlJson(urls.indexer, FOREIGN_KEYS_SQL);
   const scripts = foreignKeyScripts(keys);

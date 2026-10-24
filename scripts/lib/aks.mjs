@@ -9,8 +9,9 @@
 // SecretProviderClass per identity with secrets, which syncs them from Key
 // Vault into the Kubernetes Secret its pods' environments name
 // (scripts/lib/azure.mjs, componentEnvironments); and the model catalog.
-// deploy/scripts/aks.mjs applies them. Nothing here holds a secret: the
-// output has none, and pods get theirs from Key Vault.
+// deploy/scripts/aks.mjs applies them, through the commands at the end of
+// this file. Nothing here holds a secret: the output has none, and pods get
+// theirs from Key Vault.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -326,4 +327,88 @@ export function renderJob(outputs, name, { args = [] } = {}) {
 /** Objects as one YAML stream, for kubectl apply. */
 export function toYaml(objects) {
   return objects.map((object) => stringify(object, { lineWidth: 0 })).join("---\n");
+}
+
+// --- Commands in the cluster --------------------------------------------------
+
+// The cluster is private: nothing outside its VNet reaches the API server.
+// deploy/scripts/aks.mjs runs kubectl in the cluster instead, through Azure
+// Resource Manager (az aks command invoke, AKS's run command): a pod in the
+// aks-command namespace runs the command with the caller's Entra ID token, and
+// Azure returns its exit code and its output, stdout and stderr together, up to
+// 512 kB.
+
+/** `word`, quoted for a POSIX shell where it has to be. */
+export function shellQuote(word) {
+  const text = String(word);
+  return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", `'"'"'`)}'`;
+}
+
+/** kubectl with `args`, in the deployment's namespace, as a shell command. */
+export function kubectlCommand(outputs, args) {
+  return ["kubectl", "--namespace", outputs.namespace, ...args].map(shellQuote).join(" ");
+}
+
+/**
+ * The Azure CLI's arguments that run `command` in the cluster, with `files`
+ * attached: each lands, by its base name, where the command runs.
+ */
+export function invokeArgs(outputs, command, { files = [] } = {}) {
+  return [
+    "aks", "command", "invoke", "--subscription", outputs.subscription_id,
+    "--resource-group", outputs.resource_group_name, "--name", outputs.cluster_name,
+    "--command", command, ...files.flatMap((file) => ["--file", file]), "--output", "json",
+  ];
+}
+
+/**
+ * The command's exit code and output, from the Azure CLI's JSON; throws when
+ * Azure didn't run it. The CLI itself succeeds whatever the command's exit code.
+ */
+export function invokeResult(json) {
+  const result = typeof json === "string" ? JSON.parse(json) : json;
+  if (result?.provisioningState !== "Succeeded" || !Number.isInteger(result.exitCode)) {
+    const reason = result?.reason ? ` (${result.reason})` : "";
+    throw new Error(`The command didn't run in the cluster: ${result?.provisioningState ?? "no result"}${reason}.`);
+  }
+  return { status: result.exitCode, output: result.logs ?? "" };
+}
+
+/** The JSON document in kubectl's output, from the line that opens it to the one that closes it, past any warning. */
+export function jsonFromOutput(output) {
+  const lines = output.split("\n");
+  const start = lines.findIndex((line) => line.startsWith("{"));
+  const end = lines.findLastIndex((line) => line.startsWith("}"));
+  if (start < 0 || end < start) throw new Error(`kubectl's output isn't JSON: ${output.trim().slice(0, 300)}`);
+  return JSON.parse(lines.slice(start, end + 1).join("\n"));
+}
+
+/** A Job's end, from its conditions: "Complete", "Failed", or null while it runs. */
+export function jobEnd(job) {
+  const ended = (job.status?.conditions ?? []).find((c) => ["Complete", "Failed"].includes(c.type) && c.status === "True");
+  return ended?.type ?? null;
+}
+
+/**
+ * Where a Deployment's rollout is, as kubectl rollout status judges it:
+ * `done`; `failed`, past its progress deadline; or why to `wait`.
+ */
+export function rolloutState(deployment) {
+  const { metadata = {}, spec = {}, status = {} } = deployment;
+  const name = metadata.name;
+  if ((status.observedGeneration ?? 0) < (metadata.generation ?? 0)) {
+    return { name, done: false, wait: `${name}: its new spec isn't observed yet` };
+  }
+  const progressing = (status.conditions ?? []).find((c) => c.type === "Progressing");
+  if (progressing?.reason === "ProgressDeadlineExceeded") {
+    return { name, done: false, failed: `${name} exceeded its progress deadline` };
+  }
+  const wanted = spec.replicas ?? 1;
+  const updated = status.updatedReplicas ?? 0;
+  if (updated < wanted) return { name, done: false, wait: `${name}: ${updated} of ${wanted} new replicas updated` };
+  const old = (status.replicas ?? 0) - updated;
+  if (old > 0) return { name, done: false, wait: `${name}: ${old} old replicas terminating` };
+  const available = status.availableReplicas ?? 0;
+  if (available < updated) return { name, done: false, wait: `${name}: ${available} of ${updated} updated replicas available` };
+  return { name, done: true };
 }

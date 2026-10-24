@@ -227,9 +227,18 @@ run "cluster" {
       && azurerm_kubernetes_cluster.this.role_based_access_control_enabled
       && azurerm_kubernetes_cluster.this.azure_active_directory_role_based_access_control[0].azure_rbac_enabled
       && azurerm_kubernetes_cluster.this.azure_active_directory_role_based_access_control[0].tenant_id == "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-      && length(azurerm_kubernetes_cluster.this.api_server_access_profile) == 0
     )
     error_message = "The cluster must issue OIDC tokens for workload identity, and authorize its API with Entra ID and Azure RBAC alone, without local accounts."
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster.this.private_cluster_enabled
+      && !azurerm_kubernetes_cluster.this.private_cluster_public_fqdn_enabled
+      && azurerm_kubernetes_cluster.this.run_command_enabled
+      && length(azurerm_kubernetes_cluster.this.api_server_access_profile) == 0
+    )
+    error_message = "The API server must be private, without a public name, and reached through the run command (az aks command invoke), which ../scripts/aks.mjs uses."
   }
 
   assert {
@@ -680,19 +689,6 @@ run "first_apply_waits_for_the_edge" {
       && azurerm_key_vault_secret.oauth2_cookie.name == "oauth2-cookie-secret"
     )
     error_message = "The cookie secret must be exactly 32 alphanumerics, and the database passwords at least 32, stored under their contract names."
-  }
-}
-
-run "api_server_ranges_admit_the_firewall" {
-  state_key = "api-ranges"
-
-  variables {
-    api_server_authorized_ip_ranges = ["203.0.113.0/24"]
-  }
-
-  assert {
-    condition     = azurerm_kubernetes_cluster.this.api_server_access_profile[0].authorized_ip_ranges == toset(["203.0.113.0/24", "20.14.0.10/32"])
-    error_message = "The API server's authorized ranges must add the firewall's address, through which the nodes reach it."
   }
 }
 

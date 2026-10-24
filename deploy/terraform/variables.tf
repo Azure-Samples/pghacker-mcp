@@ -451,18 +451,6 @@ variable "aks_sku_tier" {
   }
 }
 
-variable "api_server_authorized_ip_ranges" {
-  description = "IPv4 ranges allowed to reach the cluster's API server, such as the operators' addresses. Empty allows any address; Entra ID authorizes every request either way."
-  type        = list(string)
-  default     = []
-  nullable    = false
-
-  validation {
-    condition     = alltrue([for range in var.api_server_authorized_ip_ranges : can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", range)) && try(cidrsubnet(range, 0, 0) == range, false)])
-    error_message = "api_server_authorized_ip_ranges must hold IPv4 networks in CIDR notation, such as 203.0.113.0/24."
-  }
-}
-
 variable "system_pool" {
   description = "The system node pool, which runs only the cluster's own add-ons (CriticalAddonsOnly): its VM size and autoscaling bounds."
   type = object({

@@ -7,8 +7,8 @@
 # own, made here with its role before the cluster. Its
 # network is Azure CNI Overlay with Cilium, which enforces the manifests'
 # NetworkPolicies, and its outbound traffic goes through Azure Firewall
-# (userDefinedRouting). Entra ID authorizes every request to its API server;
-# it has no local accounts.
+# (userDefinedRouting). Its API server is private, and Entra ID authorizes
+# every request to it; it has no local accounts.
 #
 # Three pools, each in its own subnet:
 #   system    the cluster's add-ons only (CriticalAddonsOnly)
@@ -102,6 +102,16 @@ resource "azurerm_kubernetes_cluster" "this" {
   local_account_disabled    = true
   tags                      = var.tags
 
+  # A private cluster: the API server's address is a private endpoint in the
+  # system pool's subnet, whose name a private DNS zone that AKS keeps holds;
+  # it has no public address or name. The nodes reach it inside the VNet, not
+  # through the firewall. Operators reach it through Azure Resource Manager:
+  # the run command (az aks command invoke), which ../scripts/aks.mjs uses,
+  # runs kubectl in a pod in the cluster with their Entra ID token.
+  private_cluster_enabled             = true
+  private_cluster_public_fqdn_enabled = false
+  run_command_enabled                 = true
+
   role_based_access_control_enabled = true
   azure_active_directory_role_based_access_control {
     azure_rbac_enabled = true
@@ -160,14 +170,6 @@ resource "azurerm_kubernetes_cluster" "this" {
   oms_agent {
     log_analytics_workspace_id      = azurerm_log_analytics_workspace.this.id
     msi_auth_for_monitoring_enabled = true
-  }
-
-  dynamic "api_server_access_profile" {
-    for_each = length(var.api_server_authorized_ip_ranges) > 0 ? [1] : []
-    content {
-      # The firewall's address too: the nodes reach the API server through it.
-      authorized_ip_ranges = concat(var.api_server_authorized_ip_ranges, ["${azurerm_public_ip.firewall.ip_address}/32"])
-    }
   }
 
   lifecycle {

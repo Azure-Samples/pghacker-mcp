@@ -47,12 +47,11 @@ subnet_prefixes = {
   private_endpoints = "10.80.1.0/27"
 }
 
-# The cluster. The API server is open to any address unless you list yours;
-# Entra ID authorizes every request either way.
-api_server_authorized_ip_ranges = []
-system_pool                     = { vm_size = "Standard_D2ds_v5", min_count = 1, max_count = 3 }
-services_pool                   = { vm_size = "Standard_D4ds_v5", node_count = 2 }
-swarm_pool                      = { vm_size = "Standard_D4ds_v5", node_count = 1 }
+# The cluster. Its API server is private: deploy/scripts/aks.mjs runs kubectl
+# in it through Azure (az aks command invoke).
+system_pool   = { vm_size = "Standard_D2ds_v5", min_count = 1, max_count = 3 }
+services_pool = { vm_size = "Standard_D4ds_v5", node_count = 2 }
+swarm_pool    = { vm_size = "Standard_D4ds_v5", node_count = 1 }
 # Who the alert on denied egress from the PilotSwarm pool emails.
 alert_emails = []
 

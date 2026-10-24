@@ -57,12 +57,13 @@ The cluster has three node pools, each in its own subnet, and every pod runs in 
 - **Identities.** Each component has its own user-assigned identity, federated with its Kubernetes service account. The Secrets Store CSI driver reads a component's Key Vault secrets with it, each granted one by one, and syncs them into the Kubernetes Secret its environment reads. Only the token proxy's pod gets a token of its own. No pod mounts a Kubernetes API token, and only the jobs read the administrator's password.
 - **Pods.** The namespace enforces Pod Security's `restricted` profile: each pod runs as its image user (`pgh-agent`, `pgh-svc`, `pgh-proxy`, `pgh-home`), with a read-only root, no Linux capabilities and the runtime's seccomp profile. tini is PID 1 and reaps what the agents' shells leave behind.
 - **The network.** Cilium enforces the NetworkPolicies: everything is denied unless a policy allows it. The edge alone takes traffic from outside the cluster, from the Private Link Service's addresses; the portal, which trusts oauth2-proxy's identity headers, takes it from the edge alone. Every node subnet sends what leaves the VNet to Azure Firewall, which admits the services pool's named hosts and every pool's platform endpoints (AKS, the registry, the vault, Azure Monitor), and denies and logs the rest. The private endpoints' NSG takes the database from the services and PilotSwarm pools, and Foundry from the services pool alone. Its top-priority rule denies the PilotSwarm pool all but the database, so that a rule added to the NSG later, such as a policy's, can't open Foundry to it.
+- **The API server.** The cluster is private: its API server has a private endpoint in the system pool's subnet, and no public address or name. `deploy/scripts/aks.mjs` runs `kubectl` in the cluster through Azure Resource Manager (`az aks command invoke`, AKS's run command), with your Entra ID token: a pod in the `aks-command` namespace runs each command, on a services node, and Azure returns its exit code and output. Nobody needs a network path to the API server; running a command takes the run command's actions on the cluster, which Owner and Contributor have, and Kubernetes permissions, which `deployer_object_ids` get.
 - **Health.** Each Deployment's probes ask its `/healthz`, oauth2-proxy's `/ping` and PilotSwarm's `/api/health`; the token proxy is ready once it has a token. The worker has none: Kubernetes restarts it when it exits.
 - **Artifacts.** Without blob storage, PilotSwarm keeps sessions' artifacts on the worker's disk, where the portal, in pods of its own, can't show them. The app's agents write none.
 
 ## First deployment
 
-You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, `kubectl` and `kubelogin` (`az aks install-cli`), and Node.js 24.22.1+ or 26.12.1+ with the local app set up (for the corpus) and its development dependencies installed (`npm install`; `deploy/scripts/aks.mjs` uses them). From the repository root, copy the synthetic example:
+You need the Azure CLI, signed in (`az login`) with Owner on the subscription, Terraform 1.9+, and Node.js 24.22.1+ or 26.12.1+ with the local app set up (for the corpus) and its development dependencies installed (`npm install`; `deploy/scripts/aks.mjs` uses them). From the repository root, copy the synthetic example:
 
 ```sh
 cp deploy/environments/example.tfvars deploy/environments/local.tfvars
@@ -109,10 +110,9 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
    terraform apply -var-file=../environments/local.tfvars
    ```
 
-5. **The cluster's objects and the probe.** `credentials` gets a kubeconfig through Entra ID. `apply --infra` applies everything but the app's workloads: the namespace, service accounts, secret classes, NetworkPolicies, Services (the edge's creates its internal load balancer and Private Link Service) and the token proxy. It then runs the `bootstrap` job, which creates the database, the roles, the extensions, the schema and the graph, and applies the migrations.
+5. **The cluster's objects and the probe.** `apply --infra` applies, through `az aks command invoke` ([the API server](#the-cluster) is private), everything but the app's workloads: the namespace, service accounts, secret classes, NetworkPolicies, Services (the edge's creates its internal load balancer and Private Link Service) and the token proxy. It then runs the `bootstrap` job, which creates the database, the roles, the extensions, the schema and the graph, and applies the migrations.
 
    ```sh
-   node ../scripts/aks.mjs credentials
    node ../scripts/aks.mjs apply --infra
    node ../scripts/aks.mjs job probe | jq .
    ```
@@ -545,19 +545,19 @@ Without `--skill`, the agents, which don't declare the skills extension, must fi
 
 ## Operations
 
-`kubectl` commands run in the app's namespace: `kubectl --namespace pghacker ...`, after `node ../scripts/aks.mjs credentials`.
+`kubectl` runs in the cluster, in the app's namespace, through `node ../scripts/aks.mjs kubectl -- <args>`, which uses `az aks command invoke`: the API server is private. Each command starts a pod, which takes 15 seconds or more, and returns its output when it ends, up to 512 kB, so `logs --follow`, `port-forward` and `exec -it` don't work this way. For one-off commands with files, run `az aks command invoke --command "..." --file <file>` yourself.
 
-- **Logs.** `kubectl logs deployment/<name>` for the last ones; Log Analytics (`terraform output -raw log_analytics_workspace_id`) keeps them, in Container Insights' `ContainerLogV2` table, by `PodName` and `ContainerName`. The worker's lines are prefixed `[swarm]` and `[crawl]`.
+- **Logs.** `node ../scripts/aks.mjs kubectl -- logs deployment/<name>` for the last ones; Log Analytics (`terraform output -raw log_analytics_workspace_id`) keeps them, in Container Insights' `ContainerLogV2` table, by `PodName` and `ContainerName`. The worker's lines are prefixed `[swarm]` and `[crawl]`.
 - **Egress.** The firewall's verdicts are in `AZFWApplicationRule` and `AZFWNetworkRule`. The `<name_prefix>-swarm-denied-egress` alert fires when it denies anything from the PilotSwarm pool's subnet, and emails `alert_emails`: find what in those tables, by `SourceIp`. Run the `egress-check` job again after any change to the network.
 - **Usage telemetry.**
   - Events that couldn't be sent are logged as `usage events weren't sent`, under `[mcp]` or `[home]`, at most once a minute.
   - Past `usage_daily_cap_gb` (5 GB) a day, Application Insights drops the rest of the day's events.
-- **Restart.** `kubectl rollout restart deployment/<name>`. Restarting the worker drops live sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
+- **Restart.** `node ../scripts/aks.mjs kubectl -- rollout restart deployment/<name>`. Restarting the worker drops live sessions' turns; extraction leases lapse after 20 minutes and their threads are extracted again.
 - **Graph sync.** The indexer applies the changes that triggers capture in short batches ([the graph](../docs/reference.md#the-graph)).
   - Each batch that changes the graph logs `synced the graph` with its `mode`, `changes` and `ms`. `ingest_status` shows `pending_changes`, `oldest_pending_at` and the last full sync.
   - A full sync runs once after the upgrade that installs the change capture, after an upgrade that changes what the graph projects, after a restore or a commit-history install, weekly as a reconcile, and when asked for: `pghacker-indexer graph-reconcile`, or `SELECT pghacker.graph_request_full('why')` as `pgh_indexer`. A reconcile that changes the graph logs a warning: the change capture missed something, or changes were committed while it ran.
 - **Secrets.**
-  - The CSI driver syncs a new version of a vault secret into its Kubernetes Secret within 2 minutes, but pods read their environment when they start. Rotating the GitHub OAuth App's secret therefore means a new `github-client-secret` version, then `kubectl rollout restart deployment/edge`.
+  - The CSI driver syncs a new version of a vault secret into its Kubernetes Secret within 2 minutes, but pods read their environment when they start. Rotating the GitHub OAuth App's secret therefore means a new `github-client-secret` version, then `node ../scripts/aks.mjs kubectl -- rollout restart deployment/edge`.
   - Replacing a role's `random_password` (`terraform apply -replace=...`) changes the vault secret. `node ../scripts/aks.mjs apply` then runs the bootstrap, which sets it on the role; restart the role's Deployments once the Secret has synced.
 - **Limits.**
   - The worker has 2 vCPU and 6 GiB, and up to 8 GiB (`deploy/k8s/worker.yaml`), on a `swarm_pool` node of its own; each session runs a Copilot CLI process, and the scheduler holds back above 85% of the worker's memory. For more sessions, give `swarm_pool` a larger `vm_size` and raise the worker's limit.

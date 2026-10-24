@@ -8,7 +8,7 @@
 | `terraform/tests/` | Offline `terraform test` suites; every provider is mocked (`tests/mocks/`) |
 | `terraform/.terraform.lock.hcl` | Provider versions and hashes for linux_amd64 and darwin_arm64 |
 | `k8s/` | The manifests' templates; `scripts/lib/aks.mjs` fills them in and adds the service accounts, secret classes and model catalog |
-| `scripts/aks.mjs` | Gets the cluster's credentials, applies the manifests, runs the ops jobs and approves Front Door's connection |
+| `scripts/aks.mjs` | Applies the manifests, runs the ops jobs and `kubectl` in the private cluster (`az aks command invoke`), and approves Front Door's connection |
 | `environments/example.tfvars` | Synthetic template to copy and customize; no real deployment identifiers |
 | `environments/*.tfvars`, `*.backend.hcl` | Local environment settings and state backends; ignored except for the template |
 | `scripts/bootstrap-state.sh` | Creates the state's resource group, storage account and container |
@@ -100,13 +100,12 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `feedback_min_questions` | `3` | The questions a client asks before the form can come, 0 to 100 (`PGHACKER_FEEDBACK_MIN_QUESTIONS`) |
 | `feedback_clients` | `copilot`, `codex`, `Visual Studio Code`, `claude`, `cursor` | The interactive apps that can be asked: any whose `clientInfo.name` contains one of these, ignoring case (`PGHACKER_FEEDBACK_CLIENTS`); scripts and agents are never asked |
 | `feedback_debug_enabled` | `false` | Debug mode, for trying the form by hand (`PGHACKER_FEEDBACK_DEBUG`): those apps are asked at every question after their first, without the warm-up, the chance, the hour's one ask, the active-session limit or the pause after a decline. It asks every user of `/mcp` that often, so turn it off after testing; it needs `feedback_rate_per_hour` above 0 |
-| `deployer_object_ids` | `[]` | Everyone who applies and deploys, given Key Vault Secrets Officer and the cluster's Azure Kubernetes Service RBAC Cluster Admin; empty means whoever is applying |
+| `deployer_object_ids` | `[]` | Everyone who applies and deploys, given Key Vault Secrets Officer and the cluster's Azure Kubernetes Service RBAC Cluster Admin, which `kubectl` runs with; empty means whoever is applying. Running a command in the private cluster (`az aks command invoke`) also takes the run command's actions, which Owner and Contributor have |
 | `vnet_address_space` | `"10.66.0.0/22"` | VNet range |
 | `subnet_prefixes` | `firewall` `10.66.0.0/26`, `system` `10.66.0.64/27`, `services` `10.66.0.96/27`, `swarm` `10.66.0.128/27`, `edge` `10.66.0.160/28`, `private_endpoints` `10.66.1.0/27` | The subnets, inside `vnet_address_space` and apart: Azure Firewall's (/26 or larger), each pool's, the edge's internal load balancer and Private Link Service, and the private endpoints'. The firewall's rules and the private endpoints' NSG tell the pools apart by them |
 | `pod_cidr`, `service_cidr` | `"10.244.0.0/16"`, `"10.0.0.0/16"` | The pods' overlay addresses and the Services', apart from the VNet and each other |
 | `kubernetes_version` | `null` | The cluster's version; null takes AKS's default. Patch releases and node images follow automatically |
-| `aks_sku_tier` | `"Standard"` | The cluster's tier: `Standard`, with the API server's uptime SLA, `Free` or `Premium` |
-| `api_server_authorized_ip_ranges` | `[]` | Ranges allowed to reach the API server, such as the operators'; the firewall's address is added. Empty allows any; Entra ID authorizes every request either way |
+| `aks_sku_tier` | `"Standard"` | The cluster's tier: `Standard`, with the API server's uptime SLA, `Free` or `Premium`. The API server is private either way: a private endpoint in the system pool's subnet, without a public address or name |
 | `system_pool` | `Standard_D2ds_v5`, 1 to 3 | The add-ons' pool: `vm_size`, `min_count`, `max_count` |
 | `services_pool` | `Standard_D4ds_v5`, 2 | The services' pool: `vm_size`, `node_count` |
 | `swarm_pool` | `Standard_D4ds_v5`, 1 | PilotSwarm's pool, which has no internet: `vm_size`, `node_count`. The worker's memory limit (`k8s/worker.yaml`, 8 GiB) must fit a node with the portal's pods |
@@ -154,7 +153,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `key_vault_name`, `key_vault_uri` | Vault |
 | `horizondb_cluster_name`, `horizondb_fqdn`, `horizondb_parameter_group`, `horizondb_firewall_rules` | Database |
 | `foundry_account_name`, `foundry_endpoint` | Foundry |
-| `aks_cluster_name`, `aks_node_resource_group` | The cluster, and where AKS keeps its nodes, load balancers and the edge's Private Link Service |
+| `aks_cluster_name`, `aks_node_resource_group` | The cluster, which `az aks command invoke` takes, and where AKS keeps its nodes, load balancers, the edge's Private Link Service and the API server's private endpoint and DNS zone |
 | `firewall_public_ip` | The address the cluster's allowed outbound traffic leaves from |
 | `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
 | `log_analytics_workspace_id` | The logs: the containers' (`ContainerLogV2`) and the firewall's (`AZFWApplicationRule`, `AZFWNetworkRule`) |

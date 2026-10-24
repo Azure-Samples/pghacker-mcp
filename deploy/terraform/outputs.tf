@@ -117,7 +117,7 @@ output "foundry_endpoint" {
 }
 
 output "aks_cluster_name" {
-  description = "The AKS cluster's name, for az aks get-credentials (../scripts/aks.mjs credentials)."
+  description = "The AKS cluster's name, which az aks command invoke takes (../scripts/aks.mjs)."
   value       = azurerm_kubernetes_cluster.this.name
 }
 

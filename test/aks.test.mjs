@@ -6,7 +6,8 @@ import test from "node:test";
 import { parse, parseAllDocuments } from "yaml";
 import { PORTS, USERS, VAULT_SECRETS } from "../scripts/lib/azure.mjs";
 import {
-  IMAGE_ROOT, JOBS, POOL_LABEL, fillTemplate, internetBlock, podSpec, renderJob, renderManifests, revisionOf, toYaml,
+  IMAGE_ROOT, JOBS, POOL_LABEL, fillTemplate, internetBlock, invokeArgs, invokeResult, jobEnd, jsonFromOutput,
+  kubectlCommand, podSpec, renderJob, renderManifests, revisionOf, rolloutState, shellQuote, toYaml,
 } from "../scripts/lib/aks.mjs";
 import { APP_ROOT } from "../scripts/lib/config.mjs";
 
@@ -528,4 +529,62 @@ test("usage telemetry's revision is the image's digest, or its tag", () => {
   for (const name of ["mcp", "home"]) {
     assert.equal(plainEnv(workload(objects, name).spec.containers[0]).CONTAINER_APP_REVISION, "sha256-0123456789ab", name);
   }
+});
+
+test("kubectl runs in the private cluster through az aks command invoke, in the app's namespace, its words quoted", () => {
+  assert.equal(shellQuote("deployment/edge"), "deployment/edge");
+  assert.equal(shellQuote("--tail=-1"), "--tail=-1");
+  assert.equal(shellQuote("a b"), "'a b'");
+  assert.equal(shellQuote("it's; rm -rf /"), `'it'"'"'s; rm -rf /'`);
+  assert.equal(shellQuote(""), "''");
+  assert.equal(
+    kubectlCommand(OUTPUTS, ["rollout", "restart", "deployment/edge"]),
+    "kubectl --namespace pghacker rollout restart deployment/edge",
+  );
+  assert.equal(
+    kubectlCommand(OUTPUTS, ["get", "pods", "-o", "jsonpath={.items[*].metadata.name}"]),
+    "kubectl --namespace pghacker get pods -o 'jsonpath={.items[*].metadata.name}'",
+  );
+  assert.deepEqual(invokeArgs(OUTPUTS, "kubectl version", { files: ["/tmp/pghacker-aks-1/manifests.yaml"] }), [
+    "aks", "command", "invoke", "--subscription", OUTPUTS.subscription_id, "--resource-group", "pghacker-example",
+    "--name", "pghacker-example-aks", "--command", "kubectl version", "--file", "/tmp/pghacker-aks-1/manifests.yaml",
+    "--output", "json",
+  ]);
+  assert.deepEqual(invokeArgs(OUTPUTS, "kubectl version").slice(-4), ["--command", "kubectl version", "--output", "json"]);
+});
+
+test("a command's exit code and output come from Azure's result, and a command that Azure didn't run is an error", () => {
+  const ran = { exitCode: 0, logs: "deployment.apps/edge restarted\n", provisioningState: "Succeeded", reason: null };
+  assert.deepEqual(invokeResult(JSON.stringify(ran)), { status: 0, output: "deployment.apps/edge restarted\n" });
+  assert.deepEqual(invokeResult({ ...ran, exitCode: 1, logs: "Unable to connect to the server: EOF" }),
+    { status: 1, output: "Unable to connect to the server: EOF" });
+  assert.throws(() => invokeResult({ provisioningState: "Failed", reason: "the pod didn't start" }),
+    /didn't run in the cluster: Failed \(the pod didn't start\)/);
+  assert.throws(() => invokeResult({ provisioningState: "Succeeded" }), /didn't run in the cluster/);
+});
+
+test("kubectl's JSON is read past its warnings, which share the output", () => {
+  const job = { kind: "Job", metadata: { name: "probe" }, status: { succeeded: 1 } };
+  assert.deepEqual(jsonFromOutput(`Warning: a deprecation\n${JSON.stringify(job, null, 4)}\n`), job);
+  assert.deepEqual(jsonFromOutput(JSON.stringify(job, null, 4)), job);
+  assert.throws(() => jsonFromOutput('Error from server (NotFound): jobs.batch "probe" not found'), /isn't JSON/);
+});
+
+test("a job ends complete or failed, by its conditions; a rollout is done as kubectl rollout status judges", () => {
+  assert.equal(jobEnd({ status: { conditions: [{ type: "SuccessCriteriaMet", status: "True" }, { type: "Complete", status: "True" }] } }), "Complete");
+  assert.equal(jobEnd({ status: { conditions: [{ type: "FailureTarget", status: "True" }, { type: "Failed", status: "True" }] } }), "Failed");
+  assert.equal(jobEnd({ status: { active: 1 } }), null);
+  assert.equal(jobEnd({ status: { conditions: [{ type: "Complete", status: "False" }] } }), null);
+
+  const deployment = (status) => ({
+    metadata: { name: "edge", generation: 2 }, spec: { replicas: 2 }, status: { observedGeneration: 2, ...status },
+  });
+  assert.equal(rolloutState(deployment({ replicas: 2, updatedReplicas: 2, availableReplicas: 2 })).done, true);
+  assert.match(rolloutState(deployment({ observedGeneration: 1 })).wait, /new spec isn't observed/);
+  assert.match(rolloutState(deployment({ replicas: 2, updatedReplicas: 1 })).wait, /1 of 2 new replicas updated/);
+  assert.match(rolloutState(deployment({ replicas: 3, updatedReplicas: 2, availableReplicas: 2 })).wait, /1 old replicas terminating/);
+  assert.match(rolloutState(deployment({ replicas: 2, updatedReplicas: 2, availableReplicas: 1 })).wait, /1 of 2 updated replicas available/);
+  const stuck = rolloutState(deployment({ conditions: [{ type: "Progressing", status: "False", reason: "ProgressDeadlineExceeded" }] }));
+  assert.equal(stuck.done, false);
+  assert.match(stuck.failed, /edge exceeded its progress deadline/);
 });
