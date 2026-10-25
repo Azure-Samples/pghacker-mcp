@@ -109,7 +109,9 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `system_pool` | `Standard_D2ds_v5`, 1 to 3 | The add-ons' pool: `vm_size`, `min_count`, `max_count` |
 | `services_pool` | `Standard_D4ds_v5`, 2 | The services' pool: `vm_size`, `node_count` |
 | `swarm_pool` | `Standard_D4ds_v5`, 1 | PilotSwarm's pool, which has no internet: `vm_size`, `node_count`. The worker's memory limit (`k8s/worker.yaml`, 8 GiB) must fit a node with the portal's pods |
-| `alert_emails` | `[]` | Who the denied-egress alert emails when the firewall denies anything from the PilotSwarm pool; empty creates the alert without an action group |
+| `alert_emails` | `[]` | Who the denied-egress alert emails when the firewall denies anything from the PilotSwarm pool, but for hosts that `alert_ignored_hosts` matches; empty creates the alert without an action group |
+| `alert_ignored_hosts` | `[]` | Regular expressions (RE2, anchored with `^` and `$`) of host names whose application-rule denials from the PilotSwarm pool the alert doesn't count: ones that you've looked into and accept (`deploy/README.md`'s Operations). The firewall still denies and logs them; empty counts every denial |
+| `extra_node_fqdns` | `[]` | Host names, or `*.` and a domain, that every pool's nodes may reach besides what AKS needs, for agents that your subscription installs on every node; none by default |
 | `horizondb_cluster_name` | `null` | Cluster name; null uses `<name_prefix>-hdb` |
 | `horizondb_vcores` | `4` | vCores per replica, at least 2 |
 | `horizondb_replica_count` | `1` | Replicas at creation; a later change fails the plan |
@@ -156,7 +158,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `aks_cluster_name`, `aks_node_resource_group` | The cluster, which `az aks command invoke` takes, and where AKS keeps its nodes, load balancers, the edge's Private Link Service and the API server's private endpoint and DNS zone |
 | `firewall_public_ip` | The address the cluster's allowed outbound traffic leaves from |
 | `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
-| `log_analytics_workspace_id` | The logs: the containers' (`ContainerLogV2`) and the firewall's (`AZFWApplicationRule`, `AZFWNetworkRule`) |
+| `log_analytics_workspace_id` | The logs: the app's containers' (`ContainerLogV2`), its pods with their restarts (`KubePodInventory`) and their Warning events (`KubeEvents`), and the firewall's (`AZFWApplicationRule`, `AZFWNetworkRule`) |
 | `usage_app_insights_name`, `usage_app_id` | Usage telemetry's Application Insights resource and its application ID, for `az monitor app-insights query --apps`; null with `usage_enabled = false` |
 
 ## Secrets in state

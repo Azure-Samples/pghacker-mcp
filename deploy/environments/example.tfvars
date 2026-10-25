@@ -54,6 +54,12 @@ services_pool = { vm_size = "Standard_D4ds_v5", node_count = 2 }
 swarm_pool    = { vm_size = "Standard_D4ds_v5", node_count = 1 }
 # Who the alert on denied egress from the PilotSwarm pool emails.
 alert_emails = []
+# For agents that your subscription installs on every node: hosts that every
+# pool may reach, and anchored regular expressions of hosts whose denials the
+# alert leaves out (deploy/README.md, "Operations"). Empty admits and leaves
+# out nothing.
+extra_node_fqdns    = []
+alert_ignored_hosts = []
 
 horizondb_vcores        = 4
 horizondb_replica_count = 1

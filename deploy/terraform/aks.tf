@@ -3,12 +3,12 @@
 
 # The AKS cluster, as Waldemort runs PilotSwarm, without its extras: OIDC and
 # workload identity, the Key Vault secrets provider (the Secrets Store CSI
-# driver), Container Insights, and image pulls by a kubelet identity of its
-# own, made here with its role before the cluster. Its
-# network is Azure CNI Overlay with Cilium, which enforces the manifests'
-# NetworkPolicies, and its outbound traffic goes through Azure Firewall
-# (userDefinedRouting). Its API server is private, and Entra ID authorizes
-# every request to it; it has no local accounts.
+# driver), Container Insights (the app's namespace alone, below), and image
+# pulls by a kubelet identity of its own, made here with its role before the
+# cluster. Its network is Azure CNI Overlay with Cilium, which enforces the
+# manifests' NetworkPolicies, and its outbound traffic goes through Azure
+# Firewall (userDefinedRouting). Its API server is private, and Entra ID
+# authorizes every request to it; it has no local accounts.
 #
 # Three pools, each in its own subnet:
 #   system    the cluster's add-ons only (CriticalAddonsOnly)
@@ -233,4 +233,79 @@ resource "azurerm_role_assignment" "deployer_aks_admin" {
   scope                = azurerm_kubernetes_cluster.this.id
   role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
   principal_id         = each.value
+}
+
+# --- Container Insights ---------------------------------------------------------
+
+# What Container Insights' agent (oms_agent, above) collects. With managed
+# identity authentication, it collects nothing until a data collection rule is
+# associated with the cluster, which az aks enable-addons makes but the
+# oms_agent block doesn't. This one collects the app's namespace, every minute:
+#   ContainerLogV2    its containers' stdout and stderr
+#   KubePodInventory  its pods and containers, with their restart counts
+#   KubeEvents        their Warning events: back-offs, failed probes, evictions
+# The namespace setting covers neither the containers' logs nor the agent's
+# own pods and their events, so a transformation keeps each table to the
+# namespace: kubectl's output from the run command (../scripts/aks.mjs), which
+# its pods print in the aks-command namespace, stays out of the workspace.
+locals {
+  container_insights_streams = ["Microsoft-ContainerLogV2", "Microsoft-KubePodInventory", "Microsoft-KubeEvents"]
+}
+
+resource "azurerm_monitor_data_collection_rule" "container_insights" {
+  name                = "MSCI-${var.location}-${local.aks_name}"
+  resource_group_name = local.rg_name
+  location            = var.location
+  kind                = "Linux"
+  description         = "Container Insights for ${local.aks_name}: the ${local.k8s_namespace} namespace's logs, pods and Warning events."
+  tags                = var.tags
+
+  destinations {
+    log_analytics {
+      name                  = "ciworkspace"
+      workspace_resource_id = azurerm_log_analytics_workspace.this.id
+    }
+  }
+
+  data_sources {
+    extension {
+      name           = "ContainerInsightsExtension"
+      extension_name = "ContainerInsights"
+      streams        = local.container_insights_streams
+      extension_json = jsonencode({
+        dataCollectionSettings = {
+          interval               = "1m"
+          namespaceFilteringMode = "Include"
+          namespaces             = [local.k8s_namespace]
+          enableContainerLogV2   = true
+        }
+      })
+    }
+  }
+
+  data_flow {
+    streams       = ["Microsoft-ContainerLogV2"]
+    destinations  = ["ciworkspace"]
+    transform_kql = "source | where PodNamespace == '${local.k8s_namespace}'"
+  }
+
+  data_flow {
+    streams       = ["Microsoft-KubePodInventory"]
+    destinations  = ["ciworkspace"]
+    transform_kql = "source | where Namespace == '${local.k8s_namespace}'"
+  }
+
+  data_flow {
+    streams       = ["Microsoft-KubeEvents"]
+    destinations  = ["ciworkspace"]
+    transform_kql = "source | where Namespace == '${local.k8s_namespace}'"
+  }
+}
+
+# The agent looks for its rule's association by this name.
+resource "azurerm_monitor_data_collection_rule_association" "container_insights" {
+  name                    = "ContainerInsightsExtension"
+  target_resource_id      = azurerm_kubernetes_cluster.this.id
+  data_collection_rule_id = azurerm_monitor_data_collection_rule.container_insights.id
+  description             = "Container Insights' data collection rule for ${local.aks_name}."
 }

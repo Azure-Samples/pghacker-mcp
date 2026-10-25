@@ -4,7 +4,8 @@
 # Azure Firewall: every node subnet's way out (network.tf's route table). Its
 # policy tells the pools apart by their subnets:
 #   - every pool: what AKS and its add-ons need (the AzureKubernetesService
-#     FQDN tag, this registry, this vault, Azure Monitor);
+#     FQDN tag, this registry, this vault, Azure Monitor), and the hosts in
+#     extra_node_fqdns, none by default;
 #   - the services pool: the named hosts that the indexer, oauth2-proxy, the
 #     home page and the token proxy reach;
 #   - the PilotSwarm pool: nothing more. Its agents' pods are kept off even
@@ -133,6 +134,21 @@ resource "azurerm_firewall_policy_rule_collection_group" "egress" {
         port = 443
       }
     }
+
+    # Agents that the subscription installs on every node, such as an Azure
+    # Policy's, may need hosts of their own.
+    dynamic "rule" {
+      for_each = length(var.extra_node_fqdns) > 0 ? [var.extra_node_fqdns] : []
+      content {
+        name              = "extra-node-fqdns"
+        source_addresses  = local.node_subnet_prefixes
+        destination_fqdns = rule.value
+        protocols {
+          type = "Https"
+          port = 443
+        }
+      }
+    }
   }
 
   application_rule_collection {
@@ -207,9 +223,28 @@ resource "azurerm_monitor_action_group" "egress" {
   }
 }
 
+# The denied-egress alert's query, and its clause for alert_ignored_hosts.
+# Only application rules' rows name a host, and no pattern matches an empty
+# one (variables.tf), so the clause leaves out no other denial.
+locals {
+  denied_egress_query = <<-KQL
+    union isfuzzy=true AZFWApplicationRule, AZFWNetworkRule, AZFWThreatIntel
+    | where Action == "Deny"
+    | where ipv4_is_in_range(SourceIp, "${var.subnet_prefixes.swarm}")
+  KQL
+
+  denied_egress_ignored = length(var.alert_ignored_hosts) == 0 ? "" : <<-KQL
+    | extend Host = iff(Type == "AZFWApplicationRule", tolower(column_ifexists("Fqdn", "")), "")
+    | where not(${join(" or ", [for pattern in var.alert_ignored_hosts : "Host matches regex @\"${pattern}\""])})
+  KQL
+}
+
 # The PilotSwarm pool's nodes may reach only the platform's endpoints, and its
 # pods not even those: a denial from its subnet means something there tried
-# to get out.
+# to get out. The alert counts every denial, by application rule, network
+# rule or threat intelligence, except an application rule's denial of a host
+# that alert_ignored_hosts matches, which the operators have looked into and
+# accept; the firewall still denies and logs it.
 resource "azurerm_monitor_scheduled_query_rules_alert_v2" "denied_egress" {
   name                  = "${var.name_prefix}-swarm-denied-egress"
   resource_group_name   = local.rg_name
@@ -223,11 +258,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "denied_egress" {
   tags                  = var.tags
 
   criteria {
-    query                   = <<-KQL
-      union isfuzzy=true AZFWApplicationRule, AZFWNetworkRule, AZFWThreatIntel
-      | where Action == "Deny"
-      | where ipv4_is_in_range(SourceIp, "${var.subnet_prefixes.swarm}")
-    KQL
+    query                   = "${local.denied_egress_query}${local.denied_egress_ignored}"
     time_aggregation_method = "Count"
     operator                = "GreaterThan"
     threshold               = 0

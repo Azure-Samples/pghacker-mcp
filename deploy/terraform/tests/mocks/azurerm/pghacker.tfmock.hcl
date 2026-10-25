@@ -93,6 +93,10 @@ mock_resource "azurerm_kubernetes_cluster_node_pool" {
   defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ContainerService/managedClusters/pghacker-example-aks/agentPools/services" }
 }
 
+mock_resource "azurerm_monitor_data_collection_rule" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Insights/dataCollectionRules/MSCI-westus3-pghacker-example-aks" }
+}
+
 mock_resource "azurerm_public_ip" {
   defaults = {
     id         = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/publicIPAddresses/pghacker-example-fw-ip"

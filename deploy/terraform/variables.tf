@@ -498,7 +498,7 @@ variable "swarm_pool" {
 }
 
 variable "alert_emails" {
-  description = "Addresses that the denied-egress alert emails: it fires when the firewall denies a connection from the PilotSwarm pool. Empty creates the alert without an action group; it shows in Azure Monitor."
+  description = "Addresses that the denied-egress alert emails: it fires when the firewall denies a connection from the PilotSwarm pool, but for hosts that alert_ignored_hosts matches. Empty creates the alert without an action group; it shows in Azure Monitor."
   type        = list(string)
   default     = []
   nullable    = false
@@ -506,6 +506,36 @@ variable "alert_emails" {
   validation {
     condition     = alltrue([for email in var.alert_emails : can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", email))])
     error_message = "alert_emails must hold email addresses."
+  }
+}
+
+variable "alert_ignored_hosts" {
+  description = "Regular expressions (RE2) of host names whose denials from the PilotSwarm pool, by application rule, the denied-egress alert doesn't count: ones that you've looked into and accept, such as an agent's on every node that it works without. The firewall still denies and logs them. Each is anchored with ^ and $. Empty, the default, counts every denial; set them in ignored environment settings."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for pattern in var.alert_ignored_hosts :
+      startswith(pattern, "^") && endswith(pattern, "$") && !can(regex("[\"\\s]", pattern)) && try(length(regexall(pattern, "")) == 0, false)
+    ])
+    error_message = "alert_ignored_hosts must hold regular expressions anchored with ^ and $, such as \"^agent\\\\.example\\\\.com$\", without quotes or spaces, that don't match an empty host name."
+  }
+}
+
+variable "extra_node_fqdns" {
+  description = "Host names that every pool's nodes may reach besides what AKS needs, for agents that the subscription installs on every node, such as an Azure Policy's: each a lowercase host name, or *. and a domain for its subdomains. Empty, the default, admits none; set them in ignored environment settings."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for fqdn in var.extra_node_fqdns :
+      length(fqdn) <= 253 && can(regex("^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", fqdn))
+    ])
+    error_message = "extra_node_fqdns must hold lowercase host names such as agent.example.com, or *. and a domain such as *.example.com, without a scheme, path, port or trailing dot."
   }
 }
 

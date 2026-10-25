@@ -266,6 +266,51 @@ run "cluster" {
     error_message = "The cluster must have the Key Vault secrets provider, rotating, Container Insights on the workspace, and its own user-assigned identity."
   }
 
+  # Container Insights collects the app's namespace alone, every minute: its
+  # containers' logs, its pods with their restarts, and its Warning events. The
+  # transformations keep the run command's pods (aks-command) and the agent's
+  # own out of every table.
+  assert {
+    condition = (
+      azurerm_monitor_data_collection_rule.container_insights.kind == "Linux"
+      && azurerm_monitor_data_collection_rule.container_insights.destinations[0].log_analytics[0].name == "ciworkspace"
+      && azurerm_monitor_data_collection_rule.container_insights.destinations[0].log_analytics[0].workspace_resource_id == azurerm_log_analytics_workspace.this.id
+      && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].name == "ContainerInsightsExtension"
+      && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].extension_name == "ContainerInsights"
+      && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].streams == tolist(["Microsoft-ContainerLogV2", "Microsoft-KubePodInventory", "Microsoft-KubeEvents"])
+      && jsondecode(azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].extension_json) == {
+        dataCollectionSettings = {
+          interval               = "1m"
+          namespaceFilteringMode = "Include"
+          namespaces             = ["pghacker"]
+          enableContainerLogV2   = true
+        }
+      }
+      && tomap({
+        for flow in azurerm_monitor_data_collection_rule.container_insights.data_flow :
+        join(",", flow.streams) => flow.transform_kql != null ? flow.transform_kql : ""
+        }) == tomap({
+        "Microsoft-ContainerLogV2"   = "source | where PodNamespace == 'pghacker'"
+        "Microsoft-KubePodInventory" = "source | where Namespace == 'pghacker'"
+        "Microsoft-KubeEvents"       = "source | where Namespace == 'pghacker'"
+      })
+      && alltrue([
+        for flow in azurerm_monitor_data_collection_rule.container_insights.data_flow :
+        flow.destinations == tolist(["ciworkspace"]) && flow.output_stream == null
+      ])
+    )
+    error_message = "Container Insights' rule must collect the pghacker namespace's logs, pods and events every minute into the workspace, keeping every table to that namespace."
+  }
+
+  assert {
+    condition = (
+      azurerm_monitor_data_collection_rule_association.container_insights.name == "ContainerInsightsExtension"
+      && azurerm_monitor_data_collection_rule_association.container_insights.target_resource_id == azurerm_kubernetes_cluster.this.id
+      && azurerm_monitor_data_collection_rule_association.container_insights.data_collection_rule_id == azurerm_monitor_data_collection_rule.container_insights.id
+    )
+    error_message = "Container Insights' rule must be associated with the cluster as ContainerInsightsExtension, the name its agent looks for."
+  }
+
   assert {
     condition = (
       azurerm_kubernetes_cluster.this.default_node_pool[0].name == "system"
@@ -456,6 +501,39 @@ run "firewall" {
       && length(azurerm_monitor_scheduled_query_rules_alert_v2.denied_egress.action) == 0
     )
     error_message = "The firewall's verdicts must go to the workspace, where an alert counts denials from the PilotSwarm pool's subnet; without alert_emails, it emails no one."
+  }
+
+  # Without alert_ignored_hosts, the alert counts every denial.
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.denied_egress.criteria[0].query == "union isfuzzy=true AZFWApplicationRule, AZFWNetworkRule, AZFWThreatIntel\n| where Action == \"Deny\"\n| where ipv4_is_in_range(SourceIp, \"10.66.0.128/27\")\n"
+    error_message = "Without alert_ignored_hosts, the denied-egress alert must count every denial from the PilotSwarm pool's subnet."
+  }
+}
+
+# Agents on every node: their hosts, which every pool may reach, and the
+# denials that the alert leaves out, by application rule alone.
+run "node_agents_get_their_hosts_and_the_alert_ignores_what_it_should" {
+  command = plan
+
+  variables {
+    extra_node_fqdns    = ["agent.example.com", "*.updates.example.net"]
+    alert_ignored_hosts = ["^cdn\\.example\\.com$", "^cache[0-9]+\\.example\\.net$"]
+  }
+
+  assert {
+    condition = (
+      tolist([for rule in azurerm_firewall_policy_rule_collection_group.egress.application_rule_collection[0].rule : rule.name]) == tolist(["aks", "registry", "key-vault", "container-insights", "extra-node-fqdns"])
+      && azurerm_firewall_policy_rule_collection_group.egress.application_rule_collection[0].rule[4].destination_fqdns == tolist(["agent.example.com", "*.updates.example.net"])
+      && toset(azurerm_firewall_policy_rule_collection_group.egress.application_rule_collection[0].rule[4].source_addresses) == toset(["10.66.0.64/27", "10.66.0.96/27", "10.66.0.128/27"])
+      && azurerm_firewall_policy_rule_collection_group.egress.application_rule_collection[0].rule[4].protocols[0].type == "Https"
+      && azurerm_firewall_policy_rule_collection_group.egress.application_rule_collection[0].rule[4].protocols[0].port == 443
+    )
+    error_message = "extra_node_fqdns must be reachable from every pool, over HTTPS, after what AKS needs."
+  }
+
+  assert {
+    condition     = azurerm_monitor_scheduled_query_rules_alert_v2.denied_egress.criteria[0].query == "union isfuzzy=true AZFWApplicationRule, AZFWNetworkRule, AZFWThreatIntel\n| where Action == \"Deny\"\n| where ipv4_is_in_range(SourceIp, \"10.66.0.128/27\")\n| extend Host = iff(Type == \"AZFWApplicationRule\", tolower(column_ifexists(\"Fqdn\", \"\")), \"\")\n| where not(Host matches regex @\"^cdn\\.example\\.com$\" or Host matches regex @\"^cache[0-9]+\\.example\\.net$\")\n"
+    error_message = "The denied-egress alert must leave out application rules' denials of the hosts that alert_ignored_hosts matches, and count every other denial."
   }
 }
 
@@ -832,6 +910,66 @@ run "alert_emails_are_addresses" {
   }
 
   expect_failures = [var.alert_emails]
+}
+
+run "alert_ignored_hosts_are_anchored" {
+  command = plan
+
+  variables {
+    alert_ignored_hosts = ["cdn\\.example\\.com"]
+  }
+
+  expect_failures = [var.alert_ignored_hosts]
+}
+
+run "alert_ignored_hosts_cannot_match_an_empty_host" {
+  command = plan
+
+  variables {
+    alert_ignored_hosts = ["^.*$"]
+  }
+
+  expect_failures = [var.alert_ignored_hosts]
+}
+
+run "alert_ignored_hosts_stay_inside_the_query" {
+  command = plan
+
+  variables {
+    alert_ignored_hosts = ["^a\"or\"$"]
+  }
+
+  expect_failures = [var.alert_ignored_hosts]
+}
+
+run "alert_ignored_hosts_are_regular_expressions" {
+  command = plan
+
+  variables {
+    alert_ignored_hosts = ["^cdn(\\.example\\.com$"]
+  }
+
+  expect_failures = [var.alert_ignored_hosts]
+}
+
+run "extra_node_fqdns_are_host_names" {
+  command = plan
+
+  variables {
+    extra_node_fqdns = ["https://agent.example.com/"]
+  }
+
+  expect_failures = [var.extra_node_fqdns]
+}
+
+run "extra_node_fqdns_cannot_admit_every_host" {
+  command = plan
+
+  variables {
+    extra_node_fqdns = ["*"]
+  }
+
+  expect_failures = [var.extra_node_fqdns]
 }
 
 run "app_env_cannot_replace_the_contract" {
