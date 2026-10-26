@@ -10,6 +10,10 @@
 
 pghacker-mcp answers questions about PostgreSQL's design history and source code, with citations. Ask why a feature works as it does, or what happened to SQL/PGQ, and an agent finds the pgsql-hackers threads, commits and code that answer it, and quotes them.
 
+This repository is open source, and we also host a public instance you can use right away, with no sign-in required:
+
+<p align="center"><a href="https://pghacker-mcp.dev/">https://pghacker-mcp.dev/</a></p>
+
 The project is powered by PostgreSQL itself. The mail, the graph and PostgreSQL's full commit history, live in [Azure HorizonDB](https://azure.microsoft.com/products/horizondb) (PostgreSQL when run locally), and PostgreSQL indexes do the searching: trigram for code and text, vector for semantic search, BM25 for full-text search, and B-trees over the history's commit ranges, with Apache AGE for the graph. Typical searches across the whole commit history return in milliseconds.
 
 ![How pghacker-mcp works: the crawler agents submit extracts through the indexer, which writes to one Azure HorizonDB database holding the mail, the code history and the knowledge graph; the public pghacker-mcp server reads it and answers your AI agent.](docs/assets/how-it-works.png)
