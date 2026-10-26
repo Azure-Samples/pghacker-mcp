@@ -2102,3 +2102,60 @@ async fn new_rules_parse_the_stored_patches_again_once() {
         .get(0);
     assert_eq!(runs, 1);
 }
+
+#[tokio::test]
+async fn prewarm_loads_tables_toast_and_indexes_and_denies_the_reader() {
+    use tokio_util::sync::CancellationToken;
+    let (db, _indexer) = corpus().await;
+    let client = db.indexer().await.unwrap();
+    // Large enough to spill into TOAST and populate HNSW and BM25 indexes.
+    client
+        .batch_execute(
+            "INSERT INTO message_chunks (message_id, thread_id, ord, content, embedding)
+             VALUES (100, 10, 99, repeat('json_table plan ', 600),
+                     array_fill(0.1::real, ARRAY[1536])::real[]::vector::halfvec)",
+        )
+        .await
+        .unwrap();
+    let report = pghacker_indexer::prewarm::all(&client, &CancellationToken::new())
+        .await
+        .unwrap()
+        .expect("pg_prewarm is installed");
+    assert!(report.tables >= 50, "{report:?}");
+    assert!(report.toast >= 20, "{report:?}");
+    assert!(report.indexes >= 150, "{report:?}");
+    assert!(report.blocks > 0, "{report:?}");
+
+    // Relations outside pghacker and pghacker_graph are refused, and a
+    // dropped relation's OID returns 0.
+    let denied = client
+        .query_one(
+            "SELECT pghacker.prewarm_relation('pg_catalog.pg_class'::regclass::oid)",
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{denied:?}").contains("cannot prewarm"),
+        "{denied:?}"
+    );
+    let dropped: Option<i64> = client
+        .query_one("SELECT pghacker.prewarm_relation(0::oid)", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(dropped, Some(0));
+
+    // pgh_reader cannot call prewarm_relation or pg_prewarm.
+    let reader = db.reader().await.unwrap();
+    for sql in [
+        "SELECT pghacker.prewarm_relation('pghacker.authors'::regclass::oid)",
+        "SELECT public.pg_prewarm('pghacker.authors'::regclass)",
+    ] {
+        let err = reader.query_one(sql, &[]).await.unwrap_err();
+        assert!(
+            format!("{err:?}").contains("permission denied"),
+            "{sql}: {err:?}"
+        );
+    }
+}

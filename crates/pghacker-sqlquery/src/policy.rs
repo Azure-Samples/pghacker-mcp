@@ -514,7 +514,7 @@ pub(super) fn check_function(name: &str) -> Result<(), String> {
             "Run the read without a sleep",
         ),
         "pg_notify" => ("sends notifications", "Read without notifications"),
-        "graph_request_full" | "rethread_mail" => (
+        "graph_request_full" | "rethread_mail" | "prewarm_relation" => (
             "changes corpus maintenance state",
             "Query the corpus tables without scheduling repair or sync jobs",
         ),
@@ -551,6 +551,9 @@ pub(super) fn check_function(name: &str) -> Result<(), String> {
                     | "brin_summarize_new_values"
                     | "brin_summarize_range"
                     | "gin_clean_pending_list"
+                    | "pg_prewarm"
+                    | "autoprewarm_start_worker"
+                    | "autoprewarm_dump_now"
                     | "bm25_cache_apply_to_tail"
                     | "bm25_cache_bump_spill_generation"
                     | "bm25_cache_cold_build"

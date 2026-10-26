@@ -15,6 +15,7 @@ pub mod graph;
 pub mod history;
 pub mod jobs;
 pub mod lanes;
+pub mod prewarm;
 pub mod redact;
 pub mod repair;
 pub mod rethread;

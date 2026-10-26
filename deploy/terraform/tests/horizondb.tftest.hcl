@@ -53,10 +53,10 @@ override_resource {
 run "parameters_and_private_path" {
   assert {
     condition = jsonencode(azapi_resource.pg_parameters.body.properties.parameters) == jsonencode([
-      { name = "azure.extensions", value = "age,pg_textsearch,pg_trgm,vector" },
+      { name = "azure.extensions", value = "age,pg_prewarm,pg_textsearch,pg_trgm,vector" },
       { name = "shared_preload_libraries", value = "age,pg_textsearch" },
     ])
-    error_message = "The parameter group must allow exactly age, pg_textsearch, pg_trgm and vector, and preload exactly age and pg_textsearch."
+    error_message = "The parameter group must allow exactly age, pg_prewarm, pg_textsearch, pg_trgm and vector, and preload exactly age and pg_textsearch."
   }
 
   assert {
@@ -136,7 +136,7 @@ run "max_connections_makes_a_new_group" {
 
   assert {
     condition = jsonencode(azapi_resource.pg_parameters.body.properties.parameters) == jsonencode([
-      { name = "azure.extensions", value = "age,pg_textsearch,pg_trgm,vector" },
+      { name = "azure.extensions", value = "age,pg_prewarm,pg_textsearch,pg_trgm,vector" },
       { name = "shared_preload_libraries", value = "age,pg_textsearch" },
       { name = "max_connections", value = "400" },
     ])

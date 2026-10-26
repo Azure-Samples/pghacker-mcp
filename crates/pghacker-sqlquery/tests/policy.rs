@@ -65,7 +65,10 @@ fn dangerous_function_families_are_refused() {
         ),
         ("delays", vec!["pg_sleep", "pg_sleep_for", "pg_sleep_until"]),
         ("notification", vec!["pg_notify"]),
-        ("maintenance", vec!["graph_request_full", "rethread_mail"]),
+        (
+            "maintenance",
+            vec!["graph_request_full", "rethread_mail", "prewarm_relation"],
+        ),
         ("coordination", vec!["pg_export_snapshot"]),
         ("sequence", vec!["nextval", "setval"]),
         (
@@ -91,6 +94,9 @@ fn dangerous_function_families_are_refused() {
                 "brin_summarize_new_values",
                 "brin_summarize_range",
                 "gin_clean_pending_list",
+                "pg_prewarm",
+                "autoprewarm_start_worker",
+                "autoprewarm_dump_now",
                 "bm25_compact",
                 "bm25_compact_step",
                 "bm25_compact_step_if_current",

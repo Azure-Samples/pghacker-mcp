@@ -17,11 +17,11 @@ locals {
   }
 
   # Merged into HorizonDB's defaults, whose azure.extensions allows nothing.
-  # The app's bootstrap creates these four extensions; AGE and pg_textsearch
+  # The app's bootstrap creates these five extensions; AGE and pg_textsearch
   # must also be preloaded (HorizonDB adds its own libraries to the list).
   pg_parameters = concat(
     [
-      { name = "azure.extensions", value = "age,pg_textsearch,pg_trgm,vector" },
+      { name = "azure.extensions", value = "age,pg_prewarm,pg_textsearch,pg_trgm,vector" },
       { name = "shared_preload_libraries", value = "age,pg_textsearch" },
     ],
     var.horizondb_max_connections == null ? [] : [

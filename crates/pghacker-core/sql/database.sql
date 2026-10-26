@@ -18,6 +18,27 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS pg_textsearch;
 
+-- Prewarming shared_buffers is optional: an existing Azure cluster whose
+-- azure.extensions hasn't been updated yet skips creating the extension.
+DO $$
+DECLARE
+    fn regprocedure;
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_prewarm;
+    FOR fn IN
+        SELECT p.oid::regprocedure
+        FROM pg_proc p
+        JOIN pg_depend d ON d.objid = p.oid AND d.classid = 'pg_proc'::regclass
+        JOIN pg_extension e ON e.oid = d.refobjid
+        WHERE e.extname = 'pg_prewarm'
+    LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, pgh_reader', fn);
+    END LOOP;
+EXCEPTION WHEN feature_not_supported OR insufficient_privilege OR invalid_parameter_value OR undefined_file THEN
+    NULL;
+END
+$$;
+
 -- Filtered vector searches keep scanning the HNSW graph until LIMIT is filled,
 -- in relaxed distance order so closer matches found past the initial beam
 -- aren't discarded. An administrator that isn't a superuser, as in Azure, may
@@ -114,3 +135,77 @@ GRANT USAGE ON SCHEMA pghacker_graph TO pgh_indexer, pgh_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA pghacker_graph TO pgh_indexer;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA pghacker_graph TO pgh_indexer;
 GRANT SELECT ON ALL TABLES IN SCHEMA pghacker_graph TO pgh_reader;
+
+-- Prewarms one relation of pghacker or pghacker_graph (a table, its TOAST
+-- table, or an index of either), main, visibility-map and free-space-map
+-- forks, into shared_buffers. SECURITY DEFINER so that pgh_indexer can also
+-- prewarm pghacker_graph's indexes and TOAST tables, which the administrator
+-- owns. Returns NULL when pg_prewarm isn't installed, or 0 if the relation
+-- was dropped meanwhile.
+CREATE OR REPLACE FUNCTION pghacker.prewarm_relation(target oid)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+    ext_schema text;
+    blocks bigint := 0;
+    fork_blocks bigint;
+BEGIN
+    SELECT n.nspname INTO ext_schema
+    FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+    WHERE e.extname = 'pg_prewarm';
+    IF ext_schema IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF NOT EXISTS (
+        SELECT FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.oid = target
+          AND c.relkind IN ('r', 'm', 'i', 't')
+          AND (
+              n.nspname IN ('pghacker', 'pghacker_graph')
+              OR c.oid IN (
+                  SELECT b.reltoastrelid
+                  FROM pg_class b JOIN pg_namespace bn ON bn.oid = b.relnamespace
+                  WHERE bn.nspname IN ('pghacker', 'pghacker_graph') AND b.reltoastrelid <> 0
+              )
+              OR c.oid IN (
+                  SELECT i.indexrelid
+                  FROM pg_class b
+                  JOIN pg_namespace bn ON bn.oid = b.relnamespace
+                  JOIN pg_index i ON i.indrelid = b.reltoastrelid
+                  WHERE bn.nspname IN ('pghacker', 'pghacker_graph') AND b.reltoastrelid <> 0
+              )
+          )
+    ) THEN
+        IF NOT EXISTS (SELECT FROM pg_class WHERE oid = target) THEN
+            RETURN 0;
+        END IF;
+        RAISE EXCEPTION 'cannot prewarm %', target::regclass
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF pg_relation_size(target, 'main') > 0 THEN
+        EXECUTE format('SELECT %I.pg_prewarm($1::regclass, ''buffer'', ''main'')', ext_schema)
+            INTO fork_blocks USING target;
+        blocks := blocks + coalesce(fork_blocks, 0);
+    END IF;
+    IF pg_relation_size(target, 'vm') > 0 THEN
+        EXECUTE format('SELECT %I.pg_prewarm($1::regclass, ''buffer'', ''vm'')', ext_schema)
+            INTO fork_blocks USING target;
+        blocks := blocks + coalesce(fork_blocks, 0);
+    END IF;
+    IF pg_relation_size(target, 'fsm') > 0 THEN
+        EXECUTE format('SELECT %I.pg_prewarm($1::regclass, ''buffer'', ''fsm'')', ext_schema)
+            INTO fork_blocks USING target;
+        blocks := blocks + coalesce(fork_blocks, 0);
+    END IF;
+    RETURN blocks;
+EXCEPTION WHEN undefined_table OR undefined_object THEN
+    RETURN 0;
+END
+$$;
+
+REVOKE ALL ON FUNCTION pghacker.prewarm_relation(oid) FROM PUBLIC, pgh_reader;
+GRANT EXECUTE ON FUNCTION pghacker.prewarm_relation(oid) TO pgh_indexer;

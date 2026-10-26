@@ -680,6 +680,10 @@ pub async fn run_leading(
             if !wait_for_orphans(&indexer, &stop).await? {
                 return Ok(());
             }
+            tokio::spawn(crate::prewarm::watch(
+                indexer.settings.database_url.clone(),
+                stop.clone(),
+            ));
             run_workers(indexer, workers, stop, abort).await
         }
     };
