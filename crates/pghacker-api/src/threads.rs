@@ -96,39 +96,53 @@ pub async fn search_threads(
     order.truncate(limit);
     let thread_ids = order.clone();
     let chunk_ids: Vec<i64> = order.iter().flat_map(|t| chunks_of[t].clone()).collect();
-    let threads: HashMap<i64, tokio_postgres::Row> = client
-        .query(
-            "SELECT id, subject, root_message_id, started_at, last_at, message_count, participant_count
-             FROM threads WHERE id = ANY ($1)",
-            &[&thread_ids],
-        )
-        .await?
-        .into_iter()
-        .map(|row| (row.get(0), row))
-        .collect();
-    let passages: HashMap<i64, Value> = client
-        .query(
-            "SELECT c.id, m.message_id, coalesce(a.display_name, m.from_name), m.sent_at, c.content
-             FROM message_chunks c JOIN messages m ON m.id = c.message_id LEFT JOIN authors a ON a.id = m.author_id
-             WHERE c.id = ANY ($1)",
-            &[&chunk_ids],
-        )
-        .await?
-        .iter()
-        .map(|row| {
-            (
-                row.get(0),
-                json!({
-                    "message_id": row.get::<_, String>(1),
-                    "author": row.get::<_, String>(2),
-                    "sent_at": row.get::<_, Option<DateTime<Utc>>>(3),
-                    "passage": snippet(&row.get::<_, String>(4), searcher.query(), 320),
-                }),
+    let threads_fut = async {
+        if thread_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Ok(client
+            .query(
+                "SELECT id, subject, root_message_id, started_at, last_at, message_count, participant_count
+                 FROM threads WHERE id = ANY ($1)",
+                &[&thread_ids],
             )
-        })
-        .collect();
-    let participants = top_participants(client, &thread_ids, 5).await?;
-    let features = linked_features(client, &thread_ids).await?;
+            .await?
+            .into_iter()
+            .map(|row| (row.get(0), row))
+            .collect::<HashMap<i64, tokio_postgres::Row>>())
+    };
+    let passages_fut = async {
+        if chunk_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Ok(client
+            .query(
+                "SELECT c.id, m.message_id, coalesce(a.display_name, m.from_name), m.sent_at, c.content
+                 FROM message_chunks c JOIN messages m ON m.id = c.message_id LEFT JOIN authors a ON a.id = m.author_id
+                 WHERE c.id = ANY ($1)",
+                &[&chunk_ids],
+            )
+            .await?
+            .iter()
+            .map(|row| {
+                (
+                    row.get(0),
+                    json!({
+                        "message_id": row.get::<_, String>(1),
+                        "author": row.get::<_, String>(2),
+                        "sent_at": row.get::<_, Option<DateTime<Utc>>>(3),
+                        "passage": snippet(&row.get::<_, String>(4), searcher.query(), 320),
+                    }),
+                )
+            })
+            .collect::<HashMap<i64, Value>>())
+    };
+    let (threads, passages, participants, features) = tokio::try_join!(
+        threads_fut,
+        passages_fut,
+        top_participants(client, &thread_ids, 5),
+        linked_features(client, &thread_ids),
+    )?;
     let results: Vec<Value> = order
         .iter()
         .filter_map(|id| {
@@ -159,6 +173,9 @@ async fn top_participants(
     threads: &[i64],
     n: i64,
 ) -> Result<HashMap<i64, Vec<String>>> {
+    if threads.is_empty() {
+        return Ok(HashMap::new());
+    }
     let rows = client
         .query(
             "SELECT thread_id, array_agg(name ORDER BY messages DESC, name) FROM (
@@ -177,6 +194,9 @@ async fn linked_features(
     client: &impl GenericClient,
     threads: &[i64],
 ) -> Result<HashMap<i64, Vec<Value>>> {
+    if threads.is_empty() {
+        return Ok(HashMap::new());
+    }
     let rows = client
         .query(
             "SELECT ft.thread_id, f.slug, f.name, f.status, f.release FROM feature_threads ft

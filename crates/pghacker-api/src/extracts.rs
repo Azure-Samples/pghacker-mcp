@@ -62,22 +62,16 @@ pub async fn search_extracts(
     let authors = author.map(|id| vec![id]);
     let mut rankings: Vec<Vec<(ExtractKind, i64)>> = Vec::new();
     for kind in &kinds {
-        let (table, filter) = match kind {
-            ExtractKind::Feature => (
-                "features",
-                "t.merged_into IS NULL AND cardinality(coalesce($3::bigint[], '{}')) >= 0",
-            ),
-            ExtractKind::Decision => (
-                "decisions",
-                "t.merged_into IS NULL AND cardinality(coalesce($3::bigint[], '{}')) >= 0",
-            ),
-            ExtractKind::Position => (
-                "positions",
-                "($3::bigint[] IS NULL OR t.author_id = ANY ($3))",
-            ),
+        let (table, filter, filter_ids) = match (kind, authors.as_ref()) {
+            (ExtractKind::Feature, _) => ("features", "t.merged_into IS NULL", None),
+            (ExtractKind::Decision, _) => ("decisions", "t.merged_into IS NULL", None),
+            (ExtractKind::Position, Some(ids)) => {
+                ("positions", "t.author_id = ANY ($3)", Some(ids))
+            }
+            (ExtractKind::Position, None) => ("positions", "TRUE", None),
         };
         let ids = searcher
-            .rank_table(client, table, filter, authors.as_ref(), 60)
+            .rank_table(client, table, filter, filter_ids, 60)
             .await?;
         rankings.push(ids.into_iter().map(|id| (*kind, id)).collect());
     }
@@ -97,17 +91,55 @@ pub async fn search_extracts(
         std::collections::HashMap::new();
 
     let feature_ids = ids_of(ExtractKind::Feature);
-    let feature_cites = citations(client, "feature", &feature_ids, 3).await?;
-    for row in client
-        .query(
-            "SELECT f.id, f.slug, f.name, f.description, f.status, f.release,
-                    (SELECT count(*) FROM feature_threads ft WHERE ft.feature_id = f.id),
-                    (SELECT array_agg(path ORDER BY path) FROM feature_files ff WHERE ff.feature_id = f.id)
-             FROM features f WHERE f.id = ANY ($1)",
-            &[&feature_ids],
-        )
-        .await?
-    {
+    let decision_ids = ids_of(ExtractKind::Decision);
+    let position_ids = ids_of(ExtractKind::Position);
+    let (feature_cites, feature_rows, decision_cites, decision_rows, position_cites, position_rows) =
+        tokio::try_join!(
+            citations(client, "feature", &feature_ids, 3),
+            async {
+                if feature_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(client
+                    .query(
+                        "SELECT f.id, f.slug, f.name, f.description, f.status, f.release,
+                                (SELECT count(*) FROM feature_threads ft WHERE ft.feature_id = f.id),
+                                (SELECT array_agg(path ORDER BY path) FROM feature_files ff WHERE ff.feature_id = f.id)
+                         FROM features f WHERE f.id = ANY ($1)",
+                        &[&feature_ids],
+                    )
+                    .await?)
+            },
+            citations(client, "decision", &decision_ids, 3),
+            async {
+                if decision_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(client
+                    .query(
+                        "SELECT d.id, d.title, d.outcome, d.alternatives, d.rationale, d.decided_at, f.slug, f.name, d.thread_id
+                         FROM decisions d LEFT JOIN features f ON f.id = d.feature_id WHERE d.id = ANY ($1)",
+                        &[&decision_ids],
+                    )
+                    .await?)
+            },
+            citations(client, "position", &position_ids, 3),
+            async {
+                if position_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                Ok(client
+                    .query(
+                        "SELECT p.id, a.display_name, p.author_id, p.stance, p.summary, f.slug, f.name, d.id, d.title, p.thread_id
+                         FROM positions p JOIN authors a ON a.id = p.author_id
+                         LEFT JOIN features f ON f.id = p.feature_id LEFT JOIN decisions d ON d.id = p.decision_id
+                         WHERE p.id = ANY ($1)",
+                        &[&position_ids],
+                    )
+                    .await?)
+            },
+        )?;
+    for row in feature_rows {
         let id: i64 = row.get(0);
         items.insert((ExtractKind::Feature, id), json!({
             "kind": "feature", "id": id, "slug": row.get::<_, String>(1), "name": row.get::<_, String>(2),
@@ -117,16 +149,7 @@ pub async fn search_extracts(
             "citations": feature_cites.get(&id).cloned().unwrap_or_default(),
         }));
     }
-    let decision_ids = ids_of(ExtractKind::Decision);
-    let decision_cites = citations(client, "decision", &decision_ids, 3).await?;
-    for row in client
-        .query(
-            "SELECT d.id, d.title, d.outcome, d.alternatives, d.rationale, d.decided_at, f.slug, f.name, d.thread_id
-             FROM decisions d LEFT JOIN features f ON f.id = d.feature_id WHERE d.id = ANY ($1)",
-            &[&decision_ids],
-        )
-        .await?
-    {
+    for row in decision_rows {
         let id: i64 = row.get(0);
         items.insert((ExtractKind::Decision, id), json!({
             "kind": "decision", "id": id, "title": row.get::<_, String>(1), "outcome": row.get::<_, String>(2),
@@ -137,18 +160,7 @@ pub async fn search_extracts(
             "citations": decision_cites.get(&id).cloned().unwrap_or_default(),
         }));
     }
-    let position_ids = ids_of(ExtractKind::Position);
-    let position_cites = citations(client, "position", &position_ids, 3).await?;
-    for row in client
-        .query(
-            "SELECT p.id, a.display_name, p.author_id, p.stance, p.summary, f.slug, f.name, d.id, d.title, p.thread_id
-             FROM positions p JOIN authors a ON a.id = p.author_id
-             LEFT JOIN features f ON f.id = p.feature_id LEFT JOIN decisions d ON d.id = p.decision_id
-             WHERE p.id = ANY ($1)",
-            &[&position_ids],
-        )
-        .await?
-    {
+    for row in position_rows {
         let id: i64 = row.get(0);
         items.insert((ExtractKind::Position, id), json!({
             "kind": "position", "id": id, "author": row.get::<_, String>(1), "author_id": row.get::<_, i64>(2),

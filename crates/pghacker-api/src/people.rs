@@ -99,29 +99,38 @@ pub async fn search_authors(client: &impl GenericClient, args: SearchAuthorsArgs
 
 pub async fn get_author(client: &impl GenericClient, args: GetAuthorArgs) -> Result<Value> {
     let id = resolve_author(client, &args.author).await?;
-    let author = client
-        .query_one(
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[&id];
+    let (author, names_rows, thread_rows, stance_row, feature_rows) = tokio::try_join!(
+        client.query_one(
             "SELECT id, display_name, message_count, first_seen, last_seen FROM authors WHERE id = $1",
-            &[&id],
-        )
-        .await?;
-    let names: Vec<Value> = client
-        .query(
+            params,
+        ),
+        client.query(
             "SELECT name, count FROM author_names WHERE author_id = $1 ORDER BY count DESC, name",
-            &[&id],
-        )
-        .await?
-        .iter()
-        .map(|row| json!({ "name": row.get::<_, String>(0), "messages": row.get::<_, i32>(1) }))
-        .collect();
-    let threads: Vec<Value> = client
-        .query(
+            params,
+        ),
+        client.query(
             "SELECT t.id, t.subject, count(*) AS mine, t.message_count, min(m.sent_at), max(m.sent_at)
              FROM messages m JOIN threads t ON t.id = m.thread_id WHERE m.author_id = $1
              GROUP BY t.id ORDER BY count(*) DESC, max(m.sent_at) DESC LIMIT 15",
-            &[&id],
-        )
-        .await?
+            params,
+        ),
+        client.query_one(
+            "SELECT coalesce(jsonb_object_agg(stance, n), '{}') FROM
+             (SELECT stance, count(*) AS n FROM positions WHERE author_id = $1 GROUP BY stance) x",
+            params,
+        ),
+        client.query(
+            "SELECT f.slug, f.name, f.status, array_agg(DISTINCT p.stance) FROM positions p JOIN features f ON f.id = p.feature_id
+             WHERE p.author_id = $1 AND f.merged_into IS NULL GROUP BY f.id ORDER BY count(*) DESC LIMIT 20",
+            params,
+        ),
+    )?;
+    let names: Vec<Value> = names_rows
+        .iter()
+        .map(|row| json!({ "name": row.get::<_, String>(0), "messages": row.get::<_, i32>(1) }))
+        .collect();
+    let threads: Vec<Value> = thread_rows
         .iter()
         .map(|row| {
             json!({ "thread_id": row.get::<_, i64>(0), "subject": row.get::<_, String>(1),
@@ -129,21 +138,8 @@ pub async fn get_author(client: &impl GenericClient, args: GetAuthorArgs) -> Res
                     "first": row.get::<_, Option<DateTime<Utc>>>(4), "last": row.get::<_, Option<DateTime<Utc>>>(5) })
         })
         .collect();
-    let stances: Value = client
-        .query_one(
-            "SELECT coalesce(jsonb_object_agg(stance, n), '{}') FROM
-             (SELECT stance, count(*) AS n FROM positions WHERE author_id = $1 GROUP BY stance) x",
-            &[&id],
-        )
-        .await?
-        .get(0);
-    let features: Vec<Value> = client
-        .query(
-            "SELECT f.slug, f.name, f.status, array_agg(DISTINCT p.stance) FROM positions p JOIN features f ON f.id = p.feature_id
-             WHERE p.author_id = $1 AND f.merged_into IS NULL GROUP BY f.id ORDER BY count(*) DESC LIMIT 20",
-            &[&id],
-        )
-        .await?
+    let stances: Value = stance_row.get(0);
+    let features: Vec<Value> = feature_rows
         .iter()
         .map(|row| json!({ "slug": row.get::<_, String>(0), "name": row.get::<_, String>(1),
                            "status": row.get::<_, String>(2), "stances": row.get::<_, Vec<String>>(3) }))
@@ -180,19 +176,31 @@ pub async fn author_perspective(
         .map(|day| day.and_utc());
     let paths = source_paths(&args.paths);
     // The topic's rankings fused into one, then fused with the paths' at
-    // equal weight, so that neither crowds the other out.
-    let topic_ranked: Vec<i64> = rrf(&topic_positions(client, searcher, id).await?, RRF_K)
+    // equal weight, so that neither crowds the other out; and the author's
+    // own most relevant messages, as further evidence.
+    let topic_fut = topic_positions(client, searcher, id);
+    let path_fut = async {
+        if paths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            path_positions(client, id, &paths).await
+        }
+    };
+    let before_fut = async {
+        match until {
+            Some(until) => Ok(Some(positions_before(client, id, until).await?)),
+            None => Ok(None),
+        }
+    };
+    let chunks_fut = searcher.rank_chunks(client, Some(&authors), None, until, 20);
+    let (topic_lists, path_ranked, before, mut chunks) =
+        tokio::try_join!(topic_fut, path_fut, before_fut, chunks_fut)?;
+    let topic_ranked: Vec<i64> = rrf(&topic_lists, RRF_K)
         .into_iter()
         .map(|(position, _)| position)
         .collect();
-    let path_ranked = if paths.is_empty() {
-        Vec::new()
-    } else {
-        path_positions(client, id, &paths).await?
-    };
     let mut rankings = vec![topic_ranked.clone(), path_ranked.clone()];
-    if let Some(until) = until {
-        let before = positions_before(client, id, until).await?;
+    if let Some(before) = before {
         for ranking in &mut rankings {
             ranking.retain(|position| before.contains(position));
         }
@@ -205,18 +213,25 @@ pub async fn author_perspective(
         .collect();
     let on_topic: HashSet<i64> = topic_ranked.into_iter().collect();
     let on_paths: HashSet<i64> = path_ranked.into_iter().collect();
-    let cites = citations(client, "position", &position_ids, 3).await?;
+    let (cites, pos_rows) = tokio::try_join!(
+        citations(client, "position", &position_ids, 3),
+        async {
+            if position_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(client
+                .query(
+                    "SELECT p.id, p.stance, p.summary, f.slug, f.name, f.status, d.id, d.title, t.id, t.subject, t.last_at
+                     FROM positions p JOIN threads t ON t.id = p.thread_id
+                     LEFT JOIN features f ON f.id = p.feature_id LEFT JOIN decisions d ON d.id = p.decision_id
+                     WHERE p.id = ANY ($1)",
+                    &[&position_ids],
+                )
+                .await?)
+        },
+    )?;
     let mut positions: HashMap<i64, Value> = HashMap::new();
-    for row in client
-        .query(
-            "SELECT p.id, p.stance, p.summary, f.slug, f.name, f.status, d.id, d.title, t.id, t.subject, t.last_at
-             FROM positions p JOIN threads t ON t.id = p.thread_id
-             LEFT JOIN features f ON f.id = p.feature_id LEFT JOIN decisions d ON d.id = p.decision_id
-             WHERE p.id = ANY ($1)",
-            &[&position_ids],
-        )
-        .await?
-    {
+    for row in pos_rows {
         let pid: i64 = row.get(0);
         let mut position = json!({
             "position_id": pid, "stance": row.get::<_, String>(1), "summary": row.get::<_, String>(2),
@@ -247,11 +262,9 @@ pub async fn author_perspective(
             .entry(position["stance"].as_str().unwrap_or_default().to_owned())
             .or_default() += 1;
     }
-    // The author's own most relevant messages, as further evidence.
-    let mut chunks = searcher
-        .rank_chunks(client, Some(&authors), None, until, 40)
-        .await?;
-    if let Some(embedding) = topic_embedding(searcher) {
+    if !chunks.is_empty()
+        && let Some(embedding) = topic_embedding(searcher)
+    {
         let ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
         let distances: HashMap<i64, Option<f64>> = client
             .query(
@@ -279,14 +292,18 @@ pub async fn author_perspective(
     }
     let mut seen_messages = std::collections::HashSet::new();
     let chunk_ids: Vec<i64> = chunks.iter().map(|(chunk, _)| *chunk).collect();
-    let rows = client
-        .query(
-            "SELECT c.id, m.message_id, m.sent_at, t.id, t.subject, c.content
-             FROM message_chunks c JOIN messages m ON m.id = c.message_id JOIN threads t ON t.id = m.thread_id
-             WHERE c.id = ANY ($1)",
-            &[&chunk_ids],
-        )
-        .await?;
+    let rows = if chunk_ids.is_empty() {
+        Vec::new()
+    } else {
+        client
+            .query(
+                "SELECT c.id, m.message_id, m.sent_at, t.id, t.subject, c.content
+                 FROM message_chunks c JOIN messages m ON m.id = c.message_id JOIN threads t ON t.id = m.thread_id
+                 WHERE c.id = ANY ($1)",
+                &[&chunk_ids],
+            )
+            .await?
+    };
     let by_chunk: HashMap<i64, &tokio_postgres::Row> =
         rows.iter().map(|row| (row.get(0), row)).collect();
     let mut messages = Vec::new();
@@ -419,15 +436,78 @@ async fn topic_positions(
     author: i64,
 ) -> Result<Vec<Vec<i64>>> {
     let mut rankings: Vec<Vec<i64>> = Vec::new();
+    let mut bm25_columns: [Vec<(i64, f64)>; 3] = Default::default();
+    let mut bm25_ids: Vec<i64> = Vec::new();
+    if searcher.mode != Mode::Semantic {
+        let rows = client
+            .query(
+                "WITH pos AS (
+                     SELECT p.id,
+                            (p.search_text <@> to_bm25query($1, 'pghacker.positions_bm25'))::float8 AS score
+                     FROM positions p
+                     WHERE p.author_id = $2
+                     ORDER BY p.search_text <@> to_bm25query($1, 'pghacker.positions_bm25')
+                     LIMIT 200
+                 ),
+                 feat AS (
+                     SELECT p.id,
+                            (f.search_text <@> to_bm25query($1, 'pghacker.features_bm25'))::float8 AS score
+                     FROM features f JOIN positions p ON p.feature_id = f.id
+                     WHERE p.author_id = $2
+                     ORDER BY f.search_text <@> to_bm25query($1, 'pghacker.features_bm25')
+                     LIMIT 200
+                 ),
+                 dec AS (
+                     SELECT p.id,
+                            (d.search_text <@> to_bm25query($1, 'pghacker.decisions_bm25'))::float8 AS score
+                     FROM decisions d JOIN positions p ON p.decision_id = d.id
+                     WHERE p.author_id = $2
+                     ORDER BY d.search_text <@> to_bm25query($1, 'pghacker.decisions_bm25')
+                     LIMIT 200
+                 )
+                 SELECT 0::int4, id, score FROM pos WHERE score < 0
+                 UNION ALL
+                 SELECT 1::int4, id, score FROM feat WHERE score < 0
+                 UNION ALL
+                 SELECT 2::int4, id, score FROM dec WHERE score < 0",
+                &[&searcher.query(), &author],
+            )
+            .await?;
+        let mut seen = HashSet::new();
+        for row in &rows {
+            let col: i32 = row.get(0);
+            let id: i64 = row.get(1);
+            let score: f64 = row.get(2);
+            bm25_columns[col as usize].push((id, score));
+            if seen.insert(id) {
+                bm25_ids.push(id);
+            }
+        }
+    }
     let mut counted: Option<HashSet<i64>> = None;
     if let Some(embedding) = topic_embedding(searcher) {
         let rows = client
             .query(
-                "SELECT p.id, LEAST(p.embedding <=> $1, f.embedding <=> $1, d.embedding <=> $1)::float8
-                 FROM positions p LEFT JOIN features f ON f.id = p.feature_id
-                 LEFT JOIN decisions d ON d.id = p.decision_id
-                 WHERE p.author_id = $2",
-                &[embedding, &author],
+                "WITH cands AS (
+                     (SELECT p.id FROM positions p
+                      WHERE p.author_id = $2 AND p.embedding IS NOT NULL
+                      ORDER BY p.embedding <=> $1 LIMIT 100)
+                     UNION
+                     (SELECT p.id FROM features f JOIN positions p ON p.feature_id = f.id
+                      WHERE p.author_id = $2 AND f.embedding IS NOT NULL
+                      ORDER BY f.embedding <=> $1 LIMIT 100)
+                     UNION
+                     (SELECT p.id FROM decisions d JOIN positions p ON p.decision_id = d.id
+                      WHERE p.author_id = $2 AND d.embedding IS NOT NULL
+                      ORDER BY d.embedding <=> $1 LIMIT 100)
+                     UNION
+                     SELECT unnest($3::bigint[])
+                 )
+                 SELECT p.id, LEAST(p.embedding <=> $1, f.embedding <=> $1, d.embedding <=> $1)::float8
+                 FROM cands c JOIN positions p ON p.id = c.id
+                 LEFT JOIN features f ON f.id = p.feature_id
+                 LEFT JOIN decisions d ON d.id = p.decision_id",
+                &[embedding, &author, &bm25_ids],
             )
             .await?;
         let mut near: Vec<(i64, f64)> = rows
@@ -450,32 +530,10 @@ async fn topic_positions(
         rankings.push(near.into_iter().map(|(id, _)| id).collect());
     }
     if searcher.mode != Mode::Semantic {
-        let rows = client
-            .query(
-                "SELECT p.id,
-                        (p.search_text <@> to_bm25query($1, 'pghacker.positions_bm25'))::float8,
-                        (f.search_text <@> to_bm25query($1, 'pghacker.features_bm25'))::float8,
-                        (d.search_text <@> to_bm25query($1, 'pghacker.decisions_bm25'))::float8
-                 FROM positions p LEFT JOIN features f ON f.id = p.feature_id
-                 LEFT JOIN decisions d ON d.id = p.decision_id
-                 WHERE p.author_id = $2",
-                &[&searcher.query(), &author],
-            )
-            .await?;
-        for column in 1..=3 {
-            let mut matched: Vec<(i64, f64)> = rows
-                .iter()
-                .filter_map(|row| {
-                    let id: i64 = row.get(0);
-                    let score = row
-                        .get::<_, Option<f64>>(column)
-                        .filter(|score| *score < 0.0)?;
-                    counted
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(&id))
-                        .then_some((id, score))
-                })
-                .collect();
+        for mut matched in bm25_columns {
+            if let Some(ids) = &counted {
+                matched.retain(|(id, _)| ids.contains(id));
+            }
             matched.sort_by(|a, b| a.1.total_cmp(&b.1));
             rankings.push(matched.into_iter().map(|(id, _)| id).collect());
         }

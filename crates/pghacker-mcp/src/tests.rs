@@ -699,3 +699,65 @@ async fn a_slow_embeddings_service_turns_semantic_search_to_full_text_without_a_
         }
     }
 }
+
+#[tokio::test]
+async fn a_database_failure_records_its_sqlstate_without_details() {
+    let db = TestDb::create().await.unwrap();
+    let pool = CallPool::new(
+        pghacker_core::db::pool_with_options(
+            &db.reader_url,
+            1,
+            "pghacker-test",
+            "-c statement_timeout=100",
+        )
+        .unwrap(),
+        Duration::from_millis(300),
+    );
+    let query = pghacker_sqlquery::QueryTool::new(&db.reader_url, 1).unwrap();
+    let server = McpServer::new(
+        Server::new(pool, None, query),
+        "pghacker-mcp",
+        "1",
+        "Served.",
+    );
+    let ingestion = Ingestion::start().await;
+    let usage = Usage::new(Settings {
+        endpoint: ingestion.url.clone(),
+        instrumentation_key: "11111111-2222-4333-8444-555555555555".into(),
+        id_key: b"test-usage-id-key-0123456789abcdef".to_vec(),
+        role: "pghacker-mcp".into(),
+        version: "0.1.0".into(),
+        instance: None,
+        details: false,
+    })
+    .unwrap();
+    let base = listen(internal(router(server, None), &usage)).await;
+    let mut indexer = db.indexer().await.unwrap();
+    let tx = indexer.transaction().await.unwrap();
+    tx.batch_execute("LOCK TABLE authors IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "author_perspective",
+            "arguments": { "author": "Tom Lane", "topic": "vacuum", "mode": "fulltext" }
+        }
+    });
+    assert_eq!(post(&client, &base, &[], request).await, 200);
+    drop(tx);
+    usage.flush().await;
+
+    let events = ingestion.received();
+    assert_eq!(events.len(), 1, "{events:#?}");
+    let props = properties(&events[0]);
+    assert_eq!(props["toolName"], "author_perspective");
+    assert_eq!(props["activityStatus"], "Failed");
+    assert_eq!(props["errorType"], "ToolError");
+    assert_eq!(props["errorCode"], "57014");
+    assert!(props.get("errorMessage").is_none(), "{props}");
+}

@@ -178,16 +178,26 @@ async fn bootstrap_creates_the_database_and_a_least_privileged_swarm_role() {
             .await
             .unwrap_err();
         assert_eq!(denied.code(), Some(&SqlState::INSUFFICIENT_PRIVILEGE));
-        let setting: Option<String> = client
-            .query_one(
-                "SELECT (SELECT s FROM pg_db_role_setting d, unnest(d.setconfig) s
-                         WHERE d.setrole = 'pgh_reader'::regrole AND d.setdatabase = 0
-                           AND s LIKE 'hnsw.ef_search=%')",
+        let settings: Vec<String> = client
+            .query(
+                "SELECT s FROM pg_db_role_setting d, unnest(d.setconfig) s
+                 WHERE d.setrole = 'pgh_reader'::regrole AND d.setdatabase = 0
+                   AND s LIKE 'hnsw.%'
+                 ORDER BY s",
                 &[],
             )
             .await?
-            .get(0);
-        assert_eq!(setting.as_deref(), Some("hnsw.ef_search=100"));
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(
+            settings,
+            [
+                "hnsw.ef_search=100",
+                "hnsw.iterative_scan=relaxed_order",
+                "hnsw.max_scan_tuples=5000",
+            ]
+        );
         anyhow::Ok(())
     }
     .await;

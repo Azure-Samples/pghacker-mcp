@@ -18,16 +18,19 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS pg_textsearch;
 
--- Filtered vector searches keep scanning the HNSW graph until LIMIT is filled.
--- An administrator that isn't a superuser, as in Azure, may set pgvector's
--- parameters only once its library is loaded: the cast loads it. Settings are
--- written only when they differ, since they're shared by every database.
+-- Filtered vector searches keep scanning the HNSW graph until LIMIT is filled,
+-- in relaxed distance order so closer matches found past the initial beam
+-- aren't discarded. An administrator that isn't a superuser, as in Azure, may
+-- set pgvector's parameters only once its library is loaded: the cast loads
+-- it. Settings are written only when they differ, since they're shared by
+-- every database.
 DO $$
 DECLARE
     wanted text[] := ARRAY[
-        ['pgh_reader', 'hnsw.iterative_scan', 'strict_order'],
+        ['pgh_reader', 'hnsw.iterative_scan', 'relaxed_order'],
         ['pgh_reader', 'hnsw.ef_search', '100'],
-        ['pgh_indexer', 'hnsw.iterative_scan', 'strict_order']];
+        ['pgh_reader', 'hnsw.max_scan_tuples', '5000'],
+        ['pgh_indexer', 'hnsw.iterative_scan', 'relaxed_order']];
 BEGIN
     EXECUTE format('SELECT %L::%s.vector', '[0]',
         (SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'vector'));

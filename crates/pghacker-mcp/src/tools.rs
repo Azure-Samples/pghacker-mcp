@@ -339,35 +339,11 @@ impl Tools for Server {
     }
 
     async fn call(&self, name: &str, arguments: Value) -> Result<Output, ErrorData> {
-        match name {
-            "query" => Ok(self.query.run(parse(name, arguments)?).await),
-            "grep" => {
-                let args: code::GrepArgs = parse(name, arguments)?;
-                let client = match self.pool.get().await {
-                    Ok(client) => client,
-                    Err(error) => return Ok(failed(error)),
-                };
-                let result =
-                    match code::resolve_revision(&**client, "postgres", args.version.as_deref())
-                        .await
-                    {
-                        Ok(revision) => code::grep(&**client, &revision, &args).await,
-                        Err(error) => Err(error),
-                    };
-                Ok(match result {
-                    Ok(text) => Output::Text(text),
-                    Err(error) => failed(error),
-                })
-            }
-            _ => Ok(match self.run(name, arguments).await? {
-                Ok(value) => Output::Json(value),
-                Err(error) => failed(error),
-            }),
-        }
+        self.call_with_usage(name, arguments, None).await
     }
 
     // query records the statements it checked by their tokens in its call's
-    // usage; the other tools record nothing of their own.
+    // usage; any tool that fails in PostgreSQL records the error's SQLSTATE.
     async fn call_with_usage(
         &self,
         name: &str,
@@ -379,9 +355,45 @@ impl Tools for Server {
                 .query
                 .run_with_usage(parse(name, arguments)?, scope.as_ref())
                 .await),
-            _ => self.call(name, arguments).await,
+            "grep" => {
+                let args: code::GrepArgs = parse(name, arguments)?;
+                let client = match self.pool.get().await {
+                    Ok(client) => client,
+                    Err(error) => return Ok(fail(error, scope.as_ref())),
+                };
+                let result =
+                    match code::resolve_revision(&**client, "postgres", args.version.as_deref())
+                        .await
+                    {
+                        Ok(revision) => code::grep(&**client, &revision, &args).await,
+                        Err(error) => Err(error),
+                    };
+                Ok(match result {
+                    Ok(text) => Output::Text(text),
+                    Err(error) => fail(error, scope.as_ref()),
+                })
+            }
+            _ => Ok(match self.run(name, arguments).await? {
+                Ok(value) => Output::Json(value),
+                Err(error) => fail(error, scope.as_ref()),
+            }),
         }
     }
+}
+
+/// [`failed`] with PostgreSQL's SQLSTATE, such as `57014` for the statement
+/// timeout, added to `scope` as `errorCode`.
+fn fail(error: anyhow::Error, scope: Option<&Scope>) -> Output {
+    if let Some(scope) = scope
+        && let Some(code) = error.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<tokio_postgres::Error>()
+                .and_then(tokio_postgres::Error::code)
+        })
+    {
+        scope.annotate("errorCode", code.code());
+    }
+    failed(error)
 }
 
 #[cfg(test)]

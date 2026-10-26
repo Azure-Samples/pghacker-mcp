@@ -97,38 +97,47 @@ impl Searcher {
         depth: i64,
     ) -> Result<Vec<i64>> {
         let index = format!("pghacker.{table}_bm25");
-        let mut rankings = Vec::new();
-        if self.mode != Mode::Semantic {
-            let rows = client
-                .query(
-                    &format!(
-                        "SELECT t.id, (t.search_text <@> to_bm25query($1, '{index}'))::float8 FROM {table} t
-                         WHERE {filter} ORDER BY t.search_text <@> to_bm25query($1, '{index}') LIMIT $2"
-                    ),
-                    &[&self.query, &depth, &filter_ids],
-                )
-                .await?;
-            rankings.push(
+        let bm25_sql = format!(
+            "SELECT t.id, (t.search_text <@> to_bm25query($1, '{index}'))::float8 FROM {table} t
+             WHERE {filter} ORDER BY t.search_text <@> to_bm25query($1, '{index}') LIMIT $2"
+        );
+        let sem_sql = format!(
+            "SELECT t.id FROM {table} t WHERE t.embedding IS NOT NULL AND {filter}
+             ORDER BY t.embedding <=> $1 LIMIT $2"
+        );
+        let bm25_fut = async {
+            if self.mode == Mode::Semantic {
+                return Ok(None);
+            }
+            let rows = match filter_ids {
+                Some(ids) => {
+                    client
+                        .query(&bm25_sql, &[&self.query, &depth, &ids])
+                        .await?
+                }
+                None => client.query(&bm25_sql, &[&self.query, &depth]).await?,
+            };
+            anyhow::Ok(Some(
                 rows.iter()
                     .filter(|row| row.get::<_, f64>(1) < 0.0)
                     .map(|row| row.get(0))
                     .collect::<Vec<i64>>(),
-            );
-        }
-        if self.mode != Mode::Fulltext
-            && let Some(embedding) = &self.embedding
-        {
-            let rows = client
-                .query(
-                    &format!(
-                        "SELECT t.id FROM {table} t WHERE t.embedding IS NOT NULL AND {filter}
-                         ORDER BY t.embedding <=> $1 LIMIT $2"
-                    ),
-                    &[embedding, &depth, &filter_ids],
-                )
-                .await?;
-            rankings.push(rows.iter().map(|row| row.get(0)).collect());
-        }
+            ))
+        };
+        let sem_fut = async {
+            let (true, Some(embedding)) = (self.mode != Mode::Fulltext, &self.embedding) else {
+                return Ok(None);
+            };
+            let rows = match filter_ids {
+                Some(ids) => client.query(&sem_sql, &[embedding, &depth, &ids]).await?,
+                None => client.query(&sem_sql, &[embedding, &depth]).await?,
+            };
+            anyhow::Ok(Some(
+                rows.iter().map(|row| row.get(0)).collect::<Vec<i64>>(),
+            ))
+        };
+        let (bm25, sem) = tokio::try_join!(bm25_fut, sem_fut)?;
+        let rankings: Vec<Vec<i64>> = [bm25, sem].into_iter().flatten().collect();
         Ok(fuse(rankings))
     }
 
@@ -142,45 +151,66 @@ impl Searcher {
         until: Option<chrono::DateTime<chrono::Utc>>,
         depth: i64,
     ) -> Result<Vec<(i64, i64)>> {
-        let filter = "($3::bigint[] IS NULL OR m.author_id = ANY ($3))
-                      AND ($4::timestamptz IS NULL OR m.sent_at >= $4)
-                      AND ($5::timestamptz IS NULL OR m.sent_at < $5)";
-        let mut rankings: Vec<Vec<(i64, i64)>> = Vec::new();
-        if self.mode != Mode::Semantic {
-            let rows = client
-                .query(
-                    &format!(
-                        "SELECT c.id, c.thread_id,
-                                (c.content <@> to_bm25query($1, 'pghacker.message_chunks_bm25'))::float8
-                         FROM message_chunks c JOIN messages m ON m.id = c.message_id
-                         WHERE {filter}
-                         ORDER BY c.content <@> to_bm25query($1, 'pghacker.message_chunks_bm25') LIMIT $2"
-                    ),
-                    &[&self.query, &depth, &authors, &since, &until],
-                )
-                .await?;
-            rankings.push(
+        let filtered = authors.is_some() || since.is_some() || until.is_some();
+        let (join, filter) = if filtered {
+            (
+                "JOIN messages m ON m.id = c.message_id",
+                "($3::bigint[] IS NULL OR m.author_id = ANY ($3))
+                 AND ($4::timestamptz IS NULL OR m.sent_at >= $4)
+                 AND ($5::timestamptz IS NULL OR m.sent_at < $5)",
+            )
+        } else {
+            ("", "TRUE")
+        };
+        let bm25_sql = format!(
+            "SELECT c.id, c.thread_id,
+                    (c.content <@> to_bm25query($1, 'pghacker.message_chunks_bm25'))::float8
+             FROM message_chunks c {join}
+             WHERE {filter}
+             ORDER BY c.content <@> to_bm25query($1, 'pghacker.message_chunks_bm25') LIMIT $2"
+        );
+        let sem_sql = format!(
+            "SELECT c.id, c.thread_id FROM message_chunks c {join}
+             WHERE c.embedding IS NOT NULL AND {filter}
+             ORDER BY c.embedding <=> $1 LIMIT $2"
+        );
+        let bm25_fut = async {
+            if self.mode == Mode::Semantic {
+                return Ok(None);
+            }
+            let rows = if filtered {
+                client
+                    .query(&bm25_sql, &[&self.query, &depth, &authors, &since, &until])
+                    .await?
+            } else {
+                client.query(&bm25_sql, &[&self.query, &depth]).await?
+            };
+            anyhow::Ok(Some(
                 rows.iter()
                     .filter(|row| row.get::<_, f64>(2) < 0.0)
                     .map(|row| (row.get(0), row.get(1)))
-                    .collect(),
-            );
-        }
-        if self.mode != Mode::Fulltext
-            && let Some(embedding) = &self.embedding
-        {
-            let rows = client
-                .query(
-                    &format!(
-                        "SELECT c.id, c.thread_id FROM message_chunks c JOIN messages m ON m.id = c.message_id
-                         WHERE c.embedding IS NOT NULL AND {filter}
-                         ORDER BY c.embedding <=> $1 LIMIT $2"
-                    ),
-                    &[embedding, &depth, &authors, &since, &until],
-                )
-                .await?;
-            rankings.push(rows.iter().map(|row| (row.get(0), row.get(1))).collect());
-        }
+                    .collect::<Vec<(i64, i64)>>(),
+            ))
+        };
+        let sem_fut = async {
+            let (true, Some(embedding)) = (self.mode != Mode::Fulltext, &self.embedding) else {
+                return Ok(None);
+            };
+            let rows = if filtered {
+                client
+                    .query(&sem_sql, &[embedding, &depth, &authors, &since, &until])
+                    .await?
+            } else {
+                client.query(&sem_sql, &[embedding, &depth]).await?
+            };
+            anyhow::Ok(Some(
+                rows.iter()
+                    .map(|row| (row.get(0), row.get(1)))
+                    .collect::<Vec<(i64, i64)>>(),
+            ))
+        };
+        let (bm25, sem) = tokio::try_join!(bm25_fut, sem_fut)?;
+        let rankings: Vec<Vec<(i64, i64)>> = [bm25, sem].into_iter().flatten().collect();
         Ok(fuse(rankings))
     }
 }
@@ -305,6 +335,9 @@ pub async fn citations(
     ids: &[i64],
     per_extract: usize,
 ) -> Result<std::collections::HashMap<i64, Vec<Value>>> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
     let rows = client
         .query(
             "SELECT c.extract_id, m.message_id, coalesce(a.display_name, m.from_name), m.sent_at, c.quote, m.thread_id, t.subject
