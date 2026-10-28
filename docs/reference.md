@@ -99,6 +99,14 @@ The [README](../README.md#use-it) lists pghacker-mcp's tools, and each tool desc
 | Extraction | `next_extraction_batch`, `read_messages`, `match_extracts`, `submit_extracts` |
 | Repair | `find_duplicates`, `mark_distinct`, `merge_authors`, `merge_extracts`, `undo_merge` |
 
+### Outbound corpus filtering
+
+pghacker-mcp filters presentation controls from retrieved text immediately before returning tool results, on both its public and agents' listeners. It removes C0/C1 controls and DEL except tab and LF; dropping CR normalizes CRLF to LF and removes standalone carriage returns. It also removes Unicode bidi controls: U+061C, U+200E-U+200F, U+202A-U+202E and U+2066-U+2069. Other Unicode, including joiners and combining characters, stays as written.
+
+The same filter covers nested JSON string values before MCP creates their serialized text copy, `grep` text, `query` CSV (headers and cells), and tool error messages. Query filters its fields before CSV quoting, so text reduced to an empty string or `None` still reads differently from NULL. JSON field names, types, numbers, error codes, row counts and line citations keep their meaning; output remains within the existing size limits. Stored mail, patches, source, commit history, hashes and indexes are unchanged; existing corpus benefits without re-ingestion. Repository-owned skill files, server instructions and tool metadata are not passed through this filter.
+
+This is a character filter, not an HTML or Markdown sanitizer. Literal markup, links, images and printable remnants of ANSI sequences remain text. It neither makes them safe to interpret in every presentation context nor prevents prompt injection; a consuming Host still needs context-appropriate rendering and URL controls. The filter does not execute content or fetch URLs.
+
 ### Query's read-only policy
 
 `query` takes one SELECT, WITH, VALUES, TABLE, PostgreSQL SHOW or EXPLAIN of a read. It rejects data changes, DDL, maintenance and transaction control, including writes inside CTEs or EXPLAIN, SELECT INTO and all FOR UPDATE/SHARE row-locking variants. Caller-supplied SET/RESET, ALTER SYSTEM, role/session-authorization changes and `set_config()` fail with an error explaining how to inspect a setting instead. SHOW ALL, SHOW setting, `current_setting()` and catalog SELECTs remain available.

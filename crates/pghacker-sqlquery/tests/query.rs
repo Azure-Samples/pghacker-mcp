@@ -124,7 +124,7 @@ async fn null_empty_strings_and_special_characters_are_told_apart() {
         )
         .await,
         "n,e,t,c,q,nl,cr,p,x\n\
-         None,\"\",\"None\",\"a,b\",\"say \"\"hi\"\"\",\"l1\nl2\",\"cr\r\",\" pad \",plain text\n\n\
+         None,\"\",\"None\",\"a,b\",\"say \"\"hi\"\"\",\"l1\nl2\",cr,\" pad \",plain text\n\n\
          (1 row)"
     );
     assert_eq!(
@@ -134,6 +134,15 @@ async fn null_empty_strings_and_special_characters_are_told_apart() {
     assert_eq!(
         text(&tool, "SELECT NULL AS a, NULL AS b").await,
         "a,b\nNone,None\n\n(1 row)"
+    );
+    // Filtering precedes quoting, so these still differ from NULL.
+    assert_eq!(
+        text(
+            &tool,
+            "SELECT chr(27) AS \"\u{1b}\", 'No' || chr(8238) || 'ne' AS null_text, NULL::text AS null_value",
+        )
+        .await,
+        "\"\",null_text,null_value\n\"\",\"None\",None\n\n(1 row)"
     );
 }
 

@@ -89,6 +89,30 @@ fn falls_back_to_html_text() {
 }
 
 #[test]
+fn html_markup_is_converted_but_plain_text_markup_is_preserved() {
+    let markup = concat!(
+        "<p>Visible text</p><script>sample</script>",
+        "<img src=\"https://example.invalid/pixel\" onerror=\"sample\">",
+        "<svg onload=\"sample\"></svg>",
+    );
+    for (content_type, is_html) in [("text/html", true), ("text/plain", false)] {
+        let raw = format!(
+            "Message-ID: <markup@example.org>\nContent-Type: {content_type}; charset=utf-8\n\n{markup}"
+        );
+        let msg = parse(raw.as_bytes()).unwrap();
+        assert_eq!(msg.body_is_html, is_html);
+        if is_html {
+            assert!(msg.body.contains("Visible text"), "{:?}", msg.body);
+            for tag in ["<p>", "<script", "<img", "<svg", "onerror=", "onload="] {
+                assert!(!msg.body.contains(tag), "{:?}", msg.body);
+            }
+        } else {
+            assert_eq!(msg.body, markup);
+        }
+    }
+}
+
+#[test]
 fn decodes_encoded_attachment_names() {
     let msg = parse(COMPRESSED).unwrap();
     let names: Vec<_> = msg

@@ -424,7 +424,9 @@ impl<T: Tools> ServerHandler for McpServer<T> {
             (scope, event)
         });
         if tool.is_none() {
-            let error = ErrorData::invalid_params(format!("unknown tool {name}"), None);
+            let mut message = format!("unknown tool {name}");
+            crate::text::strip_presentation_controls(&mut message);
+            let error = ErrorData::invalid_params(message, None);
             if let Some((scope, mut event)) = usage {
                 usage::mcp::failed(&mut event, "UnknownTool", &error.message);
                 scope.record(event);

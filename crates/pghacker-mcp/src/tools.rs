@@ -17,6 +17,7 @@ use pghacker_core::calls::CallPool;
 use pghacker_core::embed::Embedder;
 use pghacker_core::mcp::{Effect, Output, ToolSpec, Tools, failed, parse, schema};
 use pghacker_core::skills::Skills;
+use pghacker_core::text::strip_presentation_controls;
 use pghacker_core::usage::Scope;
 use pghacker_sqlquery as sql;
 
@@ -350,34 +351,68 @@ impl Tools for Server {
         arguments: Value,
         scope: Option<Scope>,
     ) -> Result<Output, ErrorData> {
-        match name {
-            sql::NAME => Ok(self
-                .query
-                .run_with_usage(parse(name, arguments)?, scope.as_ref())
-                .await),
-            "grep" => {
-                let args: code::GrepArgs = parse(name, arguments)?;
-                let client = match self.pool.get().await {
-                    Ok(client) => client,
-                    Err(error) => return Ok(fail(error, scope.as_ref())),
-                };
-                let result =
-                    match code::resolve_revision(&**client, "postgres", args.version.as_deref())
-                        .await
+        let result = async {
+            match name {
+                sql::NAME => Ok(self
+                    .query
+                    .run_with_usage(parse(name, arguments)?, scope.as_ref())
+                    .await),
+                "grep" => {
+                    let args: code::GrepArgs = parse(name, arguments)?;
+                    let client = match self.pool.get().await {
+                        Ok(client) => client,
+                        Err(error) => return Ok(fail(error, scope.as_ref())),
+                    };
+                    let result = match code::resolve_revision(
+                        &**client,
+                        "postgres",
+                        args.version.as_deref(),
+                    )
+                    .await
                     {
                         Ok(revision) => code::grep(&**client, &revision, &args).await,
                         Err(error) => Err(error),
                     };
-                Ok(match result {
-                    Ok(text) => Output::Text(text),
+                    Ok(match result {
+                        Ok(text) => Output::Text(text),
+                        Err(error) => fail(error, scope.as_ref()),
+                    })
+                }
+                _ => Ok(match self.run(name, arguments).await? {
+                    Ok(value) => Output::Json(value),
                     Err(error) => fail(error, scope.as_ref()),
-                })
+                }),
             }
-            _ => Ok(match self.run(name, arguments).await? {
-                Ok(value) => Output::Json(value),
-                Err(error) => fail(error, scope.as_ref()),
-            }),
         }
+        .await;
+        sanitize_output(result)
+    }
+}
+
+/// Filter retrieved content before MCP creates its structured and text
+/// representations, not the stored corpus or the repository-owned skills.
+fn sanitize_output(mut result: Result<Output, ErrorData>) -> Result<Output, ErrorData> {
+    match &mut result {
+        Ok(Output::Json(value)) => sanitize_json(value),
+        Ok(Output::Text(text) | Output::Failed(text)) => strip_presentation_controls(text),
+        Err(error) => {
+            let mut message = error.message.to_string();
+            strip_presentation_controls(&mut message);
+            error.message = message.into();
+            if let Some(data) = &mut error.data {
+                sanitize_json(data);
+            }
+        }
+    }
+    result
+}
+
+fn sanitize_json(value: &mut Value) {
+    match value {
+        Value::String(text) => strip_presentation_controls(text),
+        Value::Array(values) => values.iter_mut().for_each(sanitize_json),
+        Value::Object(object) => object.values_mut().for_each(sanitize_json),
+        _ => {}
     }
 }
 
@@ -399,6 +434,64 @@ fn fail(error: anyhow::Error, scope: Option<&Scope>) -> Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn outbound_json_filters_nested_strings_without_changing_its_shape() {
+        let original = json!({
+            "text": "\u{1b}[31m<script>sample</script>\r\n",
+            "nested": [{ "filename": "\u{202e}file.patch", "lines": [1, "\u{9b}2J\tcode", null] }],
+            "count": 42,
+            "score": 0.5,
+            "cut": false,
+        });
+        let expected = json!({
+            "text": "[31m<script>sample</script>\n",
+            "nested": [{ "filename": "file.patch", "lines": [1, "2J\tcode", null] }],
+            "count": 42,
+            "score": 0.5,
+            "cut": false,
+        });
+        let Output::Json(value) = sanitize_output(Ok(Output::Json(original.clone()))).unwrap()
+        else {
+            panic!("a structured result changed its kind");
+        };
+        assert_eq!(value, expected);
+        assert_ne!(original, value);
+    }
+
+    #[test]
+    fn outbound_text_and_failures_keep_their_kind() {
+        let text = "\u{1b}]52;c;c2FtcGxl\u{7}\r\n\u{2066}![image](file:///sample)\u{2069}";
+        let expected = "]52;c;c2FtcGxl\n![image](file:///sample)";
+        for output in [Output::Text(text.into()), Output::Failed(text.into())] {
+            let failed = matches!(output, Output::Failed(_));
+            let output = sanitize_output(Ok(output)).unwrap();
+            assert_eq!(matches!(output, Output::Failed(_)), failed);
+            match output {
+                Output::Text(text) | Output::Failed(text) => assert_eq!(text, expected),
+                Output::Json(_) => panic!("a text result became structured"),
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_rpc_errors_keep_their_code_and_data() {
+        let error = ErrorData::invalid_params(
+            "bad argument \u{202e}value\u{202c}\u{1b}",
+            Some(json!({ "details": ["\u{9d}value", { "line": "a\r\nb" }], "offset": 3 })),
+        );
+        let code = error.code;
+        let Err(error) = sanitize_output(Err(error)) else {
+            panic!("a rejected call became successful");
+        };
+        assert_eq!(error.code, code);
+        assert_eq!(error.message, "bad argument value");
+        assert_eq!(
+            error.data,
+            Some(json!({ "details": ["value", { "line": "a\nb" }], "offset": 3 }))
+        );
+    }
 
     #[test]
     fn every_tool_is_served() {

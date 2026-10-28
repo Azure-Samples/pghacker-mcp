@@ -261,6 +261,19 @@ async fn a_legacy_client_initializes_lists_and_calls_without_a_session() {
     .await;
     assert!(unknown["error"].is_object(), "{unknown}");
 
+    let (_, unknown) = rpc(
+        &client,
+        &base,
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+            "name": "nope\u{1b}\u{202e}", "arguments": {} } }),
+    )
+    .await;
+    assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
+    assert_eq!(
+        unknown["error"]["message"], "unknown tool nope",
+        "{unknown}"
+    );
+
     let (_, bad) = rpc(
         &client,
         &base,

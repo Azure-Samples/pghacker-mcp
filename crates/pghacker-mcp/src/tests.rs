@@ -28,6 +28,8 @@ use crate::admission::Admission;
 use crate::ratelimit::{ClientIp, FrontDoor, RateLimit};
 use crate::tools::Server;
 
+mod corpus;
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct EchoArgs {
     text: String,

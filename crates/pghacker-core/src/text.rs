@@ -1,8 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-//! Text helpers: truncation on character boundaries and whitespace-insensitive
-//! quote checks for citations.
+//! Text helpers: presentation-control filtering, truncation on character
+//! boundaries and whitespace-insensitive quote checks for citations.
+
+/// Removes C0/C1 controls and DEL except tab and LF, and Unicode bidi
+/// controls (directional marks, embeddings, overrides, pops and isolates).
+/// Removing CR normalizes CRLF to LF and prevents standalone CR overwrites.
+/// Other Unicode, HTML and Markdown stay as written: this is not a renderer's
+/// output encoding or a defense against instructions embedded in text.
+pub fn strip_presentation_controls(text: &mut String) {
+    text.retain(|c| {
+        (!c.is_control() || matches!(c, '\t' | '\n'))
+            && !matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    });
+}
 
 /// The Message-ID a commit's Discussion trailer names, as messages store it
 /// (no angle brackets): a postgr.es/m or postgresql.org/message-id link, or
@@ -89,6 +104,73 @@ pub fn quote_in(body: &str, quote: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_controls_leave_only_tab_and_lf() {
+        for code in (0..=0x1f).chain(0x7f..=0x9f) {
+            let control = char::from_u32(code).unwrap();
+            let mut text = format!("before{control}after");
+            strip_presentation_controls(&mut text);
+            let expected = match control {
+                '\t' | '\n' => format!("before{control}after"),
+                _ => "beforeafter".to_owned(),
+            };
+            assert_eq!(text, expected, "U+{code:04X}");
+        }
+        let mut text = "one\r\ntwo\rthree".to_owned();
+        strip_presentation_controls(&mut text);
+        assert_eq!(text, "one\ntwothree");
+    }
+
+    #[test]
+    fn bidi_controls_are_removed_including_marks_and_isolates() {
+        for control in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            let mut text = format!("before{control}after");
+            strip_presentation_controls(&mut text);
+            assert_eq!(text, "beforeafter", "U+{:04X}", control as u32);
+        }
+    }
+
+    #[test]
+    fn presentation_filter_preserves_markup_code_and_other_unicode() {
+        let original = concat!(
+            "\tif (x < 0)\n+SELECT 'a,b';\n",
+            "<script>sample</script><img src=x onerror=sample><svg onload=sample></svg>\n",
+            "&lt;script&gt;sample&lt;/script&gt;\n",
+            "![image](https://example.invalid/pixel) [link](javascript:sample)\n",
+            "[data](data:text/html,sample) [file](file:///sample)\n",
+            "![reference][image]\n[image]: https://example.invalid/pixel\n",
+            "caf\u{e9} e\u{301} \u{05e9}\u{05dc}\u{05d5}\u{05dd} ",
+            "\u{1f469}\u{200d}\u{1f4bb} \u{200b}\u{fe0f}",
+        );
+        let mut text = original.to_owned();
+        strip_presentation_controls(&mut text);
+        assert_eq!(text, original);
+    }
+
+    #[test]
+    fn presentation_filter_is_idempotent_for_empty_and_hostile_text() {
+        for original in [
+            "",
+            "\0\u{1b}\u{9b}\u{202e}\u{2069}",
+            "\u{1b}[2J\u{1b}]8;;https://example.invalid\u{1b}\\link\u{1b}]8;;\u{1b}\\",
+            "\u{1b}]52;c;c2FtcGxl\u{7}\u{9d}52;c;c2FtcGxl\u{9c}",
+            "\u{2066}a\u{202e}b\u{202c}c\u{2069}\r\n\ttext",
+        ] {
+            let mut text = original.to_owned();
+            strip_presentation_controls(&mut text);
+            let once = text.clone();
+            strip_presentation_controls(&mut text);
+            assert_eq!(text, once);
+            assert!(
+                text.chars()
+                    .all(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+            );
+        }
+    }
 
     #[test]
     fn discussion_links_name_messages() {

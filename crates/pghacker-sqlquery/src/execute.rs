@@ -11,6 +11,8 @@
 //!   its double quotes doubled. NULL reads `None`, and an empty string and the
 //!   text `None` are quoted (`""`, `"None"`), so NULL reads differently from
 //!   every string. Column names are quoted the same way.
+//! - Presentation controls are removed from values and names before quoting,
+//!   so text reduced to an empty string or `None` stays distinct from NULL.
 //! - Rows are kept by position rather than in maps keyed by column name, so
 //!   columns that share a name, such as two tables' `id`, keep their own
 //!   values.
@@ -33,6 +35,8 @@ use futures_util::TryStreamExt;
 use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
 use tokio_postgres::types::{FromSql, ToSql, Type};
 use tokio_postgres::{Client, Column, Row, Transaction};
+
+use pghacker_core::text::strip_presentation_controls;
 
 /// The largest CSV that query returns, in bytes: rows past it are cut, with
 /// a banner.
@@ -142,7 +146,9 @@ impl Csv {
             if index > 0 {
                 text.push(',');
             }
-            push_field(&mut text, Some(column.name()));
+            let mut name = column.name().to_owned();
+            strip_presentation_controls(&mut name);
+            push_field(&mut text, Some(&name));
         }
         Self {
             text,
@@ -345,7 +351,12 @@ fn render_row(row: &Row, columns: &[Column]) -> Result<String, QueryResponse> {
             line.push(',');
         }
         match value_at(row, index, column.type_()) {
-            Ok(value) => push_field(&mut line, value.as_deref()),
+            Ok(mut value) => {
+                if let Some(text) = &mut value {
+                    strip_presentation_controls(text);
+                }
+                push_field(&mut line, value.as_deref());
+            }
             Err(e) => {
                 return Err(QueryResponse::failed(format_executing_error(&format!(
                     "could not deserialize column \"{}\" (type {}): {}",
