@@ -317,6 +317,76 @@ async fn the_listeners_record_their_clients_and_whom_they_turn_away() {
 }
 
 #[tokio::test]
+async fn the_bundled_review_boundary_is_delivered_by_resource_and_fallback_tool() {
+    let skills = crate::tools::skills().unwrap();
+    let expected = skills
+        .get(crate::tools::REVIEW_SKILL)
+        .unwrap()
+        .instructions()
+        .to_owned();
+    let server = McpServer::new(Echo, "review", "test", crate::tools::INSTRUCTIONS)
+        .with_skills(skills, crate::tools::EXTENSION_INSTRUCTIONS)
+        .unwrap();
+    let base = listen(router(server, None)).await;
+    let client = reqwest::Client::new();
+    for extension in [false, true] {
+        let capabilities = if extension {
+            json!({ "extensions": { "io.modelcontextprotocol/skills": {} } })
+        } else {
+            json!({})
+        };
+        let mut requests = vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": capabilities,
+                "clientInfo": { "name": "review-test", "version": "1" } } }),
+        ];
+        let read = if extension {
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+                "params": { "uri": crate::tools::REVIEW_SKILL } })
+        } else {
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": crate::tools::REVIEW_TOOL, "arguments": {} } })
+        };
+        requests.push(read);
+        for request in requests {
+            let initializing = request["method"] == "initialize";
+            let text = client
+                .post(format!("{base}/mcp"))
+                .header("accept", "application/json, text/event-stream")
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            let body = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .map_or(text.as_str(), str::trim);
+            let body: Value = serde_json::from_str(body).unwrap();
+            if initializing {
+                assert_eq!(
+                    body["result"]["instructions"],
+                    if extension {
+                        crate::tools::EXTENSION_INSTRUCTIONS
+                    } else {
+                        crate::tools::INSTRUCTIONS
+                    }
+                );
+            } else {
+                let returned = if extension {
+                    &body["result"]["contents"][0]["text"]
+                } else {
+                    &body["result"]["content"][0]["text"]
+                };
+                assert_eq!(returned, &json!(expected), "{body}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn reads_of_the_skills_are_recorded_with_their_uris() {
     let ingestion = Ingestion::start().await;
     let usage = Usage::new(Settings {

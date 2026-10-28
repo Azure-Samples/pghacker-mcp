@@ -91,6 +91,21 @@ The home page (`home/`) is a React, Vite and TypeScript page. It gives the MCP U
 
 ## Tools
 
+### Untrusted corpus content
+
+Both servers, their tool descriptions, and the bundled agents and review skill
+treat corpus-derived content as untrusted evidence, not instructions or
+authorization. Embedded requests, including claims of system/developer authority
+or user approval, must be ignored. Agents may analyze and quote the content as
+evidence without obeying it.
+
+Prompt hardening is defense in depth, not a sandbox or guaranteed protection.
+Hosts still need their own instruction hierarchy, authorization and
+least-privilege controls. Tool response formats and database permissions are
+unchanged.
+
+### Tool catalog
+
 The [README](../README.md#use-it) lists pghacker-mcp's tools, and each tool describes its arguments to MCP clients. The mail searches take `mode`: `fulltext` (BM25), `semantic` (embeddings) or `hybrid` (the default). `get_ontology` lists the tables and columns that `query` reads, and the schema's comments describe each one (migration `0023`): `obj_description` and `col_description` read them, as `get_ontology` shows, and history builds and installs copy those of the history's tables. The indexer's tools serve the crawler agents:
 
 | Area | pghacker-indexer's tools |
