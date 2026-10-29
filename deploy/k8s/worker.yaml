@@ -5,7 +5,8 @@
 # (pghacker.io/role: agent): its NetworkPolicy lets it reach only the indexer,
 # pghacker-mcp's internal listener, the token proxy and its database, and the
 # firewall gives its nodes no internet. It has no Azure identity and no
-# Kubernetes token, and reads only pgh_swarm's password. One replica, replaced
+# Kubernetes API token, and reads only pgh_swarm's password. Its sidecar has
+# an audience-bound mesh identity token. One replica, replaced
 # rather than overlapped: two crawl schedulers would race over the sessions.
 apiVersion: apps/v1
 kind: Deployment

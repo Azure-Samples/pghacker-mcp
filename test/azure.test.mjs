@@ -67,6 +67,16 @@ function secretsOf(entries) {
 
 const service = (name, port) => `http://${name}.${NAMESPACE}.svc.cluster.local:${port}`;
 
+test("the authenticated portal enforces session ownership", () => {
+  const all = flats();
+  assert.equal(all.portal.AUTHZ_ENFORCE_OWNERSHIP, "true");
+  assert.equal(all.portal.PORTAL_AUTH_PROVIDER, "proxy");
+  assert.equal(all.portal.PORTAL_AUTH_ALLOW_UNAUTHENTICATED, "false");
+  for (const [name, env] of Object.entries(all)) {
+    if (name !== "portal") assert.equal(env.AUTHZ_ENFORCE_OWNERSHIP, undefined, name);
+  }
+});
+
 test("each component reads only its own secrets, from its identity's Kubernetes Secret, and holds no value", () => {
   const all = environments();
   assert.deepEqual(Object.keys(all).sort(), ["edge", "egressCheck", "home", "indexer", "mcp", "ops", "portal", "tokenProxy", "worker"]);

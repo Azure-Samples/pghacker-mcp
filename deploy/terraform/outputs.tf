@@ -145,6 +145,9 @@ output "kubernetes" {
     seed_image          = var.seed_image
     pool_label          = local.pool_label
     swarm_taint         = local.swarm_taint
+    mesh = {
+      revision = var.istio_revision
+    }
     identities = {
       for name, workload in local.workloads : name => {
         client_id       = azurerm_user_assigned_identity.workload[name].client_id
@@ -176,6 +179,7 @@ output "kubernetes" {
     azurerm_private_dns_zone_virtual_network_link.horizondb,
     azurerm_private_dns_zone_virtual_network_link.foundry,
     azapi_resource_action.attach_parameter_group,
+    azapi_update_resource.mesh_cni,
   ]
 }
 

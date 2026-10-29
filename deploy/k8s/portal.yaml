@@ -2,7 +2,8 @@
 # server alone, with no worker and no agent. It trusts the identity headers
 # that oauth2-proxy sets (PORTAL_AUTH_PROVIDER=proxy), so its NetworkPolicy
 # admits oauth2-proxy alone. Like the worker, it reads only pgh_swarm's
-# password and holds no Azure or Kubernetes token.
+# password; its application container has no Azure or Kubernetes API token.
+# Its sidecar has an audience-bound mesh identity token.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

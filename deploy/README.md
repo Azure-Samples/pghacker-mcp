@@ -10,6 +10,7 @@ This deploys pghacker-mcp in production mode on Azure Kubernetes Service (AKS). 
   - Only Front Door's own host name serves it. A [custom domain](#custom-domains) gets the home page and `/mcp`, and Front Door answers 404 for its other paths. Sign-in therefore happens on one host, at one callback.
   - PilotSwarm 0.8.5 has no base path: its page loads at `/portal/`, but it asks for its files at `/assets/` and its API and WebSockets at `/api/`, so oauth2-proxy sends those to it too, behind sign-in. Its share links (`/?session=...`, `/?canvasShare=...`) reach the home page, which sends them on to `/portal/` on Front Door's host name (`portal_url`), whichever host they name. `scripts/lib/routes.mjs` holds the routes; [microsoft/PilotSwarm#179](https://github.com/microsoft/PilotSwarm/issues/179) asks for a base path, which would put all of the portal under `/portal/`.
   - oauth2-proxy tells the portal who signed in through headers, which PilotSwarm's `proxy` auth provider reads. PilotSwarm 0.8.5's browser app doesn't support that provider, so the image patches support in (`scripts/lib/portal-spa.mjs`).
+  - Session ownership and visibility are enforced (`AUTHZ_ENFORCE_OWNERSHIP=true`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door passes a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design: the token proxy (`scripts/token-proxy.mjs`) adds its workload identity's Entra token to each request (`scripts/lib/foundry.mjs`), and no pod holds a key. Since the agents reach the models too, the proxy forwards only the operations the app uses (the Responses API, the model list and a deployment's embeddings), removes hosted tools that reach the network (web search, remote MCP servers), and refuses a request that would have Foundry fetch a URL, such as an image's. The account itself may reach no outside host (data loss prevention).
@@ -36,7 +37,7 @@ This MCP server may provide access to underlying resources, such as tools, servi
 
 ## The cluster
 
-The cluster has three node pools, each in its own subnet, and every pod runs in the `pghacker` namespace from the one image (`Dockerfile`), with its own command, user, identity and NetworkPolicy (`deploy/k8s`, rendered by `scripts/lib/aks.mjs` from Terraform's `kubernetes` output):
+The cluster has three node pools, each in its own subnet. Application containers run in the `pghacker` namespace from one image (`Dockerfile`), with their own command, user, identity and NetworkPolicy (`deploy/k8s`, rendered by `scripts/lib/aks.mjs` from Terraform's `kubernetes` output). Managed Istio injects a proxy into each application pod, including jobs:
 
 - **system**: the cluster's add-ons alone.
 - **services**: oauth2-proxy, the home page, pghacker-mcp, pghacker-indexer, the token proxy and the ops jobs.
@@ -54,12 +55,113 @@ The cluster has three node pools, each in its own subnet, and every pod runs in 
 | Jobs: `bootstrap`, `probe`, `restore`, `history` | services | The database as its administrator; the token proxy; the firewall's hosts | The administrator's password and the roles' |
 | Job: `egress-check` (`scripts/egress-check.mjs`) | swarm | As the worker, whose identity and policy it has | `pgh_swarm`'s password |
 
-- **Identities.** Each component has its own user-assigned identity, federated with its Kubernetes service account. The Secrets Store CSI driver reads a component's Key Vault secrets with it, each granted one by one, and syncs them into the Kubernetes Secret its environment reads. Only the token proxy's pod gets a token of its own. No pod mounts a Kubernetes API token, and only the jobs read the administrator's password.
+- **Identities.** Each component has its own user-assigned identity, federated with its Kubernetes service account; the portal and worker share `swarm`. The Secrets Store CSI driver reads a component's Key Vault secrets with it, each granted one by one, and syncs them into the Kubernetes Secret its environment reads. Only the token proxy gets an Azure workload-identity token. Each mesh proxy also gets an audience-bound projected service-account token to obtain its mesh certificate, not a general Kubernetes API token. General API-token automount stays disabled, and only the ops jobs read the administrator's password.
 - **Pods.** The namespace enforces Pod Security's `restricted` profile: each pod runs as its image user (`pgh-agent`, `pgh-svc`, `pgh-proxy`, `pgh-home`), with a read-only root, no Linux capabilities and the runtime's seccomp profile. tini is PID 1 and reaps what the agents' shells leave behind.
 - **The network.** Cilium enforces the NetworkPolicies: everything is denied unless a policy allows it. The edge alone takes traffic from outside the cluster, from the Private Link Service's addresses; the portal, which trusts oauth2-proxy's identity headers, takes it from the edge alone. Every node subnet sends what leaves the VNet to Azure Firewall, which admits the services pool's named hosts and every pool's platform endpoints (AKS, the registry, the vault, Azure Monitor, and the hosts in `extra_node_fqdns`, none by default), and denies and logs the rest. The private endpoints' NSG takes the database from the services and PilotSwarm pools, and Foundry from the services pool alone. Its top-priority rule denies the PilotSwarm pool all but the database, so that a rule added to the NSG later, such as a policy's, can't open Foundry to it.
 - **The API server.** The cluster is private: its API server has a private endpoint in the system pool's subnet, and no public address or name. `deploy/scripts/aks.mjs` runs `kubectl` in the cluster through Azure Resource Manager (`az aks command invoke`, AKS's run command), with your Entra ID token: a pod in the `aks-command` namespace runs each command, on a services node, and Azure returns its exit code and output. Nobody needs a network path to the API server; running a command takes the run command's actions on the cluster, which Owner and Contributor have, and Kubernetes permissions, which `deployer_object_ids` get.
 - **Health.** Each Deployment's probes ask its `/healthz`, oauth2-proxy's `/ping` and PilotSwarm's `/api/health`; the token proxy is ready once it has a token. The worker has none: Kubernetes restarts it when it exits.
 - **Artifacts.** Without blob storage, PilotSwarm keeps sessions' artifacts on the worker's disk, where the portal, in pods of its own, can't show them. The app's agents write none.
+
+### Authenticated internal communication
+
+The managed AKS Istio add-on requires mutual TLS on internal HTTP application ports.
+Both peers authenticate with mesh certificates tied to Kubernetes service accounts;
+cross-pod prompts, mail, model completions and telemetry are encrypted and
+integrity-protected. Application URLs remain `http://`: only the local
+application-to-sidecar hop is plaintext. Foundry and the database retain their own
+external TLS connections; the token proxy never returns its Entra token to callers.
+
+Namespace-default `STRICT` PeerAuthentication and default-deny AuthorizationPolicy
+are applied in the infra stage. These are the only internal caller grants:
+
+| Destination | Port | Authenticated service accounts |
+| --- | --- | --- |
+| home | 3104 | edge |
+| mcp, public listener | 3102 | edge |
+| mcp, internal listener | 3103 | swarm |
+| portal | 3001 | edge |
+| indexer | 3101 | swarm |
+| token-proxy, models | 3110 | swarm, indexer, mcp, ops |
+| token-proxy, telemetry | 3111 | mcp, home |
+
+The home, portal and public MCP ports are opaque TCP streams **inside mTLS**.
+oauth2-proxy preserves the visitor's Host header, which Istio's HTTP virtual-host
+routing would otherwise send through an unprotected passthrough route that the
+strict destination rejects. TCP Service routing uses the destination address and
+preserves Host, SSE and WebSocket bytes without weakening application Host checks.
+Authorization on these ports remains based on the authenticated principal and port.
+
+NetworkPolicies and the firewall remain in force. In particular, portal and worker
+deliberately share `swarm`: the mesh cannot distinguish them. Their existing
+NetworkPolicies still prevent the portal from reaching the indexer and internal MCP
+listener. A compromised authorized workload retains its own granted capabilities;
+mTLS is not a defense against misuse of that workload's legitimate permissions.
+
+The sole plaintext ingress exception is the edge's port 8080, for the existing
+Front Door Private Link path. Its authorization and NetworkPolicy require the edge
+subnet's source addresses. The exception does not apply to internal services.
+Public `/mcp` remains anonymous to end users, but its edge-to-MCP hop is authenticated.
+Kubelet probes are rewritten through the local proxy agent; their application
+health ports are not opened to arbitrary callers.
+
+Use Kubernetes 1.33+ on the control plane **and every node pool**, and an explicitly
+selected `istio_revision` of `asm-1-30` or later. Before applying, check availability
+and compatibility with `az aks mesh get-revisions --location <region> -o table`.
+Terraform enables the mesh and CNIChaining, with no new ingress gateway. CNI avoids
+privileged application init containers, preserving restricted Pod Security.
+Native sidecars start before applications and stop after them, so completed jobs
+do not hang waiting for a proxy to exit. Allow capacity for a sidecar in each pod.
+The default services pool has three small nodes: two can serve the application,
+but may leave no node with the history job's 2 CPU and 6 GiB request available
+once sidecars and node add-ons are included. Keep that per-node headroom when
+choosing a different pool size; a pending job is not a successful data load.
+The default PilotSwarm pool has two nodes so that portal rolling updates and the
+egress check can schedule alongside the worker and sidecars. The worker itself
+remains one replica; adding node capacity does not start another crawl scheduler.
+
+`apply` and `job` refuse to run without the expected mesh revision, CNI, established
+CRDs and native-sidecar support. The namespace and every pod template carry an
+explicit revision, so applying changes restarts existing Deployments into the mesh.
+A validating admission policy rejects newly created application pods if injection
+is missing or uses legacy privileged redirection. Rollout verification checks that
+the native proxy is present and ready, not merely that the Deployment is available.
+Sidecars can reach only istiod's authenticated configuration/certificate port
+15012 in `aks-istio-system`, in addition to the workloads' existing network grants.
+
+For an existing deployment, first apply Terraform to enable the managed mesh and
+CNI, then run `node deploy/scripts/aks.mjs apply` from the repository root.
+Schedule a controlled rollout: strict policies can interrupt old unmeshed replicas
+until replacement; there is no permissive migration mode. Never fix a failed
+rollout by disabling strict mTLS or weakening namespace Pod Security.
+
+After an authorized deployment, run:
+
+```sh
+node deploy/scripts/aks.mjs check-mesh
+node deploy/scripts/aks.mjs job egress-check
+```
+
+`check-mesh` creates bounded, secret-free temporary jobs using real caller network
+labels. It checks allowed service responses, explicit mesh RBAC denials for wrong
+service accounts, and transport resets for callers without a proxy. Plaintext
+tests must complete a TCP handshake first: a NetworkPolicy timeout is not accepted
+as mTLS evidence. It also requires token-proxy destination metrics showing
+negotiated `mutual_tls` for each permitted caller identity. Opaque TCP ports reject
+unauthorized identities by resetting the connection; the check additionally
+requires fresh server-side TCP RBAC denial counters, not just a client reset.
+Test jobs never become
+ready Service endpoints and are removed after each check; their TTL also limits
+leftovers. The deliberately unmeshed tests use a separate application label and
+are not production application pods. No model invocation, credentials or sensitive
+request bodies are needed. A failing check exits nonzero. Verify deployments with
+these live checks, not only offline tests.
+
+For mesh upgrades, confirm regional/Kubernetes compatibility, update
+`istio_revision`, apply Terraform, roll the app and repeat both checks. The add-on
+does not upgrade automatically with Kubernetes. This configuration switches one
+explicit revision at a time; it does not orchestrate a canary upgrade. See the
+[AKS upgrade guidance](https://learn.microsoft.com/azure/aks/istio-upgrade) before
+an upgrade that needs overlapping control-plane revisions.
 
 ## First deployment
 
@@ -103,6 +205,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
 4. **The infrastructure.** This step creates:
    - the VNet, Azure Firewall and its policy, the route that sends every node subnet's traffic through it;
    - the AKS cluster and its three pools, and the workload identities;
+   - the managed Istio mesh with CNI traffic redirection and native sidecars;
    - HorizonDB with its parameter group and private endpoint; Foundry with its three deployments and private endpoint;
    - Key Vault and its secrets, the GitHub OAuth App's as placeholders, and Front Door, without an origin yet.
 

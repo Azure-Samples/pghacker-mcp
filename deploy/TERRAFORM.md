@@ -49,6 +49,32 @@ Terraform registers no resource providers. Once per subscription, someone with r
 
 The first applies run with `create_origin = false`: everything but Front Door's origin and routes, whose Private Link Service AKS creates only once the manifests' edge Service exists. Front Door's host name is known already, which gives the GitHub OAuth App its callback URL (`terraform output -raw oauth_callback_url`). Once `../scripts/aks.mjs apply` has deployed the app, set `create_origin = true`, apply, and approve Front Door's connection (`aks.mjs approve-edge`); from then on it stays true, since false takes the site down.
 
+## Managed service mesh
+
+`aks.tf` enables the managed Istio add-on with an explicit revision and no new
+ingress gateway. AzureRM manages the mode and revision; `azapi_update_resource.mesh_cni`
+merges the otherwise-unexposed `CNIChaining` redirection setting into the cluster.
+The CNI update waits for both user node pools to finish, avoiding concurrent AKS
+operations; transient in-progress or preempted updates are retried. The
+`kubernetes` output waits for that update. CNI preserves restricted application
+pod security without `NET_ADMIN`/`NET_RAW`; native sidecars allow jobs to terminate.
+The deployment CLI verifies both before creating workloads.
+
+Terraform provisions the mesh; the rendered Kubernetes manifests enforce strict
+mTLS and service-account/port authorization. Existing NetworkPolicies remain as
+defense in depth, including portal/worker separation within the shared `swarm`
+identity. See [Authenticated internal communication](README.md#authenticated-internal-communication)
+for the caller matrix, the narrowly scoped external edge exception, rollout
+requirements, mesh identity tokens, and `check-mesh` verification.
+
+If organization policy owns the private-endpoints subnet's NSG association, set
+`existing_private_endpoints_nsg_name` to that existing group's name in the app's
+resource group. Terraform installs the same four restrictive app rules there,
+without replacing the policy-managed group or deleting its other rules. Leave it
+null, the default, to create and use an app-owned NSG. Rule-priority conflicts fail
+explicitly and must be resolved with the organization's network administrators;
+do not remove the swarm's high-priority deny rule to make an apply succeed.
+
 ## Key Vault secrets
 
 No secret is in the manifests or in Terraform's outputs. Each component's workload identity is granted *Key Vault Secrets User* on its own secrets, one by one (`local.workloads`), and the Secrets Store CSI driver syncs them into the Kubernetes Secret `<identity>-secrets`, which the component's environment reads. Foundry's key authentication is disabled by design: the token proxy's identity is a *Cognitive Services OpenAI User* of the account, and requests tokens for it. Its outbound access is restricted with no allowed host (`outbound_network_access_restricted`, data loss prevention), so it fetches no URL for a caller. Application Insights' local authentication is off too: the same identity is a *Monitoring Metrics Publisher* of it, so `APPLICATIONINSIGHTS_CONNECTION_STRING` is a plain setting.
@@ -105,10 +131,11 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `subnet_prefixes` | `firewall` `10.66.0.0/26`, `system` `10.66.0.64/27`, `services` `10.66.0.96/27`, `swarm` `10.66.0.128/27`, `edge` `10.66.0.160/28`, `private_endpoints` `10.66.1.0/27` | The subnets, inside `vnet_address_space` and apart: Azure Firewall's (/26 or larger), each pool's, the edge's internal load balancer and Private Link Service, and the private endpoints'. The firewall's rules and the private endpoints' NSG tell the pools apart by them |
 | `pod_cidr`, `service_cidr` | `"10.244.0.0/16"`, `"10.0.0.0/16"` | The pods' overlay addresses and the Services', apart from the VNet and each other |
 | `kubernetes_version` | `null` | The cluster's version; null takes AKS's default. Patch releases and node images follow automatically |
+| `istio_revision` | `"asm-1-30"` | Explicit managed Istio revision, at least asm-1-30. Confirm regional availability and Kubernetes compatibility with `az aks mesh get-revisions`. The control plane and every node pool must run Kubernetes 1.33+ for native sidecars |
 | `aks_sku_tier` | `"Standard"` | The cluster's tier: `Standard`, with the API server's uptime SLA, `Free` or `Premium`. The API server is private either way: a private endpoint in the system pool's subnet, without a public address or name |
 | `system_pool` | `Standard_D2ds_v5`, 1 to 3 | The add-ons' pool: `vm_size`, `min_count`, `max_count` |
-| `services_pool` | `Standard_D4ds_v5`, 2 | The services' pool: `vm_size`, `node_count` |
-| `swarm_pool` | `Standard_D4ds_v5`, 1 | PilotSwarm's pool, which has no internet: `vm_size`, `node_count`. The worker's memory limit (`k8s/worker.yaml`, 8 GiB) must fit a node with the portal's pods |
+| `services_pool` | `Standard_D4ds_v5`, 3 | The services' pool: `vm_size`, `node_count`; includes headroom for mesh sidecars and the history job |
+| `swarm_pool` | `Standard_D4ds_v5`, 2 | PilotSwarm's pool, which has no internet: `vm_size`, `node_count`. Leaves headroom for portal rolling updates and the egress probe; the worker still has one replica |
 | `alert_emails` | `[]` | Who the denied-egress alert emails when the firewall denies anything from the PilotSwarm pool, but for hosts that `alert_ignored_hosts` matches; empty creates the alert without an action group |
 | `alert_ignored_hosts` | `[]` | Regular expressions (RE2, anchored with `^` and `$`) of host names whose application-rule denials from the PilotSwarm pool the alert doesn't count: ones that you've looked into and accept (`deploy/README.md`'s Operations). The firewall still denies and logs them; empty counts every denial |
 | `extra_node_fqdns` | `[]` | Host names, or `*.` and a domain, that every pool's nodes may reach besides what AKS needs, for agents that your subscription installs on every node; none by default |
@@ -157,7 +184,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `foundry_account_name`, `foundry_endpoint` | Foundry |
 | `aks_cluster_name`, `aks_node_resource_group` | The cluster, which `az aks command invoke` takes, and where AKS keeps its nodes, load balancers, the edge's Private Link Service and the API server's private endpoint and DNS zone |
 | `firewall_public_ip` | The address the cluster's allowed outbound traffic leaves from |
-| `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
+| `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, the mesh revision, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
 | `log_analytics_workspace_id` | The logs: the app's containers' (`ContainerLogV2`), its pods with their restarts (`KubePodInventory`) and their Warning events (`KubeEvents`), and the firewall's (`AZFWApplicationRule`, `AZFWNetworkRule`) |
 | `usage_app_insights_name`, `usage_app_id` | Usage telemetry's Application Insights resource and its application ID, for `az monitor app-insights query --apps`; null with `usage_enabled = false` |
 

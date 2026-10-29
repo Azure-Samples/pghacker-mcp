@@ -158,6 +158,13 @@ resource "azurerm_kubernetes_cluster" "this" {
     dns_service_ip      = cidrhost(var.service_cidr, 10)
   }
 
+  service_mesh_profile {
+    mode                             = "Istio"
+    revisions                        = [var.istio_revision]
+    internal_ingress_gateway_enabled = false
+    external_ingress_gateway_enabled = false
+  }
+
   node_provisioning_profile {
     mode = "Manual"
   }
@@ -188,6 +195,37 @@ resource "azurerm_kubernetes_cluster" "this" {
     azurerm_firewall_policy_rule_collection_group.egress,
     azurerm_role_assignment.kubelet_acr_pull,
     time_sleep.aks_rbac_propagation,
+  ]
+}
+
+# AzureRM owns the mesh mode/revision but doesn't expose CNIChaining.
+# AzAPI merges only this otherwise-unmanaged property into the cluster.
+resource "azapi_update_resource" "mesh_cni" {
+  type        = "Microsoft.ContainerService/managedClusters@2026-03-01"
+  resource_id = azurerm_kubernetes_cluster.this.id
+  body = {
+    properties = {
+      serviceMeshProfile = {
+        istio = {
+          components = {
+            proxyRedirectionMechanism = "CNIChaining"
+          }
+        }
+      }
+    }
+  }
+
+  retry = {
+    error_message_regex  = ["AKSOperationPreempted", "(?i)(operation.*in.progress|in.progress.*operation)"]
+    interval_seconds     = 15
+    max_interval_seconds = 60
+  }
+
+  # Cluster updates cannot overlap pool creation. Azure Policy can also
+  # briefly update a new cluster, hence the bounded conflict retry above.
+  depends_on = [
+    azurerm_kubernetes_cluster_node_pool.services,
+    azurerm_kubernetes_cluster_node_pool.swarm,
   ]
 }
 

@@ -38,6 +38,9 @@ deployer_object_ids = []
 # Choose nonoverlapping ranges for your own network. The pods' overlay and the
 # Services' ranges (pod_cidr, service_cidr) must stay apart from the VNet's.
 vnet_address_space = "10.80.0.0/22"
+# If organization policy manages this subnet's NSG, use its existing name
+# after it has been created; the app adds its isolation rules to that group.
+# existing_private_endpoints_nsg_name = "organization-private-endpoints"
 subnet_prefixes = {
   firewall          = "10.80.0.0/26"
   system            = "10.80.0.64/27"
@@ -49,9 +52,10 @@ subnet_prefixes = {
 
 # The cluster. Its API server is private: deploy/scripts/aks.mjs runs kubectl
 # in it through Azure (az aks command invoke).
-system_pool   = { vm_size = "Standard_D2ds_v5", min_count = 1, max_count = 3 }
-services_pool = { vm_size = "Standard_D4ds_v5", node_count = 2 }
-swarm_pool    = { vm_size = "Standard_D4ds_v5", node_count = 1 }
+system_pool    = { vm_size = "Standard_D2ds_v5", min_count = 1, max_count = 3 }
+istio_revision = "asm-1-30" # Check regional availability with az aks mesh get-revisions.
+services_pool  = { vm_size = "Standard_D4ds_v5", node_count = 3 }
+swarm_pool     = { vm_size = "Standard_D4ds_v5", node_count = 2 }
 # Who the alert on denied egress from the PilotSwarm pool emails.
 alert_emails = []
 # For agents that your subscription installs on every node: hosts that every

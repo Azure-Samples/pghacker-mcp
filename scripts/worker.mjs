@@ -4,7 +4,8 @@
 // The AKS deployment's PilotSwarm worker, on the PilotSwarm node pool. It runs
 // every session's turns, the crawl's extraction and deduplication and the
 // portal's, with the agents' built-in shell. Its pod holds no Azure or
-// Kubernetes token and no secret but pgh_swarm's password, and its
+// Kubernetes API token in the application container, and no secret but
+// pgh_swarm's password. The sidecar has an audience-bound mesh identity token. Its
 // NetworkPolicy and the firewall let it reach only the indexer, pghacker-mcp's
 // internal listener, the token proxy and its database (deploy/README.md,
 // "The cluster").

@@ -26,8 +26,10 @@ export async function reach(url, { timeoutMs = 5000, headers = {}, fetchImpl = f
   const at = Date.now();
   try {
     const response = await fetchImpl(url, { headers, redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-    await response.arrayBuffer();
-    return { answered: true, status: response.status, ms: Date.now() - at };
+    const body = await response.text();
+    const proxyDenied = response.status === 503 && response.headers.get("server") === "envoy"
+      && body.startsWith("upstream connect error or disconnect/reset before headers.");
+    return { answered: true, status: response.status, ...(proxyDenied ? { proxyDenied: true } : {}), ms: Date.now() - at };
   } catch (error) {
     const code = String(error.cause?.code ?? (error.name === "TimeoutError" ? "timeout" : error.message));
     return { answered: isCertificateError(code), error: code.slice(0, 200), ms: Date.now() - at };

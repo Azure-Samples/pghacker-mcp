@@ -10,6 +10,8 @@ import {
   kubectlCommand, podSpec, renderJob, renderManifests, revisionOf, rolloutState, shellQuote, toYaml,
 } from "../scripts/lib/aks.mjs";
 import { APP_ROOT } from "../scripts/lib/config.mjs";
+import { MESH_ACCESS } from "../scripts/lib/mesh.mjs";
+import { meshCheckCases, renderMeshCheckJob } from "../scripts/lib/mesh-check.mjs";
 
 /** Terraform's kubernetes output (deploy/terraform/outputs.tf), for an example deployment. */
 const OUTPUTS = {
@@ -24,6 +26,7 @@ const OUTPUTS = {
   seed_image: null,
   pool_label: "pghacker.io/pool",
   swarm_taint: { key: "pghacker.io/pool", value: "swarm", effect: "NoSchedule" },
+  mesh: { revision: "asm-1-30" },
   identities: {
     proxy: { client_id: "11111111-0000-4000-8000-000000000001", service_account: "token-proxy", secrets: [] },
     indexer: { client_id: "11111111-0000-4000-8000-000000000002", service_account: "indexer", secrets: ["pgh-indexer-password"] },
@@ -164,6 +167,107 @@ test("the PilotSwarm pool runs the portal and the agents alone; every other pod 
   }
 });
 
+test("every deployment and job enrolls in the explicit mesh revision without relaxing Pod Security", () => {
+  const objects = everything();
+  assert.equal(objects.find((o) => o.kind === "Namespace").metadata.labels["istio.io/rev"], OUTPUTS.mesh.revision);
+  for (const object of objects.filter(podSpec)) {
+    const { labels, annotations } = object.spec.template.metadata;
+    assert.equal(labels["istio.io/rev"], OUTPUTS.mesh.revision, object.metadata.name);
+    assert.equal(annotations["sidecar.istio.io/inject"], "true");
+    assert.equal(annotations["sidecar.istio.io/nativeSidecar"], "true");
+    assert.equal(annotations["sidecar.istio.io/rewriteAppHTTPProbers"], "true");
+    assert.equal(JSON.parse(annotations["proxy.istio.io/config"]).holdApplicationUntilProxyStarts, true);
+  }
+  for (const revision of [undefined, "", "asm-1-29", "latest", "asm-1-30; echo unsafe"]) {
+    assert.throws(() => renderManifests({ ...OUTPUTS, mesh: { revision } }), /mesh.revision/);
+  }
+  const updated = renderManifests({ ...OUTPUTS, mesh: { revision: "asm-1-31" } });
+  assert.equal(updated.find((o) => o.kind === "Deployment").spec.template.metadata.labels["istio.io/rev"], "asm-1-31");
+  for (const service of objects.filter((o) => o.kind === "Service" && o.metadata.name !== "edge")) {
+    for (const port of service.spec.ports) {
+      const proxied = service.metadata.name === "home" || service.metadata.name === "portal"
+        || (service.metadata.name === "mcp" && port.port === 3102);
+      assert.equal(port.appProtocol, proxied ? "tcp" : "http");
+      if (proxied) assert.ok(port.name.startsWith("tcp-"));
+    }
+  }
+});
+
+test("mesh policy requires strict TLS and exact authenticated callers on each destination port", () => {
+  const infra = renderManifests(OUTPUTS, { stage: "infra" });
+  const strict = infra.find((o) => o.kind === "PeerAuthentication" && o.metadata.name === "strict-mtls");
+  assert.deepEqual(strict.spec, { mtls: { mode: "STRICT" } });
+  const edge = infra.find((o) => o.kind === "PeerAuthentication" && o.metadata.name === "edge-ingress");
+  assert.deepEqual(edge.spec, {
+    selector: { matchLabels: { "app.kubernetes.io/name": "edge" } },
+    mtls: { mode: "STRICT" }, portLevelMtls: { 8080: { mode: "DISABLE" } },
+  });
+  assert.equal(infra.filter((o) => o.kind === "PeerAuthentication").length, 2);
+  const policies = infra.filter((o) => o.kind === "AuthorizationPolicy");
+  assert.deepEqual(policies.find((o) => o.metadata.name === "default-deny").spec, {});
+  const expected = [
+    ["home", 3104, ["edge"]], ["mcp", 3102, ["edge"]], ["mcp", 3103, ["swarm"]],
+    ["portal", 3001, ["edge"]], ["indexer", 3101, ["swarm"]],
+    ["token-proxy", 3110, ["swarm", "indexer", "mcp", "ops"]], ["token-proxy", 3111, ["mcp", "home"]],
+  ];
+  assert.deepEqual(MESH_ACCESS.map(({ service, port, callers }) => [service, port, callers]), expected);
+  const actual = policies.filter((o) => o.metadata.name.startsWith("allow-")).flatMap((policy) =>
+    policy.spec.rules.map((rule) => [
+      policy.spec.selector.matchLabels["app.kubernetes.io/name"], Number(rule.to[0].operation.ports[0]),
+      rule.from[0].source.principals.map((principal) => {
+        assert.ok(principal.startsWith(`cluster.local/ns/${NAMESPACE}/sa/`));
+        return principal.split("/").at(-1);
+      }),
+    ]));
+  assert.deepEqual(actual.sort(), expected.sort());
+  const publicIngress = policies.find((o) => o.metadata.name === "edge-ingress");
+  assert.deepEqual(publicIngress.spec.rules, [{
+    from: [{ source: { ipBlocks: [OUTPUTS.networks.edge] } }], to: [{ operation: { ports: ["8080"] } }],
+  }]);
+  assert.equal(policies.length, 7);
+  const destinations = infra.filter((o) => o.kind === "DestinationRule");
+  assert.equal(destinations.length, 5);
+  for (const rule of destinations) {
+    assert.match(rule.spec.host, new RegExp(`^[a-z-]+\\.${NAMESPACE}\\.svc\\.cluster\\.local$`));
+    assert.deepEqual(rule.spec.trafficPolicy, { tls: { mode: "ISTIO_MUTUAL" } });
+  }
+  const policy = infra.find((o) => o.kind === "ValidatingAdmissionPolicy");
+  assert.equal(policy.spec.failurePolicy, "Fail");
+  assert.equal(policy.spec.validations.length, 1);
+  const binding = infra.find((o) => o.kind === "ValidatingAdmissionPolicyBinding");
+  assert.equal(binding.spec.policyName, policy.metadata.name);
+  assert.deepEqual(binding.spec.validationActions, ["Deny"]);
+  assert.equal(binding.spec.matchResources.namespaceSelector.matchLabels["kubernetes.io/metadata.name"], NAMESPACE);
+});
+
+test("security checks test network-permitted paths with different identities and with no proxy", () => {
+  const cases = meshCheckCases(OUTPUTS);
+  const agent = cases.find((check) => check.name === "agent");
+  const wrong = cases.find((check) => check.name === "wrong-agent");
+  const plaintext = cases.find((check) => check.name === "plaintext-agent");
+  assert.deepEqual(agent.labels, wrong.labels);
+  assert.deepEqual(agent.labels, plaintext.labels);
+  assert.equal(agent.identity, plaintext.identity);
+  assert.notEqual(agent.identity, wrong.identity);
+  for (const check of cases) {
+    const job = renderMeshCheckJob(OUTPUTS, check, "abcd1234");
+    const spec = podSpec(job);
+    assert.equal(spec.serviceAccountName, OUTPUTS.identities[check.identity].service_account);
+    assert.equal(spec.automountServiceAccountToken, false);
+    assert.equal(spec.volumes, undefined);
+    assert.equal(spec.containers[0].env, undefined);
+    assert.equal(spec.containers[0].readinessProbe.exec.command.at(-1), "process.exit(1)");
+    assert.equal(job.spec.template.metadata.annotations["sidecar.istio.io/inject"], check.plaintext ? "false" : "true");
+    assert.ok(job.spec.activeDeadlineSeconds > 0);
+    assert.notEqual(job.spec.template.metadata.labels["app.kubernetes.io/part-of"], "pghacker-mcp");
+    assert.equal(job.metadata.labels["pghacker.io/mesh-check-run"], "abcd1234");
+    assert.equal(job.spec.template.metadata.labels["pghacker.io/mesh-check-run"], "abcd1234");
+  }
+  const noUsage = { ...OUTPUTS, app_settings: {} };
+  assert.ok(meshCheckCases(noUsage).every((check) => check.requests.every(({ url }) => !url.includes(":3111"))));
+  assert.throws(() => renderMeshCheckJob(OUTPUTS, agent, "invalid/name"), /suffix/);
+});
+
 test("only the token proxy uses its workload identity's token, and no pod gets a Kubernetes API token", () => {
   const objects = everything();
   const accounts = new Map(objects.filter((o) => o.kind === "ServiceAccount").map((o) => [o.metadata.name, o]));
@@ -227,6 +331,7 @@ test("the agents reach the indexer's tools, pghacker-mcp's internal listener, th
     const { labels } = workload(objects, name);
     assert.deepEqual(new Set(egressOf(policies, labels)), new Set([
       "ns:kube-system/k8s-app=kube-dns:53",
+      "ns:aks-istio-system/app=istiod:15012",
       `app.kubernetes.io/name=indexer:${PORTS.indexer}`,
       `app.kubernetes.io/name=mcp:${PORTS.mcpInternal}`,
       `app.kubernetes.io/name=token-proxy:${PORTS.foundry}`,
@@ -448,7 +553,10 @@ test("the infra stage has everything but the app's workloads, so the edge's Priv
   assert.ok(infra.some((object) => object.kind === "PodDisruptionBudget" && object.metadata.name === "token-proxy"));
   assert.deepEqual([...new Set(app.map((object) => object.kind))].sort(), ["Deployment", "PodDisruptionBudget"]);
   assert.ok(!app.some((object) => object.metadata.name === "token-proxy"));
-  for (const object of all.slice(1)) assert.equal(object.metadata.namespace, NAMESPACE, id(object));
+  for (const object of all.slice(1)) {
+    const clusterScoped = ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"].includes(object.kind);
+    assert.equal(object.metadata.namespace, clusterScoped ? undefined : NAMESPACE, id(object));
+  }
 });
 
 test("each job runs its command with the operator's arguments; the restore runs the seed image, and needs one", () => {

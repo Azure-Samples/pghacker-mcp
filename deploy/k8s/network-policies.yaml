@@ -40,6 +40,27 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
+# Sidecars obtain certificates and configuration from the managed control plane.
+# This grants neither Kubernetes API access nor general namespace reachability.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mesh-control-plane
+  namespace: ${NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aks-istio-system
+          podSelector:
+            matchLabels:
+              app: istiod
+      ports:
+        - { protocol: TCP, port: 15012 }
+---
 # oauth2-proxy: Front Door's requests, through the Private Link Service,
 # whose NAT addresses are in the edge subnet; out to its upstreams and to
 # GitHub, for sign-in and team membership.

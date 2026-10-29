@@ -21,6 +21,7 @@ import {
   readAzureConfig, secretName, serviceOrigin,
 } from "./azure.mjs";
 import { APP_ROOT } from "./config.mjs";
+import { enrollInMesh, meshAdmission, meshPolicies, meshRevision } from "./mesh.mjs";
 
 /** Where the templates are. */
 export const MANIFESTS_DIR = path.join(APP_ROOT, "deploy", "k8s");
@@ -30,7 +31,7 @@ export const IMAGE_ROOT = "/app";
 
 /** The templates, in the order they're applied. */
 const TEMPLATES = [
-  "namespace.yaml", "network-policies.yaml", "token-proxy.yaml", "indexer.yaml", "mcp.yaml", "home.yaml",
+  "namespace.yaml", "network-policies.yaml", "mesh.yaml", "token-proxy.yaml", "indexer.yaml", "mcp.yaml", "home.yaml",
   "edge.yaml", "portal.yaml", "worker.yaml",
 ];
 
@@ -54,6 +55,8 @@ export const JOBS = {
  */
 const INFRA_KINDS = new Set([
   "Namespace", "ServiceAccount", "SecretProviderClass", "ConfigMap", "NetworkPolicy", "Service",
+  "PeerAuthentication", "AuthorizationPolicy", "DestinationRule",
+  "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
 ]);
 const INFRA_WORKLOADS = new Set([SERVICES.tokenProxy]);
 
@@ -110,6 +113,7 @@ const ENV_OF_SECRET = Object.fromEntries(Object.entries(VAULT_SECRETS).map(([nam
  * environment.
  */
 function checkOutput(outputs) {
+  meshRevision(outputs);
   for (const key of ["namespace", "image", "key_vault_name", "tenant_id", "identities", "networks", "edge", "app_settings"]) {
     if (outputs?.[key] === undefined || outputs[key] === null) throw new Error(`Terraform's kubernetes output lacks ${key}.`);
   }
@@ -303,9 +307,22 @@ export function renderManifests(outputs, { stage = "all" } = {}) {
   const classes = secretProviderClasses(outputs);
   const [namespaceObject, ...rest] = TEMPLATES.flatMap((file) => template(file, values));
   const objects = dropMissingClasses(
-    [namespaceObject, ...serviceAccounts(outputs), ...classes, modelCatalog(namespace, catalog), ...rest],
+    [namespaceObject, ...meshAdmission(outputs), ...serviceAccounts(outputs), ...classes, modelCatalog(namespace, catalog), ...meshPolicies(outputs), ...rest],
     new Set(classes.map((spc) => spc.metadata.name)),
   );
+  namespaceObject.metadata.labels["istio.io/rev"] = meshRevision(outputs);
+  for (const object of objects) enrollInMesh(object, meshRevision(outputs));
+  for (const object of objects.filter((object) => object.kind === "Service" && object.metadata.name !== "edge")) {
+    for (const port of object.spec.ports) {
+      // oauth2-proxy preserves the visitor's Host. HTTP virtual-host routing
+      // would send it to PassthroughCluster, bypassing the mTLS destination.
+      // TCP routing uses the Service address and preserves HTTP/WebSocket bytes.
+      const proxied = object.metadata.name === SERVICES.home || object.metadata.name === SERVICES.portal
+        || (object.metadata.name === SERVICES.mcp && port.port === PORTS.mcp);
+      port.appProtocol = proxied ? "tcp" : "http";
+      if (proxied) port.name = `tcp-${port.name}`;
+    }
+  }
   if (stage === "all") return objects;
   return objects.filter((object) => isInfra(object) === (stage === "infra"));
 }
@@ -321,7 +338,7 @@ export function renderJob(outputs, name, { args = [] } = {}) {
   const jobs = template("jobs.yaml", { ...values, JOB_ARGS: [...JOBS[name], ...args] });
   const job = jobs.find((object) => object.metadata.name === name);
   if (!job) throw new Error(`deploy/k8s/jobs.yaml has no job ${name}.`);
-  return dropMissingClasses([job], classes)[0];
+  return enrollInMesh(dropMissingClasses([job], classes)[0], meshRevision(outputs));
 }
 
 /** Objects as one YAML stream, for kubectl apply. */

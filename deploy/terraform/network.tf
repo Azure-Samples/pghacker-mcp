@@ -100,15 +100,34 @@ resource "azurerm_subnet_route_table_association" "nodes" {
 # priority, so that no rule added to the NSG later, such as a policy's that
 # admits HTTPS from the whole VNet, can open Foundry to it.
 resource "azurerm_network_security_group" "private_endpoints" {
+  count = var.existing_private_endpoints_nsg_name == null ? 1 : 0
+
   name                = "${var.name_prefix}-private-endpoints"
   location            = var.location
   resource_group_name = local.rg_name
   tags                = var.tags
 }
 
+moved {
+  from = azurerm_network_security_group.private_endpoints
+  to   = azurerm_network_security_group.private_endpoints[0]
+}
+
+data "azurerm_network_security_group" "private_endpoints" {
+  count = var.existing_private_endpoints_nsg_name == null ? 0 : 1
+
+  name                = var.existing_private_endpoints_nsg_name
+  resource_group_name = local.rg_name
+}
+
+locals {
+  private_endpoints_nsg_name = var.existing_private_endpoints_nsg_name == null ? azurerm_network_security_group.private_endpoints[0].name : data.azurerm_network_security_group.private_endpoints[0].name
+  private_endpoints_nsg_id   = var.existing_private_endpoints_nsg_name == null ? azurerm_network_security_group.private_endpoints[0].id : data.azurerm_network_security_group.private_endpoints[0].id
+}
+
 resource "azurerm_network_security_rule" "swarm" {
   name                        = "swarm-database-only"
-  network_security_group_name = azurerm_network_security_group.private_endpoints.name
+  network_security_group_name = local.private_endpoints_nsg_name
   resource_group_name         = local.rg_name
   priority                    = 100
   direction                   = "Inbound"
@@ -125,7 +144,7 @@ resource "azurerm_network_security_rule" "swarm" {
 
 resource "azurerm_network_security_rule" "database" {
   name                        = "database-from-services-and-swarm"
-  network_security_group_name = azurerm_network_security_group.private_endpoints.name
+  network_security_group_name = local.private_endpoints_nsg_name
   resource_group_name         = local.rg_name
   priority                    = 120
   direction                   = "Inbound"
@@ -139,7 +158,7 @@ resource "azurerm_network_security_rule" "database" {
 
 resource "azurerm_network_security_rule" "foundry" {
   name                        = "foundry-from-services"
-  network_security_group_name = azurerm_network_security_group.private_endpoints.name
+  network_security_group_name = local.private_endpoints_nsg_name
   resource_group_name         = local.rg_name
   priority                    = 110
   direction                   = "Inbound"
@@ -153,7 +172,7 @@ resource "azurerm_network_security_rule" "foundry" {
 
 resource "azurerm_network_security_rule" "deny_vnet" {
   name                        = "deny-other-vnet-traffic"
-  network_security_group_name = azurerm_network_security_group.private_endpoints.name
+  network_security_group_name = local.private_endpoints_nsg_name
   resource_group_name         = local.rg_name
   priority                    = 4000
   direction                   = "Inbound"
@@ -163,9 +182,17 @@ resource "azurerm_network_security_rule" "deny_vnet" {
   source_port_range           = "*"
   destination_address_prefix  = "*"
   destination_port_range      = "*"
+
+  depends_on = [
+    azurerm_network_security_rule.database,
+    azurerm_network_security_rule.foundry,
+    azurerm_network_security_rule.swarm,
+  ]
 }
 
 resource "azurerm_subnet_network_security_group_association" "private_endpoints" {
   subnet_id                 = azurerm_subnet.private_endpoints.id
-  network_security_group_id = azurerm_network_security_group.private_endpoints.id
+  network_security_group_id = local.private_endpoints_nsg_id
+
+  depends_on = [azurerm_network_security_rule.deny_vnet]
 }

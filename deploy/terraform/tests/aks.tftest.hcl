@@ -210,6 +210,28 @@ override_resource {
 run "cluster" {
   assert {
     condition = (
+      azurerm_kubernetes_cluster.this.service_mesh_profile[0].mode == "Istio"
+      && azurerm_kubernetes_cluster.this.service_mesh_profile[0].revisions == tolist(["asm-1-30"])
+      && !azurerm_kubernetes_cluster.this.service_mesh_profile[0].internal_ingress_gateway_enabled
+      && !azurerm_kubernetes_cluster.this.service_mesh_profile[0].external_ingress_gateway_enabled
+      && azapi_update_resource.mesh_cni.body.properties.serviceMeshProfile.istio.components.proxyRedirectionMechanism == "CNIChaining"
+      && jsonencode(azapi_update_resource.mesh_cni.body) == jsonencode({
+        properties = {
+          serviceMeshProfile = {
+            istio = {
+              components = { proxyRedirectionMechanism = "CNIChaining" }
+            }
+          }
+        }
+      })
+      && azapi_update_resource.mesh_cni.retry.interval_seconds == 15
+      && azurerm_kubernetes_cluster_node_pool.services.node_count == 3
+    )
+    error_message = "The managed mesh must have an explicit revision, CNI redirection, and no new ingress gateway."
+  }
+
+  assert {
+    condition = (
       azurerm_kubernetes_cluster.this.name == "pghacker-example-aks"
       && azurerm_kubernetes_cluster.this.node_resource_group == "pghacker-example-nodes"
       && azurerm_kubernetes_cluster.this.sku_tier == "Standard"
@@ -355,6 +377,36 @@ run "cluster" {
   }
 }
 
+run "mesh_revision_output" {
+  command = plan
+  variables {
+    istio_revision = "asm-1-31"
+  }
+  assert {
+    condition = (
+      output.kubernetes.mesh.revision == "asm-1-31"
+      && azurerm_kubernetes_cluster.this.service_mesh_profile[0].revisions == tolist(["asm-1-31"])
+    )
+    error_message = "The exact selected mesh revision must reach both the cluster and pod renderer."
+  }
+}
+
+run "mesh_requires_cni_revision" {
+  command = plan
+  variables {
+    istio_revision = "asm-1-29"
+  }
+  expect_failures = [var.istio_revision]
+}
+
+run "mesh_requires_native_sidecar_kubernetes" {
+  command = plan
+  variables {
+    kubernetes_version = "1.32.9"
+  }
+  expect_failures = [var.kubernetes_version]
+}
+
 run "network" {
   assert {
     condition = (
@@ -412,10 +464,59 @@ run "network" {
       && azurerm_network_security_rule.deny_vnet.source_address_prefix == "VirtualNetwork"
       && azurerm_network_security_rule.deny_vnet.priority > max(azurerm_network_security_rule.database.priority, azurerm_network_security_rule.foundry.priority)
       && azurerm_subnet_network_security_group_association.private_endpoints.subnet_id == azurerm_subnet.private_endpoints.id
-      && azurerm_subnet_network_security_group_association.private_endpoints.network_security_group_id == azurerm_network_security_group.private_endpoints.id
+      && azurerm_subnet_network_security_group_association.private_endpoints.network_security_group_id == azurerm_network_security_group.private_endpoints[0].id
     )
     error_message = "The private endpoints must take the database from the services and PilotSwarm pools, Foundry from the services pool alone, and nothing else from the VNet."
   }
+}
+
+run "organization_managed_private_endpoint_nsg" {
+  command = plan
+
+  variables {
+    existing_private_endpoints_nsg_name = "organization-private-endpoints"
+  }
+
+  override_data {
+    target = data.azurerm_network_security_group.private_endpoints[0]
+    values = {
+      id   = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/networkSecurityGroups/organization-private-endpoints"
+      name = "organization-private-endpoints"
+    }
+  }
+
+  assert {
+    condition = (
+      length(azurerm_network_security_group.private_endpoints) == 0
+      && azurerm_subnet_network_security_group_association.private_endpoints.network_security_group_id == data.azurerm_network_security_group.private_endpoints[0].id
+      && alltrue([
+        for rule in [
+          azurerm_network_security_rule.swarm, azurerm_network_security_rule.database,
+          azurerm_network_security_rule.foundry, azurerm_network_security_rule.deny_vnet
+        ] : rule.network_security_group_name == "organization-private-endpoints"
+      ])
+      && azurerm_network_security_rule.swarm.priority == 100
+      && azurerm_network_security_rule.swarm.access == "Deny"
+      && azurerm_network_security_rule.foundry.source_address_prefix == "10.66.0.96/27"
+    )
+    error_message = "Organization-managed NSGs must receive the same app isolation rules, without creating or replacing the group."
+  }
+}
+
+run "existing_nsg_is_a_name_not_an_id" {
+  command = plan
+  variables {
+    existing_private_endpoints_nsg_name = "/subscriptions/not-a-name"
+  }
+  expect_failures = [var.existing_private_endpoints_nsg_name]
+}
+
+run "portal_ownership_cannot_be_disabled" {
+  command = plan
+  variables {
+    app_env = { AUTHZ_ENFORCE_OWNERSHIP = "false" }
+  }
+  expect_failures = [var.app_env]
 }
 
 run "firewall" {

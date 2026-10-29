@@ -1,0 +1,50 @@
+# Internal application ports require authenticated TLS. The edge's external
+# listener alone accepts Front Door's existing Private Link ingress.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: ${NAMESPACE}
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: edge-ingress
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    8080:
+      mode: DISABLE
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: default-deny
+  namespace: ${NAMESPACE}
+spec: {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: edge-ingress
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edge
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            ipBlocks: [${EDGE_CIDR}]
+      to:
+        - operation:
+            ports: ["8080"]

@@ -165,6 +165,17 @@ variable "deployer_object_ids" {
 
 # --- Network ------------------------------------------------------------------
 
+variable "existing_private_endpoints_nsg_name" {
+  description = "An existing private-endpoints NSG in resource_group_name, when organization policy manages the subnet's association. Null creates an app-owned NSG. The same restrictive app rules are installed in either group; existing organization rules are retained."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.existing_private_endpoints_nsg_name == null ? true : can(regex("^[A-Za-z0-9]([A-Za-z0-9._-]{0,78}[A-Za-z0-9])?$", var.existing_private_endpoints_nsg_name))
+    error_message = "existing_private_endpoints_nsg_name must be an NSG name of 1 to 80 letters, digits, periods, underscores or hyphens, starting and ending with a letter or digit."
+  }
+}
+
 variable "vnet_address_space" {
   description = "The VNet's IPv4 address space, holding the firewall's, the node pools', the edge's and the private endpoints' subnets (subnet_prefixes). It mustn't overlap pod_cidr, service_cidr, or networks it may be peered with."
   type        = string
@@ -438,6 +449,23 @@ variable "kubernetes_version" {
   description = "The cluster's Kubernetes version, such as 1.34. Null takes AKS's default; the cluster then follows patch releases (automatic_upgrade_channel = patch)."
   type        = string
   default     = null
+
+  validation {
+    condition     = var.kubernetes_version == null ? true : can(regex("^1\\.(3[3-9]|[4-9][0-9])([.]|$)", var.kubernetes_version))
+    error_message = "The mesh's native sidecars require Kubernetes 1.33 or later."
+  }
+}
+
+variable "istio_revision" {
+  description = "Explicit managed Istio revision, available in the chosen region and compatible with Kubernetes. asm-1-30 or newer is required for CNI and native sidecars; check az aks mesh get-revisions before applying."
+  type        = string
+  default     = "asm-1-30"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^asm-1-([3-9][0-9])$", var.istio_revision))
+    error_message = "istio_revision must be asm-1-30 or later."
+  }
 }
 
 variable "aks_sku_tier" {
@@ -468,10 +496,10 @@ variable "system_pool" {
 }
 
 variable "services_pool" {
-  description = "The services node pool, which runs oauth2-proxy, the home page, pghacker-mcp, pghacker-indexer, the token proxy and the ops jobs: its VM size and node count."
+  description = "The services node pool, which runs oauth2-proxy, the home page, pghacker-mcp, pghacker-indexer, the token proxy and the ops jobs: its VM size and node count. Three default-sized nodes leave room for the mesh sidecars and a history job alongside the services."
   type = object({
     vm_size    = optional(string, "Standard_D4ds_v5")
-    node_count = optional(number, 2)
+    node_count = optional(number, 3)
   })
   default  = {}
   nullable = false
@@ -483,10 +511,10 @@ variable "services_pool" {
 }
 
 variable "swarm_pool" {
-  description = "The PilotSwarm node pool, tainted for PilotSwarm alone: the portal and the worker, which runs every agent session and the crawl scheduler. Its subnet gets no internet through the firewall. Its VM size and node count; the worker holds up to crawl_max_sessions Copilot CLI sessions."
+  description = "The PilotSwarm node pool, tainted for PilotSwarm alone: the portal and the worker, which runs every agent session and the crawl scheduler. Its subnet gets no internet through the firewall. Two default-sized nodes leave room for portal rolling updates and the egress probe alongside the worker and sidecars. The worker holds up to crawl_max_sessions Copilot CLI sessions."
   type = object({
     vm_size    = optional(string, "Standard_D4ds_v5")
-    node_count = optional(number, 1)
+    node_count = optional(number, 2)
   })
   default  = {}
   nullable = false
@@ -715,6 +743,7 @@ variable "app_env" {
 
   validation {
     condition = !anytrue([for name in keys(var.app_env) : startswith(name, "OAUTH2_PROXY_")]) && length(setintersection(keys(var.app_env), [
+      "AUTHZ_ENFORCE_OWNERSHIP",
       "APPLICATIONINSIGHTS_CONNECTION_STRING",
       "AZURE_CLIENT_ID",
       "PGH_INDEXER_PASSWORD",

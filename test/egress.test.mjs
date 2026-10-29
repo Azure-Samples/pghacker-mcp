@@ -79,3 +79,20 @@ test("a TCP connection that opens is a reach; one that's refused isn't", async (
   assert.equal(refused.connected, false);
   assert.ok(refused.error, "it says why");
 });
+
+test("Envoy upstream-connect failures are not mistaken for a reachable destination", async () => {
+  const result = await reach("http://metadata.invalid", {
+    fetchImpl: async () => new Response("upstream connect error or disconnect/reset before headers. connection timeout", {
+      status: 503, headers: { server: "envoy" },
+    }),
+  });
+  assert.equal(result.proxyDenied, true);
+  for (const [body, headers] of [["application unavailable", { server: "envoy" }],
+    ["upstream connect error or disconnect/reset before headers.", {}]]) {
+    const answer = await reach("http://application.invalid", {
+      fetchImpl: async () => new Response(body, { status: 503, headers }),
+    });
+    assert.equal(answer.answered, true);
+    assert.equal(answer.proxyDenied, undefined);
+  }
+});

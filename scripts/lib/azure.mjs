@@ -543,6 +543,7 @@ export function componentEnvironments(config, { namespace, revision }) {
         PORTAL_AUTH_PROXY_TRUST_HEADERS: "true",
         PORTAL_AUTHZ_DEFAULT_ROLE: config.portalRole,
         PORTAL_AUTH_ALLOW_UNAUTHENTICATED: "false",
+        AUTHZ_ENFORCE_OWNERSHIP: "true",
         WORKERS: "0",
         PORTAL_TUI_MODE: "local",
         AZURE_OAI_KEY: PLACEHOLDER_KEY,
