@@ -25,6 +25,10 @@ mock_resource "azurerm_log_analytics_workspace" {
   }
 }
 
+mock_resource "azurerm_monitor_diagnostic_setting" {
+  defaults = { log_analytics_destination_type = "" }
+}
+
 mock_resource "azurerm_container_registry" {
   defaults = {
     id           = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.ContainerRegistry/registries/examplepghacr12345"

@@ -142,7 +142,10 @@ run "waf_observes_managed_rules_with_scrubbed_security_logs" {
       !var.usage_enabled
       && azurerm_monitor_diagnostic_setting.front_door_waf.target_resource_id == azurerm_cdn_frontdoor_profile.this.id
       && azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_workspace_id == azurerm_log_analytics_workspace.this.id
-      && azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_destination_type == "AzureDiagnostics"
+      && (
+        azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_destination_type == null
+        || azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_destination_type == ""
+      )
       && length(azurerm_monitor_diagnostic_setting.front_door_waf.enabled_log) == 1
       && alltrue([
         for log in azurerm_monitor_diagnostic_setting.front_door_waf.enabled_log :
@@ -154,7 +157,7 @@ run "waf_observes_managed_rules_with_scrubbed_security_logs" {
       && azurerm_monitor_diagnostic_setting.front_door_waf.partner_solution_id == null
       && azurerm_log_analytics_workspace.this.retention_in_days == 30
     )
-    error_message = "Even with usage telemetry off, export only the profile's WAF category to the existing workspace in AzureDiagnostics, with existing retention and no other diagnostic streams or destinations."
+    error_message = "Even with usage telemetry off, export only the profile's WAF category using the implicit AzureDiagnostics default, with existing retention and no other diagnostic streams or destinations."
   }
 }
 

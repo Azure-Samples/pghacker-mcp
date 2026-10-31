@@ -130,11 +130,11 @@ resource "azurerm_cdn_frontdoor_firewall_policy" "this" {
   }
 }
 
+# ARM omits the default destination type; unset uses AzureDiagnostics.
 resource "azurerm_monitor_diagnostic_setting" "front_door_waf" {
-  name                           = "front-door-waf-logs"
-  target_resource_id             = azurerm_cdn_frontdoor_profile.this.id
-  log_analytics_workspace_id     = azurerm_log_analytics_workspace.this.id
-  log_analytics_destination_type = "AzureDiagnostics"
+  name                       = "front-door-waf-logs"
+  target_resource_id         = azurerm_cdn_frontdoor_profile.this.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
 
   enabled_log {
     category = "FrontDoorWebApplicationFirewallLog"
