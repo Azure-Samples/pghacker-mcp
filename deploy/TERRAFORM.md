@@ -2,6 +2,9 @@
 
 [`terraform/`](terraform/) deploys pghacker-mcp's infrastructure to Azure: an AKS cluster with a services pool and a tainted PilotSwarm pool, each in its own subnet, whose outbound traffic goes through Azure Firewall; a workload identity per component; HorizonDB (PostgreSQL 17) and Azure AI Foundry reached only through private endpoints; Key Vault for every secret; Application Insights for usage telemetry; and Azure Front Door Premium as the public entry, which reaches the cluster over Private Link alone: `/` is the public home page, `/mcp` the anonymous MCP endpoint, and `/portal/` the portal behind GitHub sign-in, on Front Door's own host name alone (a custom domain serves only the first two). The workloads themselves are Kubernetes manifests (`k8s/`), which `scripts/aks.mjs` renders from the `kubernetes` output and applies ([README.md](README.md)).
 
+Front Door uses a Detection-only WAF with separate security logs.
+See [WAF configuration](#front-door-waf).
+
 | Path | Contents |
 |---|---|
 | `terraform/*.tf` | The configuration: `main.tf` (resource group, registry, vault, generated secrets), `network.tf` (the VNet, its subnets and route, the private endpoints' NSG), `firewall.tf`, `aks.tf`, `identity.tf` (the workload identities and their secrets), `horizondb.tf`, `foundry.tf`, `frontdoor.tf`, `usage.tf` (usage telemetry) |
@@ -26,7 +29,11 @@ terraform validate
 terraform test
 ```
 
-The tests apply to synthetic state and never reach Azure. They cover the cluster and its pools, the subnets, the route through the firewall and its rules for each pool, the private endpoints' NSG and DNS, the workload identities and the secrets each may read, the parameter group, Foundry's network settings and deployments, the `kubernetes` output and the app's settings in it, Front Door's Private Link origin and routes, the staged first apply, and the variables' validations. `npm test` checks the manifests that the output renders (`test/aks.test.mjs`).
+All providers are mocked: tests cover infrastructure, identities, app settings,
+staged provisioning and Front Door routing/WAF without reaching Azure. Use
+`terraform test -filter=tests/frontdoor.tftest.hcl` for Front Door changes.
+Mocks do not verify live availability or redaction.
+`npm test` checks rendered manifests (`test/aks.test.mjs`).
 
 ## State
 
@@ -48,6 +55,20 @@ Copy `environments/example.tfvars` to an ignored file such as `environments/loca
 Terraform registers no resource providers. Once per subscription, someone with rights on it registers `Microsoft.ContainerService`, `Microsoft.OperationalInsights`, `Microsoft.Insights`, `Microsoft.OperationsManagement`, `Microsoft.ContainerRegistry`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity`, `Microsoft.HorizonDB`, `Microsoft.Network`, `Microsoft.CognitiveServices`, `Microsoft.Cdn` and `Microsoft.Storage` (`az provider register --namespace <namespace> --wait`).
 
 The first applies run with `create_origin = false`: everything but Front Door's origin and routes, whose Private Link Service AKS creates only once the manifests' edge Service exists. Front Door's host name is known already, which gives the GitHub OAuth App its callback URL (`terraform output -raw oauth_callback_url`). Once `../scripts/aks.mjs apply` has deployed the app, set `create_origin = true`, apply, and approve Front Door's connection (`aks.mjs approve-edge`); from then on it stays true, since false takes the site down.
+
+## Front Door WAF
+
+`frontdoor.tf` uses Detection with body inspection, Microsoft DRS 2.2 and Bot
+Manager 1.1 (`Log` actions). Empty group overrides disable `SQLI` and
+`MS-ThreatIntel-SQLI` for intentional SQL inputs; other groups remain unchanged.
+Prevention requires separate review.
+
+The `/*` association covers both hosts before the origin exists, explicitly
+waiting for the AzAPI endpoint and diagnostics. The constructed endpoint ID
+alone creates no dependency. Preview scrubbing uses seven `EqualsAny` rules
+without selectors; only WAF-match logs go from the profile to `AzureDiagnostics`,
+independently of usage telemetry. `front_door_waf_enabled = false` disables only
+evaluation, retaining associations, diagnostics and routes.
 
 ## Managed service mesh
 
@@ -106,7 +127,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `tenant_id` | `null` | The subscription's tenant, for the Azure CLI's tokens; null uses the CLI's default |
 | `location` | required | Region for everything; needs HorizonDB, AKS, Azure Firewall, Front Door Premium's Private Link origins and the models |
 | `resource_group_name` | required | Resource group Terraform creates for the deployment |
-| `name_prefix` | `"pghacker"` | Prefix of derived names (`-logs`, `-aks`, `-fw`, `-vnet`, `-egress`, `-hdb`, `-pg17-<hash>`, `-foundry`, `-afd`, `-edge-pls`, `-usage`, and `-<component>-id` for the workload identities); AKS's nodes are in `<resource_group_name>-nodes` |
+| `name_prefix` | `"pghacker"` | Resource naming prefix; WAF strips hyphens and appends `waf`. AKS's node group is `<resource_group_name>-nodes` |
 | `tags` | `{}` | Tags for every resource that takes them |
 | `acr_name` | required | Registry name, globally unique |
 | `acr_sku` | `"Premium"` | Registry SKU; only Premium, whose dedicated data endpoint the firewall admits |
@@ -114,7 +135,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `seed_image` | `null` | Corpus seed image, which the restore job runs; with null, it refuses to run |
 | `key_vault_name` | required | Vault name, globally unique |
 | `key_vault_purge_protection_enabled` | `false` | Purge protection; irreversible |
-| `log_retention_days` | `30` | Log Analytics retention, 30 to 730 |
+| `log_retention_days` | `30` | Workspace retention, 30 to 730 days, including WAF logs; table overrides may differ |
 | `usage_enabled` | `false` | Usage telemetry ([PRIVACY.md](../PRIVACY.md)): Application Insights on the logs' workspace, `usage-id-key`, and `APPLICATIONINSIGHTS_CONNECTION_STRING` for the app; false creates none of them, and the app records nothing. `AppEvents` keeps the events it already holds until their retention ends. Set `privacy_url` before turning it on |
 | `usage_daily_cap_gb` | `5` | The most usage telemetry Application Insights takes a day; it drops the rest of the day's events |
 | `usage_retention_days`, `usage_total_retention_days` | `730`, `1095` | How long usage events stay queryable (30 to 730) and are kept (up to 4383) in the `AppEvents` table |
@@ -165,6 +186,7 @@ az keyvault secret set --vault-name "$vault" --name github-client-secret --value
 | `app_env` | `{}` | More app environment variables, such as `RUST_LOG`, `PGHACKER_CRAWL`, `PGHACKER_CODE_HISTORY` and the extraction order's; can't replace the settings above or set `OAUTH2_PROXY_*`. Each component gets only those it uses (`scripts/lib/azure.mjs`) |
 | `front_door_endpoint_name` | `"pghacker"` | Front Door endpoint, `<name>-<hash>.<zone>.azurefd.net`; changing it changes the public host name |
 | `front_door_custom_domain` | `null` | Optional hostname you own, such as `mcp.example.com` or `example.com`; managed TLS, a route of its own for the home page and `/mcp` only, and the canonical public and MCP URLs. The portal and its OAuth callback stay on Front Door's host name. Set it only in ignored environment settings; DNS stays with your provider. See [Custom domains](README.md#custom-domains). |
+| `front_door_waf_enabled` | `true` | Enable Detection WAF on both hosts; false retains associations, diagnostics and routes. See [Front Door WAF](#front-door-waf) |
 
 ## Outputs
 
@@ -174,7 +196,7 @@ None is secret. `terraform output -raw <name>` prints one.
 |---|---|
 | `public_url`, `mcp_url` | Canonical URLs on the custom domain when set, otherwise Front Door's default hostname: the home page and the MCP endpoint |
 | `portal_url`, `oauth_callback_url` | On Front Door's default hostname, with or without a custom domain: the portal and the GitHub OAuth App's callback |
-| `front_door_host_name`, `front_door_id` | Front Door's host name and profile ID (`X-Azure-FDID`) |
+| `front_door_host_name`, `front_door_id` | Front Door's host name and profile resource GUID (`X-Azure-FDID`), not its ARM resource ID |
 | `front_door_custom_domain_validation` | Ownership TXT record's full `name`, `value` and token `expiration`; null without a custom domain |
 | `edge` | The edge's internal address and its Private Link Service, Front Door's origin, with its ID and resource group |
 | `subscription_id`, `resource_group_name` | Where everything is |
@@ -185,7 +207,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `aks_cluster_name`, `aks_node_resource_group` | The cluster, which `az aks command invoke` takes, and where AKS keeps its nodes, load balancers, the edge's Private Link Service and the API server's private endpoint and DNS zone |
 | `firewall_public_ip` | The address the cluster's allowed outbound traffic leaves from |
 | `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, the mesh revision, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
-| `log_analytics_workspace_id` | The logs: the app's containers' (`ContainerLogV2`), its pods with their restarts (`KubePodInventory`) and their Warning events (`KubeEvents`), and the firewall's (`AZFWApplicationRule`, `AZFWNetworkRule`) |
+| `log_analytics_workspace_id` | Workspace customer ID; WAF logs use `AzureDiagnostics`, alongside application and Azure Firewall tables |
 | `usage_app_insights_name`, `usage_app_id` | Usage telemetry's Application Insights resource and its application ID, for `az monitor app-insights query --apps`; null with `usage_enabled = false` |
 
 ## Secrets in state

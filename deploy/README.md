@@ -13,6 +13,7 @@ This deploys pghacker-mcp in production mode on Azure Kubernetes Service (AKS). 
   - Session ownership and visibility are enforced (`AUTHZ_ENFORCE_OWNERSHIP=true`).
   - The patch is pinned to the release's bundle and fails the build on any other: re-check it when upgrading PilotSwarm, and drop it once [microsoft/PilotSwarm#154](https://github.com/microsoft/PilotSwarm/issues/154) is fixed.
   - oauth2-proxy trusts no `X-Forwarded-*` header (`--reverse-proxy=false`). Front Door passes a client's on, and with them, oauth2-proxy would match its public routes against a forged `X-Forwarded-Uri` and let anyone past sign-in ([oauth2-proxy/oauth2-proxy#3506](https://github.com/oauth2-proxy/oauth2-proxy/issues/3506)). Its callback is a fixed URL, so it needs none.
+- **Front Door WAF** logs matches in Detection mode on both hosts, with SQL-injection checks disabled for intentional SQL inputs. See [WAF configuration](TERRAFORM.md#front-door-waf).
 - **Models** come from Azure AI Foundry: `gpt-6.1-sol` is the portal's default, `gpt-6-luna` runs extraction and deduplication, and `text-embedding-3-small` does embeddings. Key authentication is disabled by design: the token proxy (`scripts/token-proxy.mjs`) adds its workload identity's Entra token to each request (`scripts/lib/foundry.mjs`), and no pod holds a key. Since the agents reach the models too, the proxy forwards only the operations the app uses (the Responses API, the model list and a deployment's embeddings), removes hosted tools that reach the network (web search, remote MCP servers), and refuses a request that would have Foundry fetch a URL, such as an image's. The account itself may reach no outside host (data loss prevention).
 - **Usage telemetry**, with `usage_enabled = true`, goes to Application Insights on the logs' workspace. It's off by default: set `privacy_url` to your privacy statement before you turn it on.
   - It records an event for each request to `/mcp`: the tool, its arguments' names, its outcome and the shape of its answer, and the client. It also records each view of the home page.
@@ -207,7 +208,7 @@ The remaining commands run from `deploy/terraform` unless they say otherwise. Th
    - the AKS cluster and its three pools, and the workload identities;
    - the managed Istio mesh with CNI traffic redirection and native sidecars;
    - HorizonDB with its parameter group and private endpoint; Foundry with its three deployments and private endpoint;
-   - Key Vault and its secrets, the GitHub OAuth App's as placeholders, and Front Door, without an origin yet.
+   - Key Vault and its secrets, the GitHub OAuth App's as placeholders, and Front Door with its Detection WAF and scrubbed security diagnostics, without an origin yet.
 
    ```sh
    terraform apply -var-file=../environments/local.tfvars

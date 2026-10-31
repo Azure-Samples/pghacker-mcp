@@ -152,6 +152,10 @@ mock_resource "azurerm_cdn_frontdoor_profile" {
   }
 }
 
+mock_resource "azurerm_cdn_frontdoor_firewall_policy" {
+  defaults = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Network/frontDoorWebApplicationFirewallPolicies/pghackerexamplewaf" }
+}
+
 mock_resource "azurerm_cdn_frontdoor_custom_domain" {
   defaults = {
     id               = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/mcp-example-org"

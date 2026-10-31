@@ -74,6 +74,105 @@ resource "azurerm_cdn_frontdoor_custom_domain" "this" {
   }
 }
 
+# SQL is an intentional input: disable SQLI groups, not the whole policy.
+# Remaining rules observe first; Prevention needs a separate review.
+resource "azurerm_cdn_frontdoor_firewall_policy" "this" {
+  name                       = "${replace(var.name_prefix, "-", "")}waf"
+  resource_group_name        = local.rg_name
+  sku_name                   = azurerm_cdn_frontdoor_profile.this.sku_name
+  enabled                    = var.front_door_waf_enabled
+  mode                       = "Detection"
+  request_body_check_enabled = true
+  tags                       = var.tags
+
+  managed_rule {
+    type    = "Microsoft_DefaultRuleSet"
+    version = "2.2"
+    action  = "Log"
+
+    # An override without rule blocks disables the entire group.
+    override {
+      rule_group_name = "SQLI"
+    }
+
+    override {
+      rule_group_name = "MS-ThreatIntel-SQLI"
+    }
+  }
+
+  managed_rule {
+    type    = "Microsoft_BotManagerRuleSet"
+    version = "1.1"
+    action  = "Log"
+  }
+
+  # Preview: mask request data in logs, not in inspection or origin requests.
+  log_scrubbing {
+    enabled = true
+
+    dynamic "scrubbing_rule" {
+      for_each = toset([
+        "RequestHeaderNames",
+        "RequestCookieNames",
+        "RequestBodyJsonArgNames",
+        "RequestBodyPostArgNames",
+        "QueryStringArgNames",
+        "RequestUri",
+        "RequestIPAddress",
+      ])
+
+      content {
+        enabled        = true
+        match_variable = scrubbing_rule.value
+        operator       = "EqualsAny"
+      }
+    }
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "front_door_waf" {
+  name                           = "front-door-waf-logs"
+  target_resource_id             = azurerm_cdn_frontdoor_profile.this.id
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.this.id
+  log_analytics_destination_type = "AzureDiagnostics"
+
+  enabled_log {
+    category = "FrontDoorWebApplicationFirewallLog"
+  }
+}
+
+resource "azurerm_cdn_frontdoor_security_policy" "this" {
+  name                     = "waf"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.this.id
+
+  security_policies {
+    firewall {
+      cdn_frontdoor_firewall_policy_id = azurerm_cdn_frontdoor_firewall_policy.this.id
+
+      association {
+        patterns_to_match = ["/*"]
+
+        domain {
+          cdn_frontdoor_domain_id = local.front_door_endpoint_id
+        }
+
+        dynamic "domain" {
+          for_each = azurerm_cdn_frontdoor_custom_domain.this
+
+          content {
+            cdn_frontdoor_domain_id = domain.value.id
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    azapi_resource.front_door_endpoint,
+    azurerm_monitor_diagnostic_setting.front_door_waf,
+  ]
+}
+
 # A single origin, so no health probes, which Front Door allows only then: a
 # failed probe would have nowhere else to send requests. No session affinity
 # either: oauth2-proxy's replicas keep their sessions in its cookie.

@@ -18,7 +18,7 @@ resource "azurerm_resource_group" "this" {
   tags     = var.tags
 }
 
-# The containers' and the jobs' logs (Container Insights), and the firewall's.
+# Container Insights, Azure Firewall and Front Door WAF logs.
 resource "azurerm_log_analytics_workspace" "this" {
   name                = local.law_name
   resource_group_name = local.rg_name

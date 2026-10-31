@@ -3,8 +3,9 @@
 
 # Front Door Premium: one uncached HTTPS route for every path to the edge's
 # internal load balancer, over Private Link, once create_origin connects it,
-# and with a custom domain, a route of its own for its public paths. Every
-# provider is mocked, so runs apply to synthetic state, never to Azure.
+# and with a custom domain, a route of its own for its public paths. Its WAF
+# observes both hosts with scrubbed security logs, independently of usage
+# telemetry. Every provider is mocked; nothing here reaches Azure.
 
 variables {
   subscription_id     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -18,6 +19,7 @@ variables {
   github_org          = "contoso"
   github_team         = "pghacker-operators"
   deployer_object_ids = ["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+  tags                = { environment = "test" }
 }
 
 mock_provider "azurerm" {
@@ -68,6 +70,111 @@ run "front_door_before_the_origin" {
       && output.front_door_custom_domain_validation == null
     )
     error_message = "Without a custom domain, no domain resource, route for it or ownership TXT record should be created."
+  }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_security_policy.this.cdn_frontdoor_profile_id == azurerm_cdn_frontdoor_profile.this.id
+      && azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].cdn_frontdoor_firewall_policy_id == azurerm_cdn_frontdoor_firewall_policy.this.id
+      && azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].patterns_to_match == tolist(["/*"])
+      && [for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id] == [
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/afdEndpoints/pghacker"
+      ]
+    )
+    error_message = "The WAF must cover every path on the default endpoint before the origin exists, using the endpoint's real ID shape rather than the generic AzAPI mock ID."
+  }
+}
+
+run "waf_observes_managed_rules_with_scrubbed_security_logs" {
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_firewall_policy.this.name == "pghackerexamplewaf"
+      && azurerm_cdn_frontdoor_firewall_policy.this.resource_group_name == "pghacker-example"
+      && azurerm_cdn_frontdoor_firewall_policy.this.sku_name == "Premium_AzureFrontDoor"
+      && azurerm_cdn_frontdoor_firewall_policy.this.tags == var.tags
+      && azurerm_cdn_frontdoor_firewall_policy.this.enabled
+      && azurerm_cdn_frontdoor_firewall_policy.this.mode == "Detection"
+      && azurerm_cdn_frontdoor_firewall_policy.this.request_body_check_enabled
+    )
+    error_message = "The default-on Premium WAF must inspect bodies in Detection mode, with an alphanumeric derived name and the deployment's tags."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_firewall_policy.this.managed_rule) == 2
+      && toset([for rule in azurerm_cdn_frontdoor_firewall_policy.this.managed_rule : "${rule.type}/${rule.version}/${rule.action}"]) == toset([
+        "Microsoft_DefaultRuleSet/2.2/Log",
+        "Microsoft_BotManagerRuleSet/1.1/Log",
+      ])
+      && length(azurerm_cdn_frontdoor_firewall_policy.this.custom_rule) == 0
+      && alltrue([
+        for rule in azurerm_cdn_frontdoor_firewall_policy.this.managed_rule :
+        length(rule.exclusion) == 0
+      ])
+    )
+    error_message = "Use exactly Microsoft DRS 2.2 and Bot Manager 1.1 with Log actions, without custom bypasses, challenges, rate limits or exclusions."
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing) == 1
+      && azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing[0].enabled
+      && length(azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing[0].scrubbing_rule) == 7
+      && toset([for rule in azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing[0].scrubbing_rule : rule.match_variable]) == toset([
+        "RequestHeaderNames",
+        "RequestCookieNames",
+        "RequestBodyJsonArgNames",
+        "RequestBodyPostArgNames",
+        "QueryStringArgNames",
+        "RequestUri",
+        "RequestIPAddress",
+      ])
+      && alltrue([
+        for rule in azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing[0].scrubbing_rule :
+        rule.enabled && rule.operator == "EqualsAny" && (rule.selector == null || rule.selector == "")
+      ])
+    )
+    error_message = "Preview scrubbing must mask all supported request-value collections, full URI and client IP using enabled EqualsAny rules without selectors."
+  }
+
+  assert {
+    condition = (
+      !var.usage_enabled
+      && azurerm_monitor_diagnostic_setting.front_door_waf.target_resource_id == azurerm_cdn_frontdoor_profile.this.id
+      && azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_workspace_id == azurerm_log_analytics_workspace.this.id
+      && azurerm_monitor_diagnostic_setting.front_door_waf.log_analytics_destination_type == "AzureDiagnostics"
+      && length(azurerm_monitor_diagnostic_setting.front_door_waf.enabled_log) == 1
+      && alltrue([
+        for log in azurerm_monitor_diagnostic_setting.front_door_waf.enabled_log :
+        log.category == "FrontDoorWebApplicationFirewallLog" && (log.category_group == null || log.category_group == "")
+      ])
+      && length(azurerm_monitor_diagnostic_setting.front_door_waf.enabled_metric) == 0
+      && azurerm_monitor_diagnostic_setting.front_door_waf.storage_account_id == null
+      && azurerm_monitor_diagnostic_setting.front_door_waf.eventhub_authorization_rule_id == null
+      && azurerm_monitor_diagnostic_setting.front_door_waf.partner_solution_id == null
+      && azurerm_log_analytics_workspace.this.retention_in_days == 30
+    )
+    error_message = "Even with usage telemetry off, export only the profile's WAF category to the existing workspace in AzureDiagnostics, with existing retention and no other diagnostic streams or destinations."
+  }
+}
+
+run "sql_inputs_disable_only_sql_injection_rule_groups" {
+  assert {
+    condition = alltrue([
+      for rule in azurerm_cdn_frontdoor_firewall_policy.this.managed_rule :
+      rule.type == "Microsoft_DefaultRuleSet" ? (
+        length(rule.override) == 2
+        && toset([for group in rule.override : group.rule_group_name]) == toset([
+          "SQLI",
+          "MS-ThreatIntel-SQLI",
+        ])
+        && alltrue([
+          for group in rule.override :
+          length(group.rule) == 0 && length(group.exclusion) == 0
+        ])
+      ) : length(rule.override) == 0
+    ])
+    error_message = "SQL is an intentional input: disable the entire SQLI and Microsoft replacement groups with empty overrides, leaving all other DRS groups and Bot Manager unchanged."
   }
 }
 
@@ -151,6 +258,15 @@ run "front_door_passes_everything_through" {
     )
     error_message = "The outputs must give the home page, portal, MCP and OAuth callback URLs on Front Door's host name, and the profile's ID."
   }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_firewall_policy.this.enabled
+      && azurerm_cdn_frontdoor_firewall_policy.this.mode == "Detection"
+      && azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain[0].cdn_frontdoor_domain_id == azurerm_cdn_frontdoor_route.this[0].cdn_frontdoor_endpoint_id
+    )
+    error_message = "Creating the origin must keep Detection enabled and associate the same default endpoint that serves the route."
+  }
 }
 
 # The connection waits for its approval, which the check reports.
@@ -173,6 +289,23 @@ run "unapproved_edge_connection_is_reported" {
   }
 
   expect_failures = [check.edge_private_link_approved]
+}
+
+run "custom_domain_starts_absent" {
+  state_key = "custom"
+
+  variables {
+    create_origin = true
+  }
+
+  assert {
+    condition = (
+      length(azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain) == 1
+      && length(azurerm_cdn_frontdoor_route.this) == 1
+      && length(azurerm_cdn_frontdoor_route.public) == 0
+    )
+    error_message = "Before adding a custom domain to an existing deployment, only the default endpoint must be associated and routed."
+  }
 }
 
 run "custom_domain_serves_only_the_public_paths" {
@@ -245,6 +378,18 @@ run "custom_domain_serves_only_the_public_paths" {
     )
     error_message = "The app must use the custom canonical URL, sign users in on Front Door's host name, and accept the custom and default host names alone."
   }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].patterns_to_match == tolist(["/*"])
+      && length(azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain) == 2
+      && toset([for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id]) == toset([
+        azurerm_cdn_frontdoor_route.this[0].cdn_frontdoor_endpoint_id,
+        azurerm_cdn_frontdoor_custom_domain.this[0].id,
+      ])
+    )
+    error_message = "Adding a custom domain must associate both the default endpoint and the domain with the same WAF for all paths, without expanding the domain's routes."
+  }
 }
 
 run "custom_domain_replans" {
@@ -261,8 +406,90 @@ run "custom_domain_replans" {
       output.public_url == "https://mcp.example.org"
       && azurerm_cdn_frontdoor_route.this[0].link_to_default_domain
       && length(azurerm_cdn_frontdoor_route.public) == 1
+      && length(azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain) == 2
     )
-    error_message = "Replanning must preserve the custom canonical URL and both routes."
+    error_message = "Replanning must preserve the custom canonical URL, both routes and both WAF host associations."
+  }
+}
+
+run "disabling_waf_keeps_associations_and_routes" {
+  state_key = "custom"
+
+  variables {
+    create_origin            = true
+    front_door_custom_domain = "mcp.example.org"
+    front_door_waf_enabled   = false
+  }
+
+  assert {
+    condition = (
+      !azurerm_cdn_frontdoor_firewall_policy.this.enabled
+      && azurerm_cdn_frontdoor_firewall_policy.this.mode == "Detection"
+      && azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].cdn_frontdoor_firewall_policy_id == azurerm_cdn_frontdoor_firewall_policy.this.id
+      && toset([for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id]) == toset([
+        azurerm_cdn_frontdoor_route.this[0].cdn_frontdoor_endpoint_id,
+        azurerm_cdn_frontdoor_custom_domain.this[0].id,
+      ])
+      && length(azurerm_cdn_frontdoor_route.this) == 1
+      && length(azurerm_cdn_frontdoor_route.public) == 1
+      && azurerm_monitor_diagnostic_setting.front_door_waf.target_resource_id == azurerm_cdn_frontdoor_profile.this.id
+      && azurerm_cdn_frontdoor_firewall_policy.this.log_scrubbing[0].enabled
+    )
+    error_message = "Rollback must disable only WAF evaluation, retaining Detection settings, scrubbing, diagnostics, both host associations and routes."
+  }
+}
+
+run "reenabling_waf_restores_detection" {
+  state_key = "custom"
+
+  variables {
+    create_origin            = true
+    front_door_custom_domain = "mcp.example.org"
+  }
+
+  assert {
+    condition = (
+      azurerm_cdn_frontdoor_firewall_policy.this.enabled
+      && azurerm_cdn_frontdoor_firewall_policy.this.mode == "Detection"
+      && length(azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain) == 2
+      && length(azurerm_cdn_frontdoor_route.this) == 1
+      && length(azurerm_cdn_frontdoor_route.public) == 1
+    )
+    error_message = "Re-enabling the default-on WAF must restore Detection without replacing host associations or routes."
+  }
+}
+
+run "changing_custom_domain_updates_waf_and_route" {
+  state_key = "custom"
+
+  variables {
+    create_origin            = true
+    front_door_custom_domain = "mcp2.example.org"
+  }
+
+  # Mocks do not run the provider's replacement planning for a renamed domain.
+  plan_options {
+    replace = [azurerm_cdn_frontdoor_custom_domain.this[0]]
+  }
+
+  override_resource {
+    target = azurerm_cdn_frontdoor_custom_domain.this[0]
+    values = { id = "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/mcp2-example-org" }
+  }
+
+  assert {
+    condition = (
+      output.public_url == "https://mcp2.example.org"
+      && toset([for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id]) == toset([
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/afdEndpoints/pghacker",
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/mcp2-example-org",
+      ])
+      && azurerm_cdn_frontdoor_route.public[0].cdn_frontdoor_custom_domain_ids == toset([azurerm_cdn_frontdoor_custom_domain.this[0].id])
+      && azurerm_cdn_frontdoor_route.this[0].link_to_default_domain
+      && output.portal_url == "https://pghacker-example.mock.azurefd.net/portal/"
+      && output.oauth_callback_url == "https://pghacker-example.mock.azurefd.net/oauth2/callback"
+    )
+    error_message = "Changing the custom hostname must move its WAF association and public route, preserving the default endpoint, portal and OAuth callback."
   }
 }
 
@@ -284,8 +511,11 @@ run "removing_custom_domain_restores_defaults" {
       && output.public_url == "https://pghacker-example.mock.azurefd.net"
       && output.portal_url == "https://pghacker-example.mock.azurefd.net/portal/"
       && local.app_settings.PGHACKER_PUBLIC_HOSTS == "pghacker-example.mock.azurefd.net"
+      && [for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id] == [
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/afdEndpoints/pghacker"
+      ]
     )
-    error_message = "Removing the optional domain must remove its route and restore the default URLs and host name allowlist."
+    error_message = "Removing the optional domain must remove its route and WAF association, retaining the default endpoint's WAF, URLs and host name allowlist."
   }
 }
 
@@ -306,8 +536,14 @@ run "apex_custom_domain" {
       azurerm_cdn_frontdoor_custom_domain.this[0].name == "example-org"
       && output.public_url == "https://example.org"
       && output.front_door_custom_domain_validation.name == "_dnsauth.example.org"
+      && length(azurerm_cdn_frontdoor_origin.this) == 0
+      && length(azurerm_cdn_frontdoor_route.this) == 0
+      && toset([for domain in azurerm_cdn_frontdoor_security_policy.this.security_policies[0].firewall[0].association[0].domain : domain.cdn_frontdoor_domain_id]) == toset([
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/afdEndpoints/pghacker",
+        "/subscriptions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/resourceGroups/pghacker-example/providers/Microsoft.Cdn/profiles/pghacker-example-afd/customDomains/example-org",
+      ])
     )
-    error_message = "Apex domains must work too, with the ownership TXT record under _dnsauth at the zone root."
+    error_message = "Apex domains must have their ownership TXT record at the zone root and join WAF coverage even before the origin exists."
   }
 }
 

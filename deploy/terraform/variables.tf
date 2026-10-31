@@ -48,7 +48,7 @@ variable "resource_group_name" {
 }
 
 variable "name_prefix" {
-  description = "The prefix of the derived names: <name_prefix>-logs, -aks (with its identities, -aks-id and -aks-kubelet-id), -fw, -vnet, -egress (the route table), -hdb (HorizonDB), -pg17-<hash> (its parameter groups), -foundry (unless foundry_account_name is set), -afd (Front Door), -edge-pls and -usage, and the workload identities, <name_prefix>-<component>-id. AKS's node resource group is <resource_group_name>-nodes."
+  description = "Prefix for derived resource names (../TERRAFORM.md). WAF strips hyphens and appends waf; AKS's node group is <resource_group_name>-nodes."
   type        = string
   default     = "pghacker"
 
@@ -139,7 +139,7 @@ variable "key_vault_purge_protection_enabled" {
 }
 
 variable "log_retention_days" {
-  description = "How many days Log Analytics keeps the containers', the jobs' and the firewall's logs."
+  description = "Workspace retention for application, Azure Firewall and Front Door WAF logs; table overrides may differ."
   type        = number
   default     = 30
 
@@ -793,6 +793,13 @@ variable "app_env" {
 }
 
 # --- Front Door -------------------------------------------------------------------
+
+variable "front_door_waf_enabled" {
+  description = "Enable Detection WAF on both hosts. False retains associations, diagnostics and routes. Security logs are independent of usage_enabled; see ../README.md."
+  type        = bool
+  default     = true
+  nullable    = false
+}
 
 variable "front_door_endpoint_name" {
   description = "The Front Door endpoint's name, which begins its host name, <name>-<hash>.<zone>.azurefd.net. It remains reachable with a custom domain too. Changing it replaces the endpoint and its host name."

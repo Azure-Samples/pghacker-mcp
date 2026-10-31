@@ -184,7 +184,7 @@ output "kubernetes" {
 }
 
 output "log_analytics_workspace_id" {
-  description = "The Log Analytics workspace's customer ID, for az monitor log-analytics query: the app's containers' logs (ContainerLogV2), its pods with their restarts (KubePodInventory) and their Warning events (KubeEvents), and the firewall's (AZFWApplicationRule, AZFWNetworkRule)."
+  description = "Log Analytics customer ID for az monitor log-analytics query; includes application, Azure Firewall and Front Door WAF logs."
   value       = azurerm_log_analytics_workspace.this.workspace_id
 }
 
