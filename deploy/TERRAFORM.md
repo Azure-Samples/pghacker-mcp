@@ -97,6 +97,10 @@ null, the default, to create and use an app-owned NSG. Rule-priority conflicts f
 explicitly and must be resolved with the organization's network administrators;
 do not remove the swarm's high-priority deny rule to make an apply succeed.
 
+## Container Insights
+
+The shared module's DCR in `terraform/aks.tf` collects the app namespace's logs (`ContainerLogV2`), pods and restarts (`KubePodInventory`), and Warning events (`KubeEvents`), plus standard node and container performance metrics (`Perf`, `InsightsMetrics`) at one-minute intervals. All five streams go to the existing Log Analytics workspace. The namespace include filter and the three log, pod and event transformations remain in place; `Microsoft-Perf` and `Microsoft-InsightsMetrics` share a separate data flow without a transformation. These are standard Container Insights metrics, including memory and CPU, capacity, requests and limits, disk, network and Kubernetes metrics, not memory-only counters or managed Prometheus. This collection applies to every deployment using the module, with no change to workspace retention.
+
 ## Key Vault secrets
 
 No secret is in the manifests or in Terraform's outputs. Each component's workload identity is granted *Key Vault Secrets User* on its own secrets, one by one (`local.workloads`), and the Secrets Store CSI driver syncs them into the Kubernetes Secret `<identity>-secrets`, which the component's environment reads. Foundry's key authentication is disabled by design: the token proxy's identity is a *Cognitive Services OpenAI User* of the account, and requests tokens for it. Its outbound access is restricted with no allowed host (`outbound_network_access_restricted`, data loss prevention), so it fetches no URL for a caller. Application Insights' local authentication is off too: the same identity is a *Monitoring Metrics Publisher* of it, so `APPLICATIONINSIGHTS_CONNECTION_STRING` is a plain setting.
@@ -208,7 +212,7 @@ None is secret. `terraform output -raw <name>` prints one.
 | `aks_cluster_name`, `aks_node_resource_group` | The cluster, which `az aks command invoke` takes, and where AKS keeps its nodes, load balancers, the edge's Private Link Service and the API server's private endpoint and DNS zone |
 | `firewall_public_ip` | The address the cluster's allowed outbound traffic leaves from |
 | `kubernetes` | What `../scripts/aks.mjs` renders the manifests from: the cluster, the namespace, the images, the mesh revision, each workload identity's client ID, service account and secrets, the networks, the edge, and the app's settings, which hold no secret |
-| `log_analytics_workspace_id` | Workspace customer ID; WAF logs use `AzureDiagnostics`, alongside application and Azure Firewall tables |
+| `log_analytics_workspace_id` | Workspace customer ID; includes the app's containers' logs (`ContainerLogV2`), its pods with their restarts (`KubePodInventory`) and their Warning events (`KubeEvents`), node and container performance metrics (`Perf`, `InsightsMetrics`), Azure Firewall logs (`AZFWApplicationRule`, `AZFWNetworkRule`), and Front Door WAF logs (`AzureDiagnostics`) |
 | `usage_app_insights_name`, `usage_app_id` | Usage telemetry's Application Insights resource and its application ID, for `az monitor app-insights query --apps`; null with `usage_enabled = false` |
 
 ## Secrets in state

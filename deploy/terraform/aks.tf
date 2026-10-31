@@ -3,8 +3,8 @@
 
 # The AKS cluster, as Waldemort runs PilotSwarm, without its extras: OIDC and
 # workload identity, the Key Vault secrets provider (the Secrets Store CSI
-# driver), Container Insights (the app's namespace alone, below), and image
-# pulls by a kubelet identity of its own, made here with its role before the
+# driver), Container Insights (namespace logs and performance metrics, below),
+# and image pulls by a kubelet identity of its own, made here with its role before the
 # cluster. Its network is Azure CNI Overlay with Cilium, which enforces the
 # manifests' NetworkPolicies, and its outbound traffic goes through Azure
 # Firewall (userDefinedRouting). Its API server is private, and Entra ID
@@ -278,16 +278,25 @@ resource "azurerm_role_assignment" "deployer_aks_admin" {
 # What Container Insights' agent (oms_agent, above) collects. With managed
 # identity authentication, it collects nothing until a data collection rule is
 # associated with the cluster, which az aks enable-addons makes but the
-# oms_agent block doesn't. This one collects the app's namespace, every minute:
+# oms_agent block doesn't. This one collects every minute:
 #   ContainerLogV2    its containers' stdout and stderr
 #   KubePodInventory  its pods and containers, with their restart counts
 #   KubeEvents        their Warning events: back-offs, failed probes, evictions
+#   Perf             node and container memory, CPU, capacity, requests and limits
+#   InsightsMetrics  disk, network and Kubernetes metrics
 # The namespace setting covers neither the containers' logs nor the agent's
-# own pods and their events, so a transformation keeps each table to the
-# namespace: kubectl's output from the run command (../scripts/aks.mjs), which
+# own pods and their events, so a transformation keeps the first three tables
+# to the namespace: kubectl's output from the run command (../scripts/aks.mjs), which
 # its pods print in the aks-command namespace, stays out of the workspace.
+# The metrics flow has no transformation.
 locals {
-  container_insights_streams = ["Microsoft-ContainerLogV2", "Microsoft-KubePodInventory", "Microsoft-KubeEvents"]
+  container_insights_streams = [
+    "Microsoft-ContainerLogV2",
+    "Microsoft-KubePodInventory",
+    "Microsoft-KubeEvents",
+    "Microsoft-Perf",
+    "Microsoft-InsightsMetrics",
+  ]
 }
 
 resource "azurerm_monitor_data_collection_rule" "container_insights" {
@@ -295,7 +304,7 @@ resource "azurerm_monitor_data_collection_rule" "container_insights" {
   resource_group_name = local.rg_name
   location            = var.location
   kind                = "Linux"
-  description         = "Container Insights for ${local.aks_name}: the ${local.k8s_namespace} namespace's logs, pods and Warning events."
+  description         = "Container Insights for ${local.aks_name}: ${local.k8s_namespace} namespace logs, pods and Warning events, plus node and container performance metrics at one-minute intervals."
   tags                = var.tags
 
   destinations {
@@ -337,6 +346,11 @@ resource "azurerm_monitor_data_collection_rule" "container_insights" {
     streams       = ["Microsoft-KubeEvents"]
     destinations  = ["ciworkspace"]
     transform_kql = "source | where Namespace == '${local.k8s_namespace}'"
+  }
+
+  data_flow {
+    streams      = ["Microsoft-Perf", "Microsoft-InsightsMetrics"]
+    destinations = ["ciworkspace"]
   }
 }
 

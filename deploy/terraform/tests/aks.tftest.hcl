@@ -288,18 +288,23 @@ run "cluster" {
     error_message = "The cluster must have the Key Vault secrets provider, rotating, Container Insights on the workspace, and its own user-assigned identity."
   }
 
-  # Container Insights collects the app's namespace alone, every minute: its
-  # containers' logs, its pods with their restarts, and its Warning events. The
-  # transformations keep the run command's pods (aks-command) and the agent's
-  # own out of every table.
+  # Namespace logs, pods and Warning events stay filtered; node and container
+  # performance metrics share an untransformed flow to the same workspace.
   assert {
     condition = (
       azurerm_monitor_data_collection_rule.container_insights.kind == "Linux"
+      && azurerm_monitor_data_collection_rule.container_insights.description == "Container Insights for pghacker-example-aks: pghacker namespace logs, pods and Warning events, plus node and container performance metrics at one-minute intervals."
       && azurerm_monitor_data_collection_rule.container_insights.destinations[0].log_analytics[0].name == "ciworkspace"
       && azurerm_monitor_data_collection_rule.container_insights.destinations[0].log_analytics[0].workspace_resource_id == azurerm_log_analytics_workspace.this.id
       && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].name == "ContainerInsightsExtension"
       && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].extension_name == "ContainerInsights"
-      && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].streams == tolist(["Microsoft-ContainerLogV2", "Microsoft-KubePodInventory", "Microsoft-KubeEvents"])
+      && azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].streams == tolist([
+        "Microsoft-ContainerLogV2",
+        "Microsoft-KubePodInventory",
+        "Microsoft-KubeEvents",
+        "Microsoft-Perf",
+        "Microsoft-InsightsMetrics",
+      ])
       && jsondecode(azurerm_monitor_data_collection_rule.container_insights.data_sources[0].extension[0].extension_json) == {
         dataCollectionSettings = {
           interval               = "1m"
@@ -310,18 +315,19 @@ run "cluster" {
       }
       && tomap({
         for flow in azurerm_monitor_data_collection_rule.container_insights.data_flow :
-        join(",", flow.streams) => flow.transform_kql != null ? flow.transform_kql : ""
+        join(",", flow.streams) => flow.transform_kql
         }) == tomap({
-        "Microsoft-ContainerLogV2"   = "source | where PodNamespace == 'pghacker'"
-        "Microsoft-KubePodInventory" = "source | where Namespace == 'pghacker'"
-        "Microsoft-KubeEvents"       = "source | where Namespace == 'pghacker'"
+        "Microsoft-ContainerLogV2"                 = "source | where PodNamespace == 'pghacker'"
+        "Microsoft-KubePodInventory"               = "source | where Namespace == 'pghacker'"
+        "Microsoft-KubeEvents"                     = "source | where Namespace == 'pghacker'"
+        "Microsoft-Perf,Microsoft-InsightsMetrics" = null
       })
       && alltrue([
         for flow in azurerm_monitor_data_collection_rule.container_insights.data_flow :
         flow.destinations == tolist(["ciworkspace"]) && flow.output_stream == null
       ])
     )
-    error_message = "Container Insights' rule must collect the pghacker namespace's logs, pods and events every minute into the workspace, keeping every table to that namespace."
+    error_message = "Container Insights' rule must preserve the namespace-filtered logs, pods and events at one-minute intervals, adding Perf and InsightsMetrics in one untransformed flow to the same workspace."
   }
 
   assert {
