@@ -173,11 +173,36 @@ run "sql_inputs_disable_only_sql_injection_rule_groups" {
         ])
         && alltrue([
           for group in rule.override :
-          length(group.rule) == 0 && length(group.exclusion) == 0
+          length(group.exclusion) == 0 && alltrue([
+            for disabled_rule in group.rule :
+            !disabled_rule.enabled && disabled_rule.action == "Log" && length(disabled_rule.exclusion) == 0
+          ])
+        ])
+        && alltrue([
+          for group in rule.override :
+          group.rule_group_name == "SQLI" ? (
+            length(group.rule) == 39
+            && toset([for disabled_rule in group.rule : disabled_rule.rule_id]) == toset([
+              "942100", "942110", "942120", "942140", "942150",
+              "942160", "942170", "942180", "942190", "942200",
+              "942210", "942220", "942230", "942240", "942250",
+              "942260", "942270", "942280", "942290", "942300",
+              "942310", "942320", "942330", "942340", "942350",
+              "942360", "942361", "942370", "942380", "942390",
+              "942400", "942410", "942430", "942440", "942450",
+              "942470", "942480", "942500", "942510",
+            ])
+            ) : (
+            length(group.rule) == 6
+            && toset([for disabled_rule in group.rule : disabled_rule.rule_id]) == toset([
+              "99031001", "99031002", "99031003",
+              "99031004", "99031005", "99031006",
+            ])
+          )
         ])
       ) : length(rule.override) == 0
     ])
-    error_message = "SQL is an intentional input: disable the entire SQLI and Microsoft replacement groups with empty overrides, leaving all other DRS groups and Bot Manager unchanged."
+    error_message = "SQL is an intentional input: explicitly disable all 39 SQLI and 6 Microsoft replacement rules from DRS 2.2, leaving other DRS groups and Bot Manager unchanged."
   }
 }
 

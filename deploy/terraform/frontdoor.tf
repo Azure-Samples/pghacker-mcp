@@ -90,13 +90,45 @@ resource "azurerm_cdn_frontdoor_firewall_policy" "this" {
     version = "2.2"
     action  = "Log"
 
-    # An override without rule blocks disables the entire group.
+    # DRS 2.2: empty group overrides do not disable rules in Azure.
     override {
       rule_group_name = "SQLI"
+
+      dynamic "rule" {
+        for_each = toset([
+          "942100", "942110", "942120", "942140", "942150",
+          "942160", "942170", "942180", "942190", "942200",
+          "942210", "942220", "942230", "942240", "942250",
+          "942260", "942270", "942280", "942290", "942300",
+          "942310", "942320", "942330", "942340", "942350",
+          "942360", "942361", "942370", "942380", "942390",
+          "942400", "942410", "942430", "942440", "942450",
+          "942470", "942480", "942500", "942510",
+        ])
+
+        content {
+          rule_id = rule.value
+          enabled = false
+          action  = "Log"
+        }
+      }
     }
 
     override {
       rule_group_name = "MS-ThreatIntel-SQLI"
+
+      dynamic "rule" {
+        for_each = toset([
+          "99031001", "99031002", "99031003",
+          "99031004", "99031005", "99031006",
+        ])
+
+        content {
+          rule_id = rule.value
+          enabled = false
+          action  = "Log"
+        }
+      }
     }
   }
 

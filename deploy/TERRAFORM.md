@@ -59,8 +59,9 @@ The first applies run with `create_origin = false`: everything but Front Door's 
 ## Front Door WAF
 
 `frontdoor.tf` uses Detection with body inspection, Microsoft DRS 2.2 and Bot
-Manager 1.1 (`Log` actions). Empty group overrides disable `SQLI` and
-`MS-ThreatIntel-SQLI` for intentional SQL inputs; other groups remain unchanged.
+Manager 1.1 (`Log` actions). Explicit rule overrides disable `SQLI` and
+`MS-ThreatIntel-SQLI` for intentional SQL inputs; update their pinned rule IDs
+when upgrading DRS. Other groups remain unchanged.
 Prevention requires separate review.
 
 The `/*` association covers both hosts before the origin exists, explicitly
